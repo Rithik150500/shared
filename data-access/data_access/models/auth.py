@@ -90,11 +90,14 @@ class OtpCode(Base):
             "delivery_status IN ('pending', 'delivered', 'failed')",
             name="otp_delivery_status_check",
         ),
+        # NOTE: Postgres rejects volatile functions (NOW()) in index predicates,
+        # so this partial index only filters on used_at IS NULL. Callers that need
+        # to exclude expired rows should add `AND expires_at > NOW()` to their query.
         Index(
             "otp_codes_phone_active_idx",
             "phone",
             "created_at",
-            postgresql_where=text("used_at IS NULL AND expires_at > NOW()"),
+            postgresql_where=text("used_at IS NULL"),
         ),
         Index("otp_codes_phone_rate_limit_idx", "phone", "created_at"),
         Index(
