@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, event, func, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,14 +40,6 @@ class User(Base):
         Index("users_phone_idx", "phone", postgresql_where=text("phone IS NOT NULL")),
         Index("users_email_idx", "email", postgresql_where=text("email IS NOT NULL")),
     )
-
-
-@event.listens_for(User, "init")
-def _user_apply_python_defaults(target: User, args: tuple, kwargs: dict) -> None:
-    """Apply column Python-side defaults at instantiation (not just flush)."""
-    kwargs.setdefault("locale", "en")
-    kwargs.setdefault("timezone", "Asia/Kolkata")
-    kwargs.setdefault("is_active", True)
 
 
 class UserMunshi(Base):

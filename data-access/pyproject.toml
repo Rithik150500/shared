@@ -12,7 +12,7 @@ dependencies = [
     "alembic>=1.13,<2.0",
     "psycopg2-binary>=2.9",
     "pydantic-settings>=2.0",
-    "sentry-sdk>=1.40",
+    "sentry-sdk>=1.40,<3.0",
 ]
 
 [project.optional-dependencies]

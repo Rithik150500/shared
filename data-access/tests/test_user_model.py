@@ -20,8 +20,9 @@ def test_user_phone_unique_nullable():
     assert col.nullable is True
 
 
-def test_user_defaults():
-    u = User(phone="+919876543210")
-    assert u.locale == "en"
-    assert u.timezone == "Asia/Kolkata"
-    assert u.is_active is True
+def test_user_defaults_declared_on_columns():
+    # Defaults fire at flush time (not __init__), so assert column metadata
+    # — consistent with UserMunshi/UserNowlez tests.
+    assert User.__table__.c["locale"].default.arg == "en"
+    assert User.__table__.c["timezone"].default.arg == "Asia/Kolkata"
+    assert User.__table__.c["is_active"].default.arg is True
