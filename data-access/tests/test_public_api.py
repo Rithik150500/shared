@@ -15,7 +15,9 @@ def test_top_level_imports():
         get_session,
     )
     # Sanity check — these are real objects, not None
-    assert engine is not None
+    # Note: `engine` is the submodule; instance lives at `engine.engine`.
+    assert engine.__name__ == "data_access.engine"
+    assert engine.engine is not None
     assert get_session is not None
     assert SessionFactory is not None
     assert User.__tablename__ == "users"
