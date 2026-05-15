@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, event, func, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, event, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -73,4 +73,60 @@ class UserMunshi(Base):
     reset_re_engage_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class UserNowlez(Base):
+    __tablename__ = "users_nowlez"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+
+    tier: Mapped[str] = mapped_column(Text, nullable=False, default="free", server_default="free")
+    tier_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    monthly_chat_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    daily_chat_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    daily_chat_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    monthly_draft_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    monthly_order_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    monthly_doc_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    monthly_total_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+    onboarding_nudge_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    last_digest_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    feature_highlight_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    trial_warning_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    trial_expired_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    win_back_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+
+    referral_code: Mapped[str | None] = mapped_column(Text, unique=True, nullable=True)
+    referred_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    razorpay_customer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    razorpay_subscription_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    onboarding_state: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "users_nowlez_referral_code_idx",
+            "referral_code",
+            postgresql_where=text("referral_code IS NOT NULL"),
+        ),
     )
