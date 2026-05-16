@@ -19,17 +19,27 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
 
+# SQLite-compatibility variants: Postgres types with String fallbacks for sqlite.
+# Lets consumers (e.g. Munshi tests) use in-memory SQLite for Base.metadata.create_all().
+UUIDType = UUID(as_uuid=True).with_variant(String(36), "sqlite")
+INETType = INET().with_variant(String(45), "sqlite")
+
 
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        UUIDType,
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
+        default=uuid.uuid4,
+        # NOTE: server_default=text("gen_random_uuid()") is omitted here because
+        # SQLite errors on the literal at CREATE TABLE time. Prod schema is
+        # preserved via the Alembic baseline migration (op.create_table sets
+        # server_default explicitly). Python-side default=uuid.uuid4 covers ORM
+        # INSERTs on both Postgres and SQLite.
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        UUIDType,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -42,7 +52,7 @@ class AuthSession(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
-    ip_address: Mapped[str | None] = mapped_column(INET, nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(INETType, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
@@ -63,9 +73,14 @@ class OtpCode(Base):
     __tablename__ = "otp_codes"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        UUIDType,
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
+        default=uuid.uuid4,
+        # NOTE: server_default=text("gen_random_uuid()") is omitted here because
+        # SQLite errors on the literal at CREATE TABLE time. Prod schema is
+        # preserved via the Alembic baseline migration (op.create_table sets
+        # server_default explicitly). Python-side default=uuid.uuid4 covers ORM
+        # INSERTs on both Postgres and SQLite.
     )
     phone: Mapped[str] = mapped_column(String(20), nullable=False)
     code_hash: Mapped[str] = mapped_column(Text, nullable=False)
@@ -82,7 +97,7 @@ class OtpCode(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ip_address: Mapped[str | None] = mapped_column(INET, nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(INETType, nullable=True)
 
     __table_args__ = (
         CheckConstraint("channel IN ('whatsapp', 'sms')", name="otp_channel_check"),

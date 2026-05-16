@@ -3,20 +3,30 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, func, text
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
+
+# SQLite-compatibility variants: Postgres types with generic fallbacks for sqlite.
+# Lets consumers (e.g. Munshi tests) use in-memory SQLite for Base.metadata.create_all().
+UUIDType = UUID(as_uuid=True).with_variant(String(36), "sqlite")
+JSONBType = JSONB().with_variant(JSON(), "sqlite")
 
 
 class User(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        UUIDType,
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
+        default=uuid.uuid4,
+        # NOTE: server_default=text("gen_random_uuid()") is omitted here because
+        # SQLite errors on the literal at CREATE TABLE time. Prod schema is
+        # preserved via the Alembic baseline migration (op.create_table sets
+        # server_default explicitly). Python-side default=uuid.uuid4 covers ORM
+        # INSERTs on both Postgres and SQLite.
     )
     phone: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
     email: Mapped[str | None] = mapped_column(String(254), unique=True, nullable=True)
@@ -46,12 +56,17 @@ class UserMunshi(Base):
     __tablename__ = "users_munshi"
 
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        UUIDType,
         ForeignKey("users.id", ondelete="CASCADE"),
         primary_key=True,
     )
     current_state: Mapped[dict] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+        JSONBType,
+        nullable=False,
+        default=dict,
+        # server_default omitted: Postgres `'{}'::jsonb` cast syntax fails on
+        # SQLite. Prod schema preserves server_default via Alembic baseline.
+        # Python-side default=dict covers ORM INSERTs on both dialects.
     )
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     onboarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -60,7 +75,12 @@ class UserMunshi(Base):
     )
     re_engage_snoozed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tutorial_tips_seen: Mapped[list] = mapped_column(
-        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+        JSONBType,
+        nullable=False,
+        default=list,
+        # server_default omitted: Postgres `'[]'::jsonb` cast syntax fails on
+        # SQLite. Prod schema preserves server_default via Alembic baseline.
+        # Python-side default=list covers ORM INSERTs on both dialects.
     )
     reset_re_engage_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -72,7 +92,7 @@ class UserNowlez(Base):
     __tablename__ = "users_nowlez"
 
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        UUIDType,
         ForeignKey("users.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -99,7 +119,7 @@ class UserNowlez(Base):
 
     referral_code: Mapped[str | None] = mapped_column(Text, unique=True, nullable=True)
     referred_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
+        UUIDType,
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
@@ -108,7 +128,12 @@ class UserNowlez(Base):
     razorpay_subscription_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     onboarding_state: Mapped[dict] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+        JSONBType,
+        nullable=False,
+        default=dict,
+        # server_default omitted: Postgres `'{}'::jsonb` cast syntax fails on
+        # SQLite. Prod schema preserves server_default via Alembic baseline.
+        # Python-side default=dict covers ORM INSERTs on both dialects.
     )
 
     created_at: Mapped[datetime] = mapped_column(
