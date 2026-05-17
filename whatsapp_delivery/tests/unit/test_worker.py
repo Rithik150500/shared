@@ -220,3 +220,158 @@ def test_do_send_document_uploads_then_sends():
         brand="munshi",
     )
     assert wamid == "wamid.doc"
+
+
+# ---------------------------------------------------------------------------
+# Additional error-path coverage (Task 19.1.1 coverage uplift)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_do_send_template_5xx_propagates_transient_for_retry():
+    """A 5xx during the template send must re-raise so RQ retries."""
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(503, text="upstream boom")
+    )
+    with pytest.raises(MetaTransientError):
+        w._do_send_template(
+            to="+919999999999",
+            template_name="nowlez_signup_welcome_v1",
+            language="en_US",
+            variables={"user_name": "Asha"},
+            brand="nowlez",
+            media_bytes=None,
+            media_filename=None,
+            media_mime="application/pdf",
+            related_case_id=None,
+            related_order_id=None,
+            user_id=None,
+        )
+
+
+@respx.mock
+def test_do_send_template_24h_window_dead_letters_and_raises(caplog):
+    """Templates SHOULD bypass 24h; if we see 131047, dead-letter + re-raise."""
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(
+            400, json={"error": {"code": 131047, "message": "outside 24h"}}
+        )
+    )
+    with pytest.raises(Meta24HourWindowExpired):
+        w._do_send_template(
+            to="+919999999999",
+            template_name="nowlez_signup_welcome_v1",
+            language="en_US",
+            variables={"user_name": "Asha"},
+            brand="nowlez",
+            media_bytes=None,
+            media_filename=None,
+            media_mime="application/pdf",
+            related_case_id=None,
+            related_order_id=None,
+            user_id="u-1",
+        )
+    assert any("dead-letter" in r.message for r in caplog.records)
+
+
+@respx.mock
+def test_do_send_template_with_components_5xx_propagates_transient():
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(503, text="boom")
+    )
+    with pytest.raises(MetaTransientError):
+        w._do_send_template_with_components(
+            to="+919999999999",
+            template_name="any_template_v1",
+            language="en",
+            body_variables=["X"],
+            brand="munshi",
+            header_media_id=None,
+            button_url_variables=None,
+            user_id=None,
+        )
+
+
+@respx.mock
+def test_do_send_template_with_components_24h_dead_letters_and_raises(caplog):
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(
+            400, json={"error": {"code": 131047, "message": "outside 24h"}}
+        )
+    )
+    with pytest.raises(Meta24HourWindowExpired):
+        w._do_send_template_with_components(
+            to="+919999999999",
+            template_name="any_template_v1",
+            language="en",
+            body_variables=["X"],
+            brand="nowlez",
+            header_media_id=None,
+            button_url_variables=None,
+            user_id="u-1",
+        )
+    assert any("dead-letter" in r.message for r in caplog.records)
+
+
+def test_do_send_template_with_components_nowlez_kill_switch_short_circuits(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_NOWLEZ_DISABLED", "1")
+    out = w._do_send_template_with_components(
+        to="+919999999999",
+        template_name="any_template_v1",
+        language="en",
+        body_variables=["X"],
+        brand="nowlez",
+        header_media_id=None,
+        button_url_variables=None,
+        user_id=None,
+    )
+    assert out == ""
+
+
+def test_do_send_document_nowlez_kill_switch_short_circuits(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_NOWLEZ_DISABLED", "1")
+    out = w._do_send_document(
+        to="+919999999999",
+        document_bytes=b"%PDF-1.4\n...",
+        caption="cap",
+        filename="x.pdf",
+        brand="nowlez",
+    )
+    assert out == ""
+
+
+@respx.mock
+def test_do_send_document_5xx_propagates_transient():
+    respx.post("https://graph.facebook.com/v20.0/111/media").mock(
+        return_value=Response(503, text="boom")
+    )
+    with pytest.raises(MetaTransientError):
+        w._do_send_document(
+            to="+919999999999",
+            document_bytes=b"%PDF-1.4\n...",
+            caption="cap",
+            filename="x.pdf",
+            brand="munshi",
+        )
+
+
+@respx.mock
+def test_do_send_document_24h_dead_letters_and_raises(caplog):
+    """A 24h error on document send dead-letters (and re-raises)."""
+    respx.post("https://graph.facebook.com/v20.0/111/media").mock(
+        return_value=Response(200, json={"id": "media-doc"})
+    )
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(
+            400, json={"error": {"code": 131047, "message": "outside 24h"}}
+        )
+    )
+    with pytest.raises(Meta24HourWindowExpired):
+        w._do_send_document(
+            to="+919999999999",
+            document_bytes=b"%PDF-1.4\n...",
+            caption="cap",
+            filename="x.pdf",
+            brand="nowlez",
+        )
+    assert any("dead-letter" in r.message for r in caplog.records)

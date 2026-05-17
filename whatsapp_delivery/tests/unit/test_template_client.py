@@ -261,3 +261,87 @@ def test_send_template_with_document_legacy_method_still_works():
     assert components[0]["type"] == "header"
     assert components[0]["parameters"][0]["document"] == {"id": "media-42"}
     assert components[1]["type"] == "body"
+
+
+# ---------------------------------------------------------------------------
+# META_TEMPLATES_FALLBACK_TO_TEXT — dev-mode bypass of the template path.
+# When set, every send_template* call falls through to MetaClient.send_text
+# with a stub body. Useful in local dev / CI where templates aren't filed yet.
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_send_template_fallback_to_text_when_env_set(monkeypatch):
+    """``META_TEMPLATES_FALLBACK_TO_TEXT=1`` reroutes send_template -> send_text."""
+    monkeypatch.setenv("META_TEMPLATES_FALLBACK_TO_TEXT", "1")
+    import json
+
+    route = respx.post(_MESSAGES_URL).mock(
+        return_value=Response(200, json={"messages": [{"id": "wamid.fall1"}]})
+    )
+    wamid = _make_client().send_template(
+        to="+919999999999",
+        name="welcome_v1",
+        language="en_US",
+        variables=["Alice"],
+    )
+    assert wamid == "wamid.fall1"
+
+    body = json.loads(route.calls.last.request.content.decode())
+    # send_text payload type=text, not type=template.
+    assert body["type"] == "text"
+    assert "welcome_v1" in body["text"]["body"]
+    assert "Alice" in body["text"]["body"]
+
+
+@respx.mock
+def test_send_template_with_document_fallback_to_text(monkeypatch):
+    """The legacy with_document helper also honors the dev-mode env var."""
+    monkeypatch.setenv("META_TEMPLATES_FALLBACK_TO_TEXT", "1")
+    import json
+
+    route = respx.post(_MESSAGES_URL).mock(
+        return_value=Response(200, json={"messages": [{"id": "wamid.fall2"}]})
+    )
+    wamid = _make_client().send_template_with_document(
+        to="+919999999999",
+        name="order_judgment_v1",
+        language="en_US",
+        variables=["Smith"],
+        document_media_id="media-fallback",
+    )
+    assert wamid == "wamid.fall2"
+
+    body = json.loads(route.calls.last.request.content.decode())
+    assert body["type"] == "text"
+    # The PDF stub marker is in the rendered text so dev-mode users can
+    # see what would have been the document.
+    assert "PDF stub: media-fallback" in body["text"]["body"]
+
+
+@respx.mock
+def test_send_template_with_components_fallback_to_text(monkeypatch):
+    """send_template_with_components also honors the dev-mode env var, and
+    includes both the header media-id stub and the button URL extras."""
+    monkeypatch.setenv("META_TEMPLATES_FALLBACK_TO_TEXT", "1")
+    import json
+
+    route = respx.post(_MESSAGES_URL).mock(
+        return_value=Response(200, json={"messages": [{"id": "wamid.fall3"}]})
+    )
+    wamid = _make_client().send_template_with_components(
+        to="+919999999999",
+        name="nowlez_new_order_v1",
+        language="en_US",
+        body_variables=["Smith vs Bank"],
+        header_media_id="media-h",
+        button_url_variables=["tok-1"],
+    )
+    assert wamid == "wamid.fall3"
+
+    body = json.loads(route.calls.last.request.content.decode())
+    text = body["text"]["body"]
+    assert body["type"] == "text"
+    assert "nowlez_new_order_v1" in text
+    assert "PDF: media-h" in text
+    assert "link: tok-1" in text
