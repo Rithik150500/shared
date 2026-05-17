@@ -1,0 +1,212 @@
+# Nowlez case-event templates: high-impact updates pushed to opted-in users.
+# All 5 are en_US + hi_IN (10 filings). Used by Task 17 (preprocessing
+# WhatsApp branch on new orders / hearing changes / status changes / disposal
+# / transfer).
+#
+# Domain assumption: app.nowlez.in is the verified deep-link host. The case
+# detail route is /cases/{{case_id}}; templates with a URL button include a
+# `case_id` button_url variable that Meta interpolates into the URL suffix.
+templates:
+  # ---------------------------------------------------------------------------
+  # 1. new_order — document header (PDF attached) + URL button to case page.
+  # ---------------------------------------------------------------------------
+  - name: new_order_v1
+    full_name: nowlez_new_order_v1
+    category: UTILITY
+    languages:
+      en_US:
+        header: { type: document }
+        body: |
+          📄 New order on your case
+          *{{1}}*
+          Order date: {{2}}
+          {{3}}
+
+          This order was added to your case file on Nowlez.
+        buttons:
+          - { type: url, text: "Open in Nowlez", url: "https://app.nowlez.in/cases/{{4}}" }
+        variables:
+          - { name: case_title, position: 1, location: body }
+          - { name: order_date, position: 2, location: body }
+          - { name: order_descriptive_name, position: 3, location: body }
+          - { name: case_id, position: 4, location: button_url }
+      hi_IN:
+        header: { type: document }
+        body: |
+          📄 आपके केस पर नया आदेश
+          *{{1}}*
+          आदेश की तारीख: {{2}}
+          {{3}}
+
+          यह आदेश आपकी केस फ़ाइल में जोड़ दिया गया है।
+        buttons:
+          - { type: url, text: "Nowlez में देखें", url: "https://app.nowlez.in/cases/{{4}}" }
+        variables:
+          - { name: case_title, position: 1, location: body }
+          - { name: order_date, position: 2, location: body }
+          - { name: order_descriptive_name, position: 3, location: body }
+          - { name: case_id, position: 4, location: button_url }
+
+  # ---------------------------------------------------------------------------
+  # 2. hearing_date_change — text header + URL button.
+  # ---------------------------------------------------------------------------
+  - name: hearing_date_change_v1
+    full_name: nowlez_hearing_date_change_v1
+    category: UTILITY
+    languages:
+      en_US:
+        header: { type: text, text: "📅 Hearing date changed" }
+        body: |
+          Your case *{{1}}* hearing has been rescheduled.
+
+          New date: *{{2}}*
+          Previous date: {{3}}
+
+          Please review on Nowlez.
+        buttons:
+          - { type: url, text: "Open in Nowlez", url: "https://app.nowlez.in/cases/{{4}}" }
+        variables:
+          - { name: case_title, position: 1, location: body }
+          - { name: new_date, position: 2, location: body }
+          - { name: old_date, position: 3, location: body }
+          - { name: case_id, position: 4, location: button_url }
+      hi_IN:
+        header: { type: text, text: "📅 सुनवाई की तारीख बदली" }
+        body: |
+          आपके केस *{{1}}* की सुनवाई पुनर्निर्धारित हो गई है।
+
+          नई तारीख: *{{2}}*
+          पिछली तारीख: {{3}}
+
+          कृपया Nowlez पर देखें।
+        buttons:
+          - { type: url, text: "Nowlez में देखें", url: "https://app.nowlez.in/cases/{{4}}" }
+        variables:
+          - { name: case_title, position: 1, location: body }
+          - { name: new_date, position: 2, location: body }
+          - { name: old_date, position: 3, location: body }
+          - { name: case_id, position: 4, location: button_url }
+
+  # ---------------------------------------------------------------------------
+  # 3. status_change — text header + URL button. 4 body vars per plan §117.
+  # ---------------------------------------------------------------------------
+  - name: status_change_v1
+    full_name: nowlez_status_change_v1
+    category: UTILITY
+    languages:
+      en_US:
+        header: { type: text, text: "🔔 Case status updated" }
+        body: |
+          Your case *{{1}}* status has changed.
+
+          New status: *{{2}}*
+          Previous status: {{3}}
+          Updated on: {{4}}
+
+          Tap below for the full timeline on Nowlez.
+        buttons:
+          - { type: url, text: "Open in Nowlez", url: "https://app.nowlez.in/cases/{{5}}" }
+        variables:
+          - { name: case_title, position: 1, location: body }
+          - { name: new_status, position: 2, location: body }
+          - { name: old_status, position: 3, location: body }
+          - { name: updated_date, position: 4, location: body }
+          - { name: case_id, position: 5, location: button_url }
+      hi_IN:
+        header: { type: text, text: "🔔 केस की स्थिति बदली" }
+        body: |
+          आपके केस *{{1}}* की स्थिति बदल गई है।
+
+          नई स्थिति: *{{2}}*
+          पिछली स्थिति: {{3}}
+          अद्यतन तिथि: {{4}}
+
+          पूरी टाइमलाइन देखने के लिए नीचे टैप करें।
+        buttons:
+          - { type: url, text: "Nowlez में देखें", url: "https://app.nowlez.in/cases/{{5}}" }
+        variables:
+          - { name: case_title, position: 1, location: body }
+          - { name: new_status, position: 2, location: body }
+          - { name: old_status, position: 3, location: body }
+          - { name: updated_date, position: 4, location: body }
+          - { name: case_id, position: 5, location: button_url }
+
+  # ---------------------------------------------------------------------------
+  # 4. disposal_change — text header + URL button. 3 body vars per plan §124.
+  # ---------------------------------------------------------------------------
+  - name: disposal_change_v1
+    full_name: nowlez_disposal_change_v1
+    category: UTILITY
+    languages:
+      en_US:
+        header: { type: text, text: "🏛 Case disposed" }
+        body: |
+          Your case *{{1}}* has been disposed.
+
+          Disposal date: *{{2}}*
+          Disposal type: {{3}}
+
+          Open the case file on Nowlez for the order.
+        buttons:
+          - { type: url, text: "Open in Nowlez", url: "https://app.nowlez.in/cases/{{4}}" }
+        variables:
+          - { name: case_title, position: 1, location: body }
+          - { name: disposal_date, position: 2, location: body }
+          - { name: disposal_type, position: 3, location: body }
+          - { name: case_id, position: 4, location: button_url }
+      hi_IN:
+        header: { type: text, text: "🏛 केस का निपटारा" }
+        body: |
+          आपके केस *{{1}}* का निपटारा हो गया है।
+
+          निपटारे की तारीख: *{{2}}*
+          निपटारे का प्रकार: {{3}}
+
+          आदेश के लिए केस फ़ाइल खोलें।
+        buttons:
+          - { type: url, text: "Nowlez में देखें", url: "https://app.nowlez.in/cases/{{4}}" }
+        variables:
+          - { name: case_title, position: 1, location: body }
+          - { name: disposal_date, position: 2, location: body }
+          - { name: disposal_type, position: 3, location: body }
+          - { name: case_id, position: 4, location: button_url }
+
+  # ---------------------------------------------------------------------------
+  # 5. transfer — text header + URL button. 3 body vars per plan §125.
+  # ---------------------------------------------------------------------------
+  - name: transfer_v1
+    full_name: nowlez_transfer_v1
+    category: UTILITY
+    languages:
+      en_US:
+        header: { type: text, text: "📍 Case transferred" }
+        body: |
+          Your case *{{1}}* has been transferred.
+
+          New court: *{{2}}*
+          Previous court: {{3}}
+
+          Updated case details are now on Nowlez.
+        buttons:
+          - { type: url, text: "Open in Nowlez", url: "https://app.nowlez.in/cases/{{4}}" }
+        variables:
+          - { name: case_title, position: 1, location: body }
+          - { name: new_court, position: 2, location: body }
+          - { name: old_court, position: 3, location: body }
+          - { name: case_id, position: 4, location: button_url }
+      hi_IN:
+        header: { type: text, text: "📍 केस स्थानांतरित" }
+        body: |
+          आपका केस *{{1}}* स्थानांतरित हो गया है।
+
+          नया न्यायालय: *{{2}}*
+          पिछला न्यायालय: {{3}}
+
+          अद्यतन केस विवरण अब Nowlez पर उपलब्ध है।
+        buttons:
+          - { type: url, text: "Nowlez में देखें", url: "https://app.nowlez.in/cases/{{4}}" }
+        variables:
+          - { name: case_title, position: 1, location: body }
+          - { name: new_court, position: 2, location: body }
+          - { name: old_court, position: 3, location: body }
+          - { name: case_id, position: 4, location: button_url }

@@ -1,0 +1,83 @@
+# Munshi cause-list digest templates (M5).
+#
+# Extracted from 0705/deploy/templates_filed.yml.
+templates:
+  - name: tomorrow_causelist_v1
+    full_name: tomorrow_causelist_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "*Tomorrow's hearings on {{1}}:*\nHere are the cases on your saved portfolio listed for tomorrow:\n{{2}}\nReply with any CNR for case details."
+        variables:
+          - { name: date_label, position: 1, location: body }
+          - { name: listings_block, position: 2, location: body }
+      hi:
+        body: "*कल की सुनवाइयाँ — {{1}}:*\nनीचे आपकी सहेजी गई केसों की कल की सूची है:\n{{2}}\nकिसी भी CNR का जवाब दें केस की जानकारी के लिए।"
+        variables:
+          - { name: date_label, position: 1, location: body }
+          - { name: listings_block, position: 2, location: body }
+
+  - name: tomorrow_causelist_text_only_v1
+    full_name: tomorrow_causelist_text_only_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "*Tomorrow's hearings on {{1}}:*\nHere are the cases on your saved portfolio listed for tomorrow:\n{{2}}\nReply with any CNR for case details."
+        variables:
+          - { name: date_label, position: 1, location: body }
+          - { name: listings_block, position: 2, location: body }
+
+  - name: causelist_amendment_v1
+    full_name: causelist_amendment_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "*Cause-list amendment for {{1}}:*\nThe cause list has been updated since the last digest; the changes are:\n{{2}}\nReply with any CNR for case details."
+        variables:
+          - { name: date_label, position: 1, location: body }
+          - { name: change_summary, position: 2, location: body }
+
+  - name: weekly_causelist_full_v1
+    full_name: weekly_causelist_full_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "*Hearings this week — {{1}}:*\nHere is the full list of hearings on your saved cases for the week:\n{{2}}\nReply with any CNR for case details."
+        variables:
+          - { name: week_label, position: 1, location: body }
+          - { name: listings_block, position: 2, location: body }
+
+  - name: weekly_causelist_empty_v1
+    full_name: weekly_causelist_empty_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "*This week ({{1}}):* no hearings on your saved cases."
+        variables:
+          - { name: week_label, position: 1, location: body }
+
+  # ---------------------------------------------------------------------------
+  # M5 + M6: document-header variants. Bot uploads the digest PDF via
+  # MetaClient.upload_media right before send so it arrives inline.
+  # ---------------------------------------------------------------------------
+  - name: tomorrow_causelist_pdf_v1
+    full_name: tomorrow_causelist_pdf_v1
+    category: UTILITY
+    languages:
+      en:
+        header: { type: document }
+        body: "*Tomorrow's hearings ({{1}}):*\n{{2}} cases listed. PDF attached above."
+        variables:
+          - { name: date_label, position: 1, location: body }
+          - { name: count, position: 2, location: body }
+
+  - name: weekly_causelist_pdf_v1
+    full_name: weekly_causelist_pdf_v1
+    category: UTILITY
+    languages:
+      en:
+        header: { type: document }
+        body: "*Hearings this week ({{1}}):*\n{{2}} hearings across your saved cases. PDF attached above."
+        variables:
+          - { name: week_label, position: 1, location: body }
+          - { name: count, position: 2, location: body }

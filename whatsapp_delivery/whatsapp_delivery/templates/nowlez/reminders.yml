@@ -1,0 +1,82 @@
+# Nowlez scheduled-reminder templates: 2 templates × 2 langs = 4 filings.
+# Used by Task 19 (scheduler cron jobs: tomorrow_hearings @ 9 AM IST and
+# weekly_summary on Mondays).
+#
+# Neither template has a button URL variable — the URLs are fixed deep
+# links into the user's calendar / dashboard. That keeps the templates
+# parametrically simple and reduces the variable count Meta has to review.
+templates:
+  # ---------------------------------------------------------------------------
+  # 6. tomorrow_hearings — daily 9 AM IST cron, sent only to users with at
+  #    least one hearing tomorrow.
+  # ---------------------------------------------------------------------------
+  - name: tomorrow_hearings_v1
+    full_name: nowlez_tomorrow_hearings_v1
+    category: UTILITY
+    languages:
+      en_US:
+        header: { type: text, text: "📅 Tomorrow's hearings" }
+        body: |
+          You have *{{1}}* hearing(s) tomorrow:
+
+          {{2}}
+
+          Open the Nowlez calendar for time slots and court rooms.
+        buttons:
+          - { type: url, text: "Open calendar", url: "https://app.nowlez.in/calendar" }
+        variables:
+          - { name: count, position: 1, location: body }
+          - { name: formatted_list, position: 2, location: body }
+      hi_IN:
+        header: { type: text, text: "📅 कल की सुनवाइयाँ" }
+        body: |
+          कल आपकी *{{1}}* सुनवाइयाँ हैं:
+
+          {{2}}
+
+          समय और कोर्ट रूम के लिए Nowlez कैलेंडर खोलें।
+        buttons:
+          - { type: url, text: "कैलेंडर खोलें", url: "https://app.nowlez.in/calendar" }
+        variables:
+          - { name: count, position: 1, location: body }
+          - { name: formatted_list, position: 2, location: body }
+
+  # ---------------------------------------------------------------------------
+  # 7. weekly_summary — Mondays 9 AM IST. 3 numeric body vars.
+  # ---------------------------------------------------------------------------
+  - name: weekly_summary_v1
+    full_name: nowlez_weekly_summary_v1
+    category: UTILITY
+    languages:
+      en_US:
+        header: { type: text, text: "📊 Your weekly summary" }
+        body: |
+          Last week on your saved cases:
+
+          • New orders: *{{1}}*
+          • Hearings completed: *{{2}}*
+          • Hearings scheduled this week: *{{3}}*
+
+          Tap below to open your Nowlez dashboard.
+        buttons:
+          - { type: url, text: "Open dashboard", url: "https://app.nowlez.in/dashboard" }
+        variables:
+          - { name: new_orders_count, position: 1, location: body }
+          - { name: hearings_completed, position: 2, location: body }
+          - { name: hearings_scheduled, position: 3, location: body }
+      hi_IN:
+        header: { type: text, text: "📊 आपका साप्ताहिक सारांश" }
+        body: |
+          पिछले हफ्ते आपकी सहेजी गई केसों पर:
+
+          • नए आदेश: *{{1}}*
+          • पूरी हुई सुनवाइयाँ: *{{2}}*
+          • इस हफ्ते निर्धारित सुनवाइयाँ: *{{3}}*
+
+          अपना Nowlez डैशबोर्ड खोलने के लिए नीचे टैप करें।
+        buttons:
+          - { type: url, text: "डैशबोर्ड खोलें", url: "https://app.nowlez.in/dashboard" }
+        variables:
+          - { name: new_orders_count, position: 1, location: body }
+          - { name: hearings_completed, position: 2, location: body }
+          - { name: hearings_scheduled, position: 3, location: body }

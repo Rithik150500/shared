@@ -1,0 +1,119 @@
+# Nowlez utility templates: lifecycle / consent / test responses.
+#
+# Plan deviation note: plan §117 inventory header says "21 nowlez_*" and
+# explicitly states "Languages = 10 × 2 + 1 = 21 filings" — i.e. 11
+# distinct templates, of which test_smoke is en_US-only. The same plan's
+# table at §117 mistakenly lists 12 templates (the 11 we file here +
+# `nowlez_unknown_action_v1`). The arithmetic in line 134 and the registry
+# test at §7.3.1 (asserting `len(distinct) == 11`, `total_filings == 21`)
+# both agree on 11, so we omit `nowlez_unknown_action_v1` — the unknown-
+# action UX is covered by a free-text reply inside the 24h window, which
+# does not require a UTILITY template.
+#
+# Filings in this file:
+#   stop_confirmation × 2  + signup_welcome × 2 + resumed × 2 + test_smoke × 1
+#   = 7 filings (4 distinct templates).
+#
+# Combined with events.yml (10 filings, 5 templates) and reminders.yml
+# (4 filings, 2 templates) the registry holds 21 nowlez_* filings across
+# 11 distinct templates — exactly what the loader test in
+# tests/unit/test_template_registry.py asserts.
+templates:
+  # ---------------------------------------------------------------------------
+  # 8. stop_confirmation — sent right after STOP-keyword opt-out (Task 16).
+  # ---------------------------------------------------------------------------
+  - name: stop_confirmation_v1
+    full_name: nowlez_stop_confirmation_v1
+    category: UTILITY
+    languages:
+      en_US:
+        header: { type: text, text: "✅ Notifications paused" }
+        body: |
+          You've been opted out of Nowlez WhatsApp notifications.
+
+          We won't send you any more case updates or hearing reminders. If you change your mind, you can re-enable them anytime from your settings.
+        buttons:
+          - { type: url, text: "Open settings", url: "https://app.nowlez.in/settings" }
+      hi_IN:
+        header: { type: text, text: "✅ सूचनाएँ रोक दी गईं" }
+        body: |
+          आपने Nowlez WhatsApp सूचनाओं से ऑप्ट-आउट कर दिया है।
+
+          हम आपको और केस अपडेट या सुनवाई रिमाइंडर नहीं भेजेंगे। यदि आप मन बदलें, तो सेटिंग्स से कभी भी पुनः सक्षम कर सकते हैं।
+        buttons:
+          - { type: url, text: "सेटिंग्स खोलें", url: "https://app.nowlez.in/settings" }
+
+  # ---------------------------------------------------------------------------
+  # 9. signup_welcome — sent right after a successful phone-OTP signup
+  #    (Task 15). 1 body var: user_name.
+  # ---------------------------------------------------------------------------
+  - name: signup_welcome_v1
+    full_name: nowlez_signup_welcome_v1
+    category: UTILITY
+    languages:
+      en_US:
+        header: { type: text, text: "👋 Welcome to Nowlez" }
+        body: |
+          Hi *{{1}}*, welcome to Nowlez!
+
+          You'll now get WhatsApp updates when your cases see new orders, hearing changes, or other important events. You can manage which notifications you receive at any time.
+        buttons:
+          - { type: url, text: "Notification settings", url: "https://app.nowlez.in/settings" }
+        variables:
+          - { name: user_name, position: 1, location: body }
+      hi_IN:
+        header: { type: text, text: "👋 Nowlez में आपका स्वागत है" }
+        body: |
+          नमस्ते *{{1}}*, Nowlez में आपका स्वागत है!
+
+          अब जब भी आपके केसों में नया आदेश, सुनवाई परिवर्तन या अन्य महत्वपूर्ण घटनाएँ हों, आपको WhatsApp पर सूचनाएँ मिलेंगी। आप कौन-सी सूचनाएँ प्राप्त करते हैं, इसे कभी भी प्रबंधित कर सकते हैं।
+        buttons:
+          - { type: url, text: "सूचना सेटिंग्स", url: "https://app.nowlez.in/settings" }
+        variables:
+          - { name: user_name, position: 1, location: body }
+
+  # ---------------------------------------------------------------------------
+  # 11. resumed — sent when a user re-enables notifications after opting
+  #     out (Task 15 / PATCH /me/notification-preferences with
+  #     is_re_enabling=True per plan line 2540).
+  # ---------------------------------------------------------------------------
+  - name: resumed_v1
+    full_name: nowlez_resumed_v1
+    category: UTILITY
+    languages:
+      en_US:
+        header: { type: text, text: "🔔 Notifications resumed" }
+        body: |
+          Your Nowlez WhatsApp notifications are back on.
+
+          You'll start receiving case updates and hearing reminders again. You can fine-tune which notifications you want from your settings anytime.
+        buttons:
+          - { type: url, text: "Notification settings", url: "https://app.nowlez.in/settings" }
+      hi_IN:
+        header: { type: text, text: "🔔 सूचनाएँ पुनः सक्षम" }
+        body: |
+          आपकी Nowlez WhatsApp सूचनाएँ फिर से चालू हो गई हैं।
+
+          अब आपको केस अपडेट और सुनवाई रिमाइंडर पुनः मिलना शुरू हो जाएँगे। कौन-सी सूचनाएँ चाहिए, इसे सेटिंग्स से कभी भी बदल सकते हैं।
+        buttons:
+          - { type: url, text: "सूचना सेटिंग्स", url: "https://app.nowlez.in/settings" }
+
+  # ---------------------------------------------------------------------------
+  # 12. test_smoke — internal canary used by Task 2 / Task 18 (smoke test
+  #     against production WABA). en_US only — never user-facing, so a
+  #     Hindi variant would just slow approval.
+  # ---------------------------------------------------------------------------
+  - name: test_smoke_v1
+    full_name: nowlez_test_smoke_v1
+    category: UTILITY
+    languages:
+      en_US:
+        header: { type: text, text: "🧪 Smoke test" }
+        body: |
+          Nowlez smoke test — please ignore.
+
+          Message: {{1}}
+        buttons:
+          - { type: url, text: "Open Nowlez", url: "https://app.nowlez.in/" }
+        variables:
+          - { name: message, position: 1, location: body }

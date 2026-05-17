@@ -1,0 +1,134 @@
+# Munshi monitoring notifications (one per DiffEvent type).
+#
+# Extracted from 0705/deploy/templates_filed.yml as part of Sub-project B's
+# move into the shared whatsapp_delivery registry. The wording is unchanged;
+# only the schema is adapted to the per-brand registry shape that's also
+# used by the nowlez_* templates.
+templates:
+  - name: new_order_v1
+    full_name: new_order_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "Case update: *{{1}}*\nA new order was posted on {{2}}. The order ID is {{3}}; tap the case in the bot to view the PDF."
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: order_date, position: 2, location: body }
+          - { name: order_id, position: 3, location: body }
+      hi:
+        body: "केस अपडेट: *{{1}}*\n{{2}} को एक नया आदेश दर्ज हुआ। आदेश आईडी {{3}} है; पीडीएफ देखने के लिए बॉट में केस पर टैप करें।"
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: order_date, position: 2, location: body }
+          - { name: order_id, position: 3, location: body }
+
+  - name: hearing_changed_v1
+    full_name: hearing_changed_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "Case update: *{{1}}*\nThe next hearing date has changed from {{2}} to {{3}}; check the bot for the updated case timeline."
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: from_date, position: 2, location: body }
+          - { name: to_date, position: 3, location: body }
+      hi:
+        body: "केस अपडेट: *{{1}}*\nअगली सुनवाई की तारीख {{2}} से बदलकर {{3}} हो गई है; अपडेटेड टाइमलाइन के लिए बॉट देखें।"
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: from_date, position: 2, location: body }
+          - { name: to_date, position: 3, location: body }
+
+  - name: amendment_detected_v1
+    full_name: amendment_detected_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "Urgent update: *{{1}}*\nThe hearing has been moved to {{2}}, which is in {{3}} day(s); the previous date was {{4}}, so plan accordingly."
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: to_date, position: 2, location: body }
+          - { name: days_to_new, position: 3, location: body }
+          - { name: from_date, position: 4, location: body }
+
+  - name: stage_changed_v1
+    full_name: stage_changed_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "Case update: *{{1}}*\nThe case stage has changed from {{2}} to {{3}}; tap the case in the bot for the full timeline."
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: from_stage, position: 2, location: body }
+          - { name: to_stage, position: 3, location: body }
+
+  - name: history_growth_v1
+    full_name: history_growth_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "Case update: *{{1}}*\nA new hearing was held on {{2}} with purpose: {{3}}; tap the case in the bot for the full timeline."
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: hearing_date, position: 2, location: body }
+          - { name: purpose, position: 3, location: body }
+
+  - name: objections_change_v1
+    full_name: objections_change_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "Case update: *{{1}}*\nThe registry has raised {{2}} objection(s); please comply by {{3}} to keep the case on track."
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: count, position: 2, location: body }
+          - { name: comply_by, position: 3, location: body }
+
+  - name: notification_fallback_v1
+    full_name: notification_fallback_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "Case update: *{{1}}*\nThere's a new update on your case; open the bot for the full details and the latest timeline."
+        variables:
+          - { name: label, position: 1, location: body }
+
+  # ---------------------------------------------------------------------------
+  # M3: order/judgment PDF send — has a document header so the bot must
+  # upload the PDF first, then reference its media_id from the template.
+  # ---------------------------------------------------------------------------
+  - name: order_judgment_v1
+    full_name: order_judgment_v1
+    category: UTILITY
+    languages:
+      en:
+        header: { type: document }
+        body: "Case update: *{{1}}*\nA new order was posted on {{2}} with ID {{3}}; the PDF is attached above for your review."
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: order_date, position: 2, location: body }
+          - { name: order_id, position: 3, location: body }
+      hi:
+        header: { type: document }
+        body: "केस अपडेट: *{{1}}*\n{{2}} को एक नया आदेश दर्ज हुआ (आईडी {{3}}); पीडीएफ ऊपर संलग्न है, कृपया देखें।"
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: order_date, position: 2, location: body }
+          - { name: order_id, position: 3, location: body }
+
+  - name: order_judgment_fallback_v1
+    full_name: order_judgment_fallback_v1
+    category: UTILITY
+    languages:
+      en:
+        body: "Case update: *{{1}}*\nA new order was posted on {{2}} with order ID {{3}}; the PDF couldn't be fetched, please open the eCourts site to view it."
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: order_date, position: 2, location: body }
+          - { name: order_id, position: 3, location: body }
+      hi:
+        body: "केस अपडेट: *{{1}}*\n{{2}} को एक नया आदेश दर्ज हुआ (आईडी {{3}}); पीडीएफ नहीं मिला, कृपया eCourts साइट पर देखें।"
+        variables:
+          - { name: label, position: 1, location: body }
+          - { name: order_date, position: 2, location: body }
+          - { name: order_id, position: 3, location: body }

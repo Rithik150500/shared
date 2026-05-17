@@ -1,0 +1,136 @@
+# Munshi onboarding re-engagement templates.
+#
+# Extracted from 0705/deploy/templates_filed.yml. The QUICK_REPLY button
+# `payload` field is rejected by Meta's API, so the button TEXT doubles as
+# the webhook button_id (see the file header in templates_filed.yml).
+templates:
+  - name: re_engage_z_v1
+    full_name: re_engage_z_v1
+    category: UTILITY
+    languages:
+      en:
+        # Bilingual body — Meta requires a single language code so we file
+        # under `en` and the body itself includes both EN and HI.
+        body: |
+          Looks like you didn't finish setup 👋
+
+          Pick a language to continue:
+          सेटअप पूरा करना भूल गए?
+          भाषा चुनें:
+        buttons:
+          - { type: quick_reply, text: "English" }
+          - { type: quick_reply, text: "हिंदी" }
+
+  - name: re_engage_a_v1
+    full_name: re_engage_a_v1
+    category: MARKETING
+    languages:
+      en:
+        body: |
+          Quick check-in 👋
+
+          *{{1}}* hearings on your calendar this week. Next: *{{2}}* on *{{3}}*.
+
+          Also *{{4}}* new orders landed on your saved cases since you last checked.
+
+          Still useful? Tap below.
+        buttons:
+          - { type: quick_reply, text: "Yes, keep me posted" }
+          - { type: quick_reply, text: "Snooze 90 days" }
+          - { type: quick_reply, text: "Stop re-engagement" }
+        variables:
+          - { name: count_week, position: 1, location: body }
+          - { name: next_label, position: 2, location: body }
+          - { name: next_date, position: 3, location: body }
+          - { name: new_orders, position: 4, location: body }
+
+  - name: re_engage_a_hi_v1
+    full_name: re_engage_a_hi_v1
+    category: MARKETING
+    languages:
+      hi:
+        body: |
+          थोड़ा हाल-चाल 👋
+
+          इस हफ्ते आपके कैलेंडर पर *{{1}}* सुनवाइयाँ हैं। अगली: *{{2}}* — *{{3}}*।
+
+          साथ ही *{{4}}* नए ऑर्डर आपकी सहेजी गई केसों पर आए हैं।
+
+          क्या यह अब भी काम का है? नीचे टैप करें।
+        buttons:
+          - { type: quick_reply, text: "हाँ, खबर देते रहो" }
+          - { type: quick_reply, text: "90 दिन के लिए बंद" }
+          - { type: quick_reply, text: "दोबारा मत पूछो" }
+        variables:
+          - { name: count_week, position: 1, location: body }
+          - { name: next_label, position: 2, location: body }
+          - { name: next_date, position: 3, location: body }
+          - { name: new_orders, position: 4, location: body }
+
+  - name: re_engage_b_v1
+    full_name: re_engage_b_v1
+    category: MARKETING
+    languages:
+      en:
+        body: |
+          How's it going?
+
+          You saved *{{1}}* {{2}} days ago. Update: {{3}}.
+
+          Want me to keep tracking? Tap below.
+        buttons:
+          - { type: quick_reply, text: "Yes, keep me posted" }
+          - { type: quick_reply, text: "Snooze 90 days" }
+          - { type: quick_reply, text: "Stop re-engagement" }
+        variables:
+          - { name: case_label, position: 1, location: body }
+          - { name: days_ago, position: 2, location: body }
+          - { name: update_summary, position: 3, location: body }
+
+  - name: re_engage_b_hi_v1
+    full_name: re_engage_b_hi_v1
+    category: MARKETING
+    languages:
+      hi:
+        body: |
+          कैसा चल रहा है?
+
+          आपने *{{1}}* {{2}} दिन पहले सहेजा था। अपडेट: {{3}}।
+
+          क्या मैं इसे ट्रैक करता रहूँ? नीचे टैप करें।
+        buttons:
+          - { type: quick_reply, text: "हाँ, खबर देते रहो" }
+          - { type: quick_reply, text: "90 दिन के लिए बंद" }
+          - { type: quick_reply, text: "दोबारा मत पूछो" }
+        variables:
+          - { name: case_label, position: 1, location: body }
+          - { name: days_ago, position: 2, location: body }
+          - { name: update_summary, position: 3, location: body }
+
+  - name: re_engage_c_v1
+    full_name: re_engage_c_v1
+    category: MARKETING
+    languages:
+      en:
+        body: |
+          Got a CNR to track?
+
+          You set up the bot a few days ago but haven't saved a case yet. To get morning hearing reminders and new-order PDFs delivered to WhatsApp, just paste a CNR here, or send /search to find one by party name.
+        buttons:
+          - { type: quick_reply, text: "Yes, keep me posted" }
+          - { type: quick_reply, text: "Snooze 90 days" }
+          - { type: quick_reply, text: "Stop re-engagement" }
+
+  - name: re_engage_c_hi_v1
+    full_name: re_engage_c_hi_v1
+    category: MARKETING
+    languages:
+      hi:
+        body: |
+          कोई CNR ट्रैक करना है?
+
+          आपने कुछ दिन पहले बॉट सेट किया था पर अभी तक कोई केस नहीं सहेजी। सुबह की सुनवाई याद-दिलाने और नए ऑर्डर PDFs पाने के लिए, बस यहाँ एक CNR पेस्ट करें — या पार्टी के नाम से ढूँढ़ने के लिए /search भेजें।
+        buttons:
+          - { type: quick_reply, text: "हाँ, खबर देते रहो" }
+          - { type: quick_reply, text: "90 दिन के लिए बंद" }
+          - { type: quick_reply, text: "दोबारा मत पूछो" }
