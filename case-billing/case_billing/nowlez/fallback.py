@@ -75,10 +75,15 @@ async def fallback_to_munshi(
 
     Side-effects (in order), gated by the Task 14 edge cases:
 
-    a. **Raced paid tier** — if ``users_nowlez.tier`` is already one of
-       (advocate/counsel/chambers), the user picked a tier after the
-       cron picked them up; no-op + audit row and return early. (See
-       :func:`apply_lapsed_trial_action`.)
+    a. **Raced paid tier with active subscription** — if
+       ``users_nowlez.tier`` is already one of (advocate/counsel/chambers)
+       AND the user holds a subscription in a billable status (``trialing``
+       / ``active`` / ``past_due``), they picked a tier after the cron
+       picked them up; no-op + audit row and return early. We *don't*
+       short-circuit when the only matching subscription is already
+       cancelled or expired because that's the subscription.cancelled-→
+       fallback path (the cancellation flow leaves ``users_nowlez.tier``
+       set but the subscription is no longer billing).
     b. **No saved cases** — if the user has zero active cases at day
        31, opening a Munshi extension would charge ₹0 every cycle. We
        skip the billing setup entirely, send the
@@ -102,31 +107,48 @@ async def fallback_to_munshi(
     extension at that point.
     """
     from data_access.models.audit import AuditLog
-    from data_access.models.billing import CaseBillingPeriod
+    from data_access.models.billing import (
+        CaseBillingPeriod, Subscription,
+    )
     from data_access.models.case import Case
     from data_access.models.user import User, UserMunshi, UserNowlez
 
     now = datetime.now(timezone.utc)
     today = date.today()
 
-    # Edge case (a): raced paid tier. If the user picked a tier between
-    # the cron's selection query and this invocation, abandon the
-    # fallback — they're already covered by Nowlez billing.
+    # Edge case (a): raced paid tier WITH an active subscription. If the
+    # user picked a tier and that subscription is still in a billable
+    # status, the fallback is the wrong action — bail and audit.
+    # We deliberately *don't* short-circuit when tier is set but the
+    # only matching subscription is cancelled/expired; that's the
+    # post-cancellation hand-off path the webhook router relies on.
     nowlez_tier = session.execute(
         select(UserNowlez.tier).where(UserNowlez.user_id == user_id)
     ).scalar_one_or_none()
     if nowlez_tier in _PAID_NOWLEZ_TIERS:
-        session.add(AuditLog(
-            event_type="nowlez.trial_fallback_noop",
-            user_id=user_id,
-            source="nowlez",
-            metadata_={
-                "reason": "user_has_paid_tier",
-                "tier": nowlez_tier,
-            },
-        ))
-        session.flush()
-        return
+        active_sub_id = session.execute(
+            select(Subscription.id)
+            .where(Subscription.user_id == user_id)
+            .where(Subscription.status.in_(
+                ("trialing", "active", "past_due"),
+            ))
+            .limit(1)
+        ).first()
+        if active_sub_id is not None:
+            session.add(AuditLog(
+                event_type="nowlez.trial_fallback_noop",
+                user_id=user_id,
+                source="nowlez",
+                metadata_={
+                    "reason": "user_has_paid_tier",
+                    "tier": nowlez_tier,
+                },
+            ))
+            session.flush()
+            return
+        # Tier is set but no active subscription — this is the
+        # post-cancellation fallback path. Fall through to the normal
+        # setup so the user keeps service via Munshi.
 
     # Edge case (b): zero saved cases. Don't open billing — there's
     # nothing to bill against — but still acknowledge the trial ended.
@@ -254,37 +276,51 @@ async def freeze_account(
     Used when the operator sets ``BillingConfig.nowlez_lapsed_trial_action='freeze_account'``
     instead of the default Munshi fallback.
 
-    Task 14 edge case: if the user already picked a paid tier (raced
-    selection), the freeze is a no-op (logged for triage) — we must
-    not disable cases for a user who is now actively paying for Nowlez.
+    Task 14 edge case: if the user already picked a paid tier AND
+    holds an active subscription (raced selection), the freeze is a
+    no-op (logged for triage) — we must not disable cases for a user
+    who is now actively paying for Nowlez. As with `fallback_to_munshi`,
+    a tier-set + cancelled-subscription combination is the post-cancel
+    hand-off path and freeze proceeds normally.
 
     Leaves ``users_nowlez.tier=None`` explicitly so the user can pick a
     tier later and be reactivated via the standard subscription flow.
     """
     from data_access.models.audit import AuditLog
-    from data_access.models.billing import CaseBillingPeriod
+    from data_access.models.billing import (
+        CaseBillingPeriod, Subscription,
+    )
     from data_access.models.case import Case
     from data_access.models.user import User, UserNowlez
 
     now = datetime.now(timezone.utc)
 
-    # Edge case: user raced into a paid tier before this cron call. Bail
-    # cleanly rather than freezing a paying customer's cases.
+    # Edge case: user raced into a paid tier WITH active subscription.
     nowlez = session.execute(
         select(UserNowlez).where(UserNowlez.user_id == user_id)
     ).scalar_one_or_none()
     if nowlez is not None and nowlez.tier in _PAID_NOWLEZ_TIERS:
-        session.add(AuditLog(
-            event_type="nowlez.trial_freeze_noop",
-            user_id=user_id,
-            source="nowlez",
-            metadata_={
-                "reason": "user_has_paid_tier",
-                "tier": nowlez.tier,
-            },
-        ))
-        session.flush()
-        return
+        active_sub_id = session.execute(
+            select(Subscription.id)
+            .where(Subscription.user_id == user_id)
+            .where(Subscription.status.in_(
+                ("trialing", "active", "past_due"),
+            ))
+            .limit(1)
+        ).first()
+        if active_sub_id is not None:
+            session.add(AuditLog(
+                event_type="nowlez.trial_freeze_noop",
+                user_id=user_id,
+                source="nowlez",
+                metadata_={
+                    "reason": "user_has_paid_tier",
+                    "tier": nowlez.tier,
+                },
+            ))
+            session.flush()
+            return
+        # Otherwise tier is set but cancelled — proceed to freeze.
 
     # Belt-and-braces: explicitly null the tier so any half-set state
     # (e.g. tier='free' legacy) resolves to "no Nowlez access".

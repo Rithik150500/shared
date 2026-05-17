@@ -263,19 +263,37 @@ def test_fallback_zero_cases_skips_billing_and_sends_no_billing_template(
     )
 
 
-def test_fallback_user_with_paid_tier_is_noop(session: Session) -> None:
-    """User raced into a paid tier between cron pickup and execution →
-    no Munshi extension created, no template sent, only audit."""
+def test_fallback_user_with_paid_tier_and_active_sub_is_noop(
+    session: Session,
+) -> None:
+    """User raced into a paid tier AND has an active subscription
+    between cron pickup and execution → no Munshi extension created,
+    no template sent, only audit.
+
+    A bare tier= without an active subscription is a different scenario
+    (cancellation hand-off) and IS allowed to fall through — see
+    `test_fallback_proceeds_when_tier_set_but_subscription_cancelled`.
+    """
     from data_access.models.audit import AuditLog
-    from data_access.models.billing import CaseBillingPeriod
+    from data_access.models.billing import (
+        CaseBillingPeriod, Subscription,
+    )
     from data_access.models.user import UserMunshi, UserNowlez
 
-    # Build the user with a paid tier (NOT trial-expired).
     user_id = _make_expired_trial_user(session)
     nowlez = session.execute(
         select(UserNowlez).where(UserNowlez.user_id == user_id)
     ).scalar_one()
     nowlez.tier = "counsel"
+    session.flush()
+    # Active subscription is the key signal — without it, fallback should
+    # proceed because the cancellation hand-off needs to work.
+    session.add(Subscription(
+        user_id=user_id, tier="counsel", billing_cycle="monthly",
+        razorpay_subscription_id="sub_racing",
+        status="active",
+        intro_promo_state="in_intro", referral_state="no_referral",
+    ))
     session.flush()
     _add_cases(session, user_id, n=20)
 
@@ -304,6 +322,53 @@ def test_fallback_user_with_paid_tier_is_noop(session: Session) -> None:
         and a.metadata_.get("tier") == "counsel"
         for a in audit
     )
+
+
+def test_fallback_proceeds_when_tier_set_but_subscription_cancelled(
+    session: Session,
+) -> None:
+    """The webhook router calls `fallback_to_munshi` after a
+    `subscription.cancelled` event fires. At that point `users_nowlez.tier`
+    still says e.g. 'counsel' (the cancellation flow doesn't null it),
+    but the subscription row's status is 'cancelled'. The fallback must
+    proceed in that case so the user keeps service via Munshi.
+    """
+    from data_access.models.billing import (
+        CaseBillingPeriod, Subscription,
+    )
+    from data_access.models.user import UserMunshi, UserNowlez
+
+    user_id = _make_expired_trial_user(session)
+    nowlez = session.execute(
+        select(UserNowlez).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+    nowlez.tier = "counsel"
+    session.flush()
+    session.add(Subscription(
+        user_id=user_id, tier="counsel", billing_cycle="monthly",
+        razorpay_subscription_id="sub_already_cancelled",
+        status="cancelled",
+        intro_promo_state="past_intro", referral_state="no_referral",
+    ))
+    session.flush()
+    _add_cases(session, user_id, n=5)
+
+    sender = AsyncMock()
+    _run(fallback_to_munshi(user_id, session, send_template_fn=sender))
+    session.flush()
+
+    munshi = session.execute(
+        select(UserMunshi).where(UserMunshi.user_id == user_id)
+    ).scalar_one()
+    assert munshi.billing_anniversary_date is not None
+
+    periods = session.execute(
+        select(CaseBillingPeriod).where(CaseBillingPeriod.user_id == user_id)
+    ).scalars().all()
+    assert len(periods) == 5
+
+    sender.assert_called_once()
+    assert sender.call_args.kwargs["template"] == "nowlez_trial_fallback_v1"
 
 
 def test_fallback_reuses_existing_munshi_extension_with_active_cases(
@@ -378,10 +443,13 @@ def test_fallback_does_not_overwrite_already_open_billing_periods(
     assert str(periods_for_first[0].id) == str(pre_existing.id)
 
 
-def test_freeze_account_with_paid_tier_is_noop(session: Session) -> None:
-    """If the user raced into paid tier, freeze must NOT disable their
-    cases — they're now a paying customer."""
+def test_freeze_account_with_paid_tier_and_active_sub_is_noop(
+    session: Session,
+) -> None:
+    """If the user raced into paid tier AND has an active subscription,
+    freeze must NOT disable their cases — they're now a paying customer."""
     from data_access.models.audit import AuditLog
+    from data_access.models.billing import Subscription
     from data_access.models.case import Case
     from data_access.models.user import UserNowlez
 
@@ -391,7 +459,14 @@ def test_freeze_account_with_paid_tier_is_noop(session: Session) -> None:
     ).scalar_one()
     nowlez.tier = "chambers"
     session.flush()
-    case_ids = _add_cases(session, user_id, n=4)
+    session.add(Subscription(
+        user_id=user_id, tier="chambers", billing_cycle="monthly",
+        razorpay_subscription_id="sub_chambers_active",
+        status="active",
+        intro_promo_state="in_intro", referral_state="no_referral",
+    ))
+    session.flush()
+    _add_cases(session, user_id, n=4)
 
     sender = AsyncMock()
     _run(freeze_account(user_id, session, send_template_fn=sender))
