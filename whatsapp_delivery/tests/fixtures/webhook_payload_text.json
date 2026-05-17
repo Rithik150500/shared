@@ -1,0 +1,72 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "123456789012345",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "919999999999",
+              "phone_number_id": "111222333"
+            },
+            "contacts": [
+              {
+                "profile": {"name": "Alice"},
+                "wa_id": "919876543210"
+              }
+            ],
+            "messages": [
+              {
+                "from": "919876543210",
+                "id": "wamid.text.001",
+                "timestamp": "1715817600",
+                "type": "text",
+                "text": {"body": "hello world"}
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "123456789012345",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "919999999999",
+              "phone_number_id": "111222333"
+            },
+            "statuses": [
+              {
+                "id": "wamid.out.001",
+                "status": "delivered",
+                "timestamp": "1715817700",
+                "recipient_id": "919876543210",
+                "conversation": {"id": "conv-001"}
+              },
+              {
+                "id": "wamid.out.002",
+                "status": "failed",
+                "timestamp": "1715817800",
+                "recipient_id": "919876543210",
+                "errors": [
+                  {
+                    "code": 131047,
+                    "title": "Re-engagement message",
+                    "message": "Message failed to send because more than 24 hours have passed."
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
