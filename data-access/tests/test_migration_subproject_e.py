@@ -220,7 +220,14 @@ def test_migration_idempotent_double_upgrade(pg_engine):
 
 
 def test_migration_down_and_reupgrade(pg_engine):
-    """downgrade by one (back to 0002) then re-upgrade to head; state matches."""
+    """downgrade past the E revision then re-upgrade to head; state matches.
+
+    The test downgrades directly to the previous E parent (``0002_add_case_tables``)
+    by target revision instead of by step-count — since sub-project B now sits
+    on top of E, a ``-1`` step would only undo B and leave E in place. Targeting
+    by revision id keeps the test's intent (E was reverted) stable as more
+    revisions land on top.
+    """
     with pg_engine.begin() as c:
         c.execute(text("DROP SCHEMA public CASCADE"))
         c.execute(text("CREATE SCHEMA public"))
@@ -229,8 +236,8 @@ def test_migration_down_and_reupgrade(pg_engine):
     tables_after_first = _existing_tables(pg_engine)
     assert set(NEW_TABLES).issubset(tables_after_first)
 
-    # Downgrade by one revision (back to 0002).
-    command.downgrade(cfg, "-1")
+    # Downgrade to the revision just before E (0002_add_case_tables).
+    command.downgrade(cfg, "0002_add_case_tables")
     tables_after_down = _existing_tables(pg_engine)
     for t in NEW_TABLES:
         assert t not in tables_after_down, (

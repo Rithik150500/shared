@@ -136,6 +136,16 @@ class UserNowlez(Base):
         # Python-side default=dict covers ORM INSERTs on both dialects.
     )
 
+    # Sub-project B: per-user WhatsApp consent flags (opt-out defaults TRUE).
+    # The STOP-keyword handler flips both to False; the Nowlez settings UI
+    # toggles them independently.
+    whatsapp_events_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    whatsapp_reminders_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
