@@ -17,6 +17,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
     func,
     text,
@@ -26,9 +27,37 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..base import Base
 
-# SQLite-compatibility variants: Postgres types with generic fallbacks for sqlite.
-# Mirrors the pattern established in user.py / auth.py / audit.py.
-UUIDType = UUID(as_uuid=True).with_variant(String(36), "sqlite")
+
+# UUID type that survives the SQLite round-trip. Sub-project D's plain
+# `UUID(...).with_variant(String(36), "sqlite")` only adjusts DDL — on read,
+# SQLite hands back a str, and identity-map lookups against an in-memory
+# UUID() instance miss (because str != UUID). This TypeDecorator coerces
+# both directions so DAO callers always see uuid.UUID regardless of dialect.
+class _UUIDType(TypeDecorator):
+    impl = UUID(as_uuid=True)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "sqlite":
+            return dialect.type_descriptor(String(36))
+        return dialect.type_descriptor(UUID(as_uuid=True))
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "sqlite":
+            return str(value) if isinstance(value, uuid.UUID) else value
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "sqlite" and isinstance(value, str):
+            return uuid.UUID(value)
+        return value
+
+
+UUIDType = _UUIDType()
 JSONBType = JSONB().with_variant(JSON(), "sqlite")
 
 
