@@ -6,7 +6,23 @@ and break `import data_access.engine` for callers (and `importlib.reload`).
 """
 from . import daos, engine
 from .engine import SessionFactory, get_session
-from .models import AuditLog, AuthSession, OtpCode, User, UserMunshi, UserNowlez
+from .models import (
+    AuditLog,
+    AuthSession,
+    Case,
+    CaseBillingPeriod,
+    CaseOrder,
+    CaseOrderNowlez,
+    CouponCode,
+    MunshiInvoice,
+    OtpCode,
+    PaymentEvent,
+    Referral,
+    Subscription,
+    User,
+    UserMunshi,
+    UserNowlez,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -19,5 +35,14 @@ __all__ = [
     "AuthSession",
     "OtpCode",
     "AuditLog",
+    "Case",
+    "CaseOrder",
+    "CaseOrderNowlez",
+    "Subscription",
+    "PaymentEvent",
+    "CouponCode",
+    "Referral",
+    "CaseBillingPeriod",
+    "MunshiInvoice",
     "daos",
 ]
