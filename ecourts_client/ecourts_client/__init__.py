@@ -45,6 +45,8 @@ from ecourts_client.models import (
     StateRef,
 )
 
+from ecourts_client.config import ECourtsConfig  # noqa: E402
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -52,9 +54,10 @@ __all__ = [
     "Case", "CaseStub", "CaseTypeRef", "CategoryDetails", "CauseList",
     "CauseListEntry", "CircuitOpen", "CourtComplexRef", "CourtSiteDown",
     "DailyBusiness", "DistrictCourtClient", "DistrictRef", "ECourtsClient",
-    "ECourtsError", "EcourtsError", "FIRDetails", "HCBenchSitting",
-    "HCCauseListIndex", "HCCauseListPDFRow", "HearingHistoryRow",
-    "HighCourtClient", "JWTExpired", "ObjectionDetails", "OrderRef",
-    "PDFInvalid", "PDFNotFound", "Party", "PoliceStationRef", "RateLimited",
-    "SchemaChanged", "StateRef", "fetch_case", "fetch_pdf", "get_client_for",
+    "ECourtsConfig", "ECourtsError", "EcourtsError", "FIRDetails",
+    "HCBenchSitting", "HCCauseListIndex", "HCCauseListPDFRow",
+    "HearingHistoryRow", "HighCourtClient", "JWTExpired", "ObjectionDetails",
+    "OrderRef", "PDFInvalid", "PDFNotFound", "Party", "PoliceStationRef",
+    "RateLimited", "SchemaChanged", "StateRef", "fetch_case", "fetch_pdf",
+    "get_client_for",
 ]
