@@ -58,8 +58,8 @@ from case_billing.razorpay_client.payment_links import (
 from case_billing.razorpay_client.upi_intent import (
     create_upi_payment_link as rzp_create_upi_link,
 )
-from case_billing.shared.eligibility import (
-    is_user_eligible_for_munshi_billing,
+from case_billing.shared.multi_product import (
+    should_charge_munshi_for_this_case,
 )
 
 
@@ -124,7 +124,9 @@ async def generate_anniversary_invoice(
 
     No-ops in priority order:
 
-    1. ``is_user_eligible_for_munshi_billing`` returns False → return None.
+    1. ``should_charge_munshi_for_this_case`` returns False → return None.
+       This is the cross-product gate (Task 13): Munshi-eligibility AND
+       not on paid Nowlez AND not in active Nowlez trial.
     2. User has no ``users_munshi.billing_anniversary_date`` set → None.
     3. Zero cases in the cycle window → None (no invoice for "0 × ₹10").
     4. A ``munshi_invoices`` row already exists for this ``(user_id,
@@ -133,8 +135,11 @@ async def generate_anniversary_invoice(
     from data_access.models.billing import MunshiInvoice
     from data_access.models.user import User, UserMunshi
 
-    # 1. eligibility (cross-product check).
-    if not await is_user_eligible_for_munshi_billing(user_id, session):
+    # 1. Cross-product gate (Task 13). Wraps the lower-level Munshi
+    # eligibility predicate together with the two Nowlez overrides so
+    # this call site reads as "should we bill the user now?" rather
+    # than "is the user a valid Munshi candidate?".
+    if not await should_charge_munshi_for_this_case(user_id, session):
         return None
 
     # 2. anniversary date.
