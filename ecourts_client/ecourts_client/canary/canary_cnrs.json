@@ -1,0 +1,12 @@
+{
+  "canaries": [],
+  "coverage_targets": [
+    {"category": "states", "target": 28},
+    {"category": "districts", "target": 50},
+    {"category": "high_courts", "target": 25},
+    {"category": "closed_cases", "target": 5},
+    {"category": "fir_cases", "target": 5},
+    {"category": "objections_cases", "target": 5},
+    {"category": "multi_party_cases", "target": 5}
+  ]
+}
