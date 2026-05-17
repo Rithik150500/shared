@@ -1,0 +1,1 @@
+"""Referral state machine — placeholder."""

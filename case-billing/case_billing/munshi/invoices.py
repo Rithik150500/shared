@@ -1,0 +1,1 @@
+"""Munshi invoice generation — placeholder."""
