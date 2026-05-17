@@ -72,3 +72,13 @@ def set_active(session: Session, user_id: uuid.UUID, is_active: bool) -> None:
     if user is not None:
         user.is_active = is_active
         session.flush()
+
+
+def has_munshi_extension(session: Session, user_id: uuid.UUID) -> bool:
+    """True iff the user has a row in users_munshi (i.e. is a Munshi user)."""
+    return session.get(UserMunshi, user_id) is not None
+
+
+def has_nowlez_extension(session: Session, user_id: uuid.UUID) -> bool:
+    """True iff the user has a row in users_nowlez (i.e. is a Nowlez user)."""
+    return session.get(UserNowlez, user_id) is not None

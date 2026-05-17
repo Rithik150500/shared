@@ -1,11 +1,72 @@
-"""STOP-keyword handler stub -- filled in by Task 6.
+"""STOP-keyword inbound handler.
 
-Placeholder so the ``whatsapp_delivery.webhook`` re-export block imports
-cleanly while Task 3 is the only landed task.
+Three side-effects per spec §5.3:
+  1. flip both ``users_nowlez`` consent flags (events + reminders) to False
+  2. write an ``audit_log`` row tagged ``whatsapp.opted_out_via_inbound``
+  3. enqueue a confirmation template send (best-effort — failures don't undo
+     the opt-out, but the user gets explicit confirmation when it lands)
+
+The ``enqueue_send_template`` symbol is imported eagerly here so tests can
+monkey-patch ``whatsapp_delivery.webhook.stop_handler.enqueue_send_template``.
+The real RQ implementation lives in ``whatsapp_delivery.dispatch.queue``
+(Task 6); until that lands we ship a no-op stub so importing the handler
+doesn't crash.
 """
 from __future__ import annotations
 
+import uuid
+from typing import Any
 
-def handle_stop_keyword(*args: object, **kwargs: object) -> None:
-    """Run the STOP-keyword opt-out flow + bridge POST to Nowlez. (Task 6)"""
-    raise NotImplementedError("handle_stop_keyword is implemented in Task 6")
+from data_access.daos.audit_dao import log_event as _log_audit
+from data_access.daos.whatsapp_dao import update_nowlez_preferences
+
+from whatsapp_delivery.webhook.parser import IncomingMessage
+
+
+# Try the real queue helper from Task 6; fall back to an async no-op so
+# Task-5 callers can construct an opt-out flow today without the dispatch
+# subpackage existing yet. Tests patch the symbol bound at module import
+# time, so this fallback is invisible to test runs that monkey-patch.
+try:
+    from whatsapp_delivery.dispatch.queue import enqueue_send_template
+except ImportError:  # pragma: no cover — exercised once Task 6 lands
+    async def enqueue_send_template(**_kwargs: Any) -> None:
+        """No-op stub until whatsapp_delivery.dispatch.queue ships in Task 6."""
+        return None
+
+
+async def handle_stop_keyword(
+    user_id: uuid.UUID,
+    message: IncomingMessage,
+    db_session: Any,
+) -> None:
+    """Disable both WhatsApp toggles + audit + send confirmation template."""
+    update_nowlez_preferences(
+        db_session,
+        user_id=user_id,
+        whatsapp_events_enabled=False,
+        whatsapp_reminders_enabled=False,
+    )
+
+    _log_audit(
+        db_session,
+        event_type="whatsapp.opted_out_via_inbound",
+        user_id=user_id,
+        source="nowlez",
+        metadata={
+            "meta_message_id": message.meta_message_id,
+            # Cap inbound text at 100 chars so noisy payloads don't bloat the
+            # audit log; the truncation is documented in the spec.
+            "inbound_text": (message.text or "")[:100],
+            "phone": message.from_phone,
+        },
+    )
+    db_session.commit()
+
+    await enqueue_send_template(
+        to=message.from_phone,
+        template_name="nowlez_stop_confirmation_v1",
+        language="en_US",
+        variables={},
+        brand="nowlez",
+    )
