@@ -29,6 +29,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from case_billing.nowlez.fallback import (
+    LAPSED_TRIAL_ACTION_FALLBACK,
+    LAPSED_TRIAL_ACTION_FREEZE,
+    apply_lapsed_trial_action,
     fallback_to_munshi,
     freeze_account,
 )
@@ -213,3 +216,279 @@ def test_freeze_account_disables_refresh_and_sends_template(
     assert all(c.refresh_enabled is False for c in cases)
     sender.assert_called_once()
     assert sender.call_args.kwargs["template"] == "nowlez_trial_fallback_v1"
+
+
+# --- Task 14 edge cases ----------------------------------------------------
+
+
+def test_fallback_zero_cases_skips_billing_and_sends_no_billing_template(
+    session: Session,
+) -> None:
+    """User has 0 active cases at day 31 → no Munshi extension, no
+    billing periods, no fallback template. Only the no-billing template
+    + an audit row."""
+    from data_access.models.audit import AuditLog
+    from data_access.models.billing import CaseBillingPeriod
+    from data_access.models.user import UserMunshi
+
+    user_id = _make_expired_trial_user(session)
+    # No cases added.
+
+    sender = AsyncMock()
+    _run(fallback_to_munshi(user_id, session, send_template_fn=sender))
+    session.flush()
+
+    munshi = session.execute(
+        select(UserMunshi).where(UserMunshi.user_id == user_id)
+    ).scalar_one_or_none()
+    assert munshi is None, "should not create Munshi extension for zero-case user"
+
+    periods = session.execute(
+        select(CaseBillingPeriod).where(CaseBillingPeriod.user_id == user_id)
+    ).scalars().all()
+    assert periods == []
+
+    sender.assert_called_once()
+    assert (
+        sender.call_args.kwargs["template"] == "nowlez_trial_ended_no_billing_v1"
+    )
+
+    audit = session.execute(
+        select(AuditLog).where(AuditLog.user_id == user_id)
+    ).scalars().all()
+    assert any(
+        a.event_type == "nowlez.trial_fallback_noop"
+        and a.metadata_.get("reason") == "no_active_cases"
+        for a in audit
+    )
+
+
+def test_fallback_user_with_paid_tier_is_noop(session: Session) -> None:
+    """User raced into a paid tier between cron pickup and execution →
+    no Munshi extension created, no template sent, only audit."""
+    from data_access.models.audit import AuditLog
+    from data_access.models.billing import CaseBillingPeriod
+    from data_access.models.user import UserMunshi, UserNowlez
+
+    # Build the user with a paid tier (NOT trial-expired).
+    user_id = _make_expired_trial_user(session)
+    nowlez = session.execute(
+        select(UserNowlez).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+    nowlez.tier = "counsel"
+    session.flush()
+    _add_cases(session, user_id, n=20)
+
+    sender = AsyncMock()
+    _run(fallback_to_munshi(user_id, session, send_template_fn=sender))
+    session.flush()
+
+    # No Munshi extension; no billing periods; no template.
+    munshi = session.execute(
+        select(UserMunshi).where(UserMunshi.user_id == user_id)
+    ).scalar_one_or_none()
+    assert munshi is None
+    periods = session.execute(
+        select(CaseBillingPeriod).where(CaseBillingPeriod.user_id == user_id)
+    ).scalars().all()
+    assert periods == []
+    sender.assert_not_called()
+
+    # Audit row records the bail-out.
+    audit = session.execute(
+        select(AuditLog).where(AuditLog.user_id == user_id)
+    ).scalars().all()
+    assert any(
+        a.event_type == "nowlez.trial_fallback_noop"
+        and a.metadata_.get("reason") == "user_has_paid_tier"
+        and a.metadata_.get("tier") == "counsel"
+        for a in audit
+    )
+
+
+def test_fallback_reuses_existing_munshi_extension_with_active_cases(
+    session: Session,
+) -> None:
+    """User who already has a Munshi extension at day 31 → reuse it,
+    don't overwrite billing_anniversary_date, and open billing periods
+    for active cases (the transition from trial to active Munshi)."""
+    from data_access.models.billing import CaseBillingPeriod
+    from data_access.models.user import UserMunshi
+
+    user_id = _make_expired_trial_user(session)
+    original_anniversary = date(2025, 6, 15)
+    session.add(UserMunshi(
+        user_id=user_id, billing_anniversary_date=original_anniversary,
+    ))
+    session.flush()
+    case_ids = _add_cases(session, user_id, n=12)
+
+    sender = AsyncMock()
+    _run(fallback_to_munshi(user_id, session, send_template_fn=sender))
+    session.flush()
+
+    # Anniversary preserved (no overwrite).
+    munshi = session.execute(
+        select(UserMunshi).where(UserMunshi.user_id == user_id)
+    ).scalar_one()
+    assert munshi.billing_anniversary_date == original_anniversary
+
+    # Billing periods opened for every active case.
+    periods = session.execute(
+        select(CaseBillingPeriod).where(CaseBillingPeriod.user_id == user_id)
+    ).scalars().all()
+    assert len(periods) == len(case_ids)
+    sender.assert_called_once()
+    assert sender.call_args.kwargs["template"] == "nowlez_trial_fallback_v1"
+
+
+def test_fallback_does_not_overwrite_already_open_billing_periods(
+    session: Session,
+) -> None:
+    """If a case already has an open billing_period (e.g. the user was
+    in fallback Munshi before, was reactivated to Nowlez paid, then
+    cancelled and lapsed again), the function must not double-open."""
+    from data_access.models.billing import CaseBillingPeriod
+    from data_access.models.user import UserMunshi
+
+    user_id = _make_expired_trial_user(session)
+    session.add(UserMunshi(user_id=user_id, billing_anniversary_date=date.today()))
+    session.flush()
+    case_ids = _add_cases(session, user_id, n=5)
+    # Pre-open a period on the first case.
+    pre_existing = CaseBillingPeriod(
+        user_id=user_id, case_id=case_ids[0],
+        period_start=datetime.now(timezone.utc) - timedelta(days=5),
+        period_end=None,
+    )
+    session.add(pre_existing)
+    session.flush()
+
+    sender = AsyncMock()
+    _run(fallback_to_munshi(user_id, session, send_template_fn=sender))
+    session.flush()
+
+    # Exactly N periods total, not N+1; the first case kept its old one.
+    periods_for_first = session.execute(
+        select(CaseBillingPeriod)
+        .where(CaseBillingPeriod.case_id == case_ids[0])
+    ).scalars().all()
+    assert len(periods_for_first) == 1
+    # SQLite round-trips UUIDs as strings, so cast both sides.
+    assert str(periods_for_first[0].id) == str(pre_existing.id)
+
+
+def test_freeze_account_with_paid_tier_is_noop(session: Session) -> None:
+    """If the user raced into paid tier, freeze must NOT disable their
+    cases — they're now a paying customer."""
+    from data_access.models.audit import AuditLog
+    from data_access.models.case import Case
+    from data_access.models.user import UserNowlez
+
+    user_id = _make_expired_trial_user(session)
+    nowlez = session.execute(
+        select(UserNowlez).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+    nowlez.tier = "chambers"
+    session.flush()
+    case_ids = _add_cases(session, user_id, n=4)
+
+    sender = AsyncMock()
+    _run(freeze_account(user_id, session, send_template_fn=sender))
+    session.flush()
+
+    # Cases stay enabled.
+    cases = session.execute(
+        select(Case).where(Case.user_id == user_id)
+    ).scalars().all()
+    assert all(c.refresh_enabled is True for c in cases)
+    sender.assert_not_called()
+
+    # Audit shows the noop.
+    audit = session.execute(
+        select(AuditLog).where(AuditLog.user_id == user_id)
+    ).scalars().all()
+    assert any(
+        a.event_type == "nowlez.trial_freeze_noop"
+        and a.metadata_.get("tier") == "chambers"
+        for a in audit
+    )
+
+
+def test_freeze_account_explicitly_nulls_legacy_free_tier(
+    session: Session,
+) -> None:
+    """The freeze path must null out a stale 'free' tier so subsequent
+    eligibility checks treat the user as having no Nowlez access."""
+    from data_access.models.user import UserNowlez
+
+    user_id = _make_expired_trial_user(session)
+    nowlez = session.execute(
+        select(UserNowlez).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+    nowlez.tier = "free"
+    session.flush()
+    _add_cases(session, user_id, n=2)
+
+    sender = AsyncMock()
+    _run(freeze_account(user_id, session, send_template_fn=sender))
+    session.flush()
+
+    nowlez = session.execute(
+        select(UserNowlez).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+    assert nowlez.tier is None
+
+
+# --- apply_lapsed_trial_action dispatcher ----------------------------------
+
+
+def test_apply_action_dispatches_to_fallback_to_munshi(
+    session: Session,
+) -> None:
+    user_id = _make_expired_trial_user(session)
+    _add_cases(session, user_id, n=3)
+    sender = AsyncMock()
+
+    result = _run(apply_lapsed_trial_action(
+        user_id, session, sender,
+        action=LAPSED_TRIAL_ACTION_FALLBACK,
+    ))
+    session.flush()
+    assert result == LAPSED_TRIAL_ACTION_FALLBACK
+
+    from data_access.models.user import UserMunshi
+    munshi = session.execute(
+        select(UserMunshi).where(UserMunshi.user_id == user_id)
+    ).scalar_one()
+    assert munshi.billing_anniversary_date is not None
+
+
+def test_apply_action_dispatches_to_freeze_account(session: Session) -> None:
+    user_id = _make_expired_trial_user(session)
+    _add_cases(session, user_id, n=3)
+    sender = AsyncMock()
+
+    result = _run(apply_lapsed_trial_action(
+        user_id, session, sender,
+        action=LAPSED_TRIAL_ACTION_FREEZE,
+    ))
+    session.flush()
+    assert result == LAPSED_TRIAL_ACTION_FREEZE
+
+    from data_access.models.case import Case
+    cases = session.execute(
+        select(Case).where(Case.user_id == user_id)
+    ).scalars().all()
+    assert all(c.refresh_enabled is False for c in cases)
+
+
+def test_apply_action_unknown_value_raises_value_error(
+    session: Session,
+) -> None:
+    user_id = _make_expired_trial_user(session)
+    sender = AsyncMock()
+    with pytest.raises(ValueError, match="Unknown nowlez_lapsed_trial_action"):
+        _run(apply_lapsed_trial_action(
+            user_id, session, sender, action="self_destruct",
+        ))

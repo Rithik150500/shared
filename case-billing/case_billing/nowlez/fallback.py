@@ -1,4 +1,4 @@
-"""Day-31 fallback paths for trial-lapsed Nowlez users (Task 7.5).
+"""Day-31 fallback paths for trial-lapsed Nowlez users (Task 7.5 + 14).
 
 Two policies, switchable per ``BillingConfig.nowlez_lapsed_trial_action``:
 
@@ -11,9 +11,28 @@ Two policies, switchable per ``BillingConfig.nowlez_lapsed_trial_action``:
   ``refresh_enabled=False``, notify. Used when the operator wants to
   withhold service until the user manually picks a tier.
 
+The high-level entry point :func:`apply_lapsed_trial_action` reads the
+``BillingConfig.nowlez_lapsed_trial_action`` knob and dispatches to one
+of the two above. The day-31 cron should call *only* the high-level
+entry point so the choice of policy is operator-tunable without code
+edits.
+
 Both paths leave ``users_nowlez.tier`` as ``NULL`` so the user can still
 pick a tier later and be upgraded back to a subscription. They both
 write an audit log entry so the cron is observable.
+
+Task 14 edge cases handled inline by each entry point:
+
+* **Zero saved cases** at day 31 → don't open Munshi billing; just
+  audit + send the ``nowlez_trial_ended_no_billing_v1`` template. The
+  user can re-engage later via re-engagement campaign.
+* **User already has paid Nowlez tier at day 31** (raced selection) →
+  no-op + audit. The trial state was overtaken; bailing out cleanly
+  avoids creating spurious Munshi rows that would confuse the eligibility
+  predicate.
+* **User already has a Munshi extension** at day 31 (the Munshi-only
+  signup flow ran first) → reuse the existing row, just open
+  ``case_billing_periods`` for active cases.
 """
 
 from __future__ import annotations
@@ -31,6 +50,22 @@ from sqlalchemy.orm import Session
 NOWLEZ_FALLBACK_CASE_CAP: int = 200
 
 
+# Tiers that count as "user already paying Nowlez" — copied from
+# `case_billing.shared.eligibility` so we don't introduce a circular
+# import (fallback can't depend on eligibility because the webhook
+# router that uses eligibility also lazily imports fallback).
+_PAID_NOWLEZ_TIERS: frozenset[str] = frozenset({"advocate", "counsel", "chambers"})
+
+
+# Recognised values for `BillingConfig.nowlez_lapsed_trial_action`.
+LAPSED_TRIAL_ACTION_FALLBACK: str = "fallback_to_munshi"
+LAPSED_TRIAL_ACTION_FREEZE: str = "freeze_account"
+_VALID_LAPSED_ACTIONS: frozenset[str] = frozenset({
+    LAPSED_TRIAL_ACTION_FALLBACK,
+    LAPSED_TRIAL_ACTION_FREEZE,
+})
+
+
 async def fallback_to_munshi(
     user_id: uuid.UUID,
     session: Session,
@@ -38,7 +73,18 @@ async def fallback_to_munshi(
 ) -> None:
     """Convert a lapsed-trial Nowlez user into a Munshi postpaid user.
 
-    Side-effects (in order):
+    Side-effects (in order), gated by the Task 14 edge cases:
+
+    a. **Raced paid tier** — if ``users_nowlez.tier`` is already one of
+       (advocate/counsel/chambers), the user picked a tier after the
+       cron picked them up; no-op + audit row and return early. (See
+       :func:`apply_lapsed_trial_action`.)
+    b. **No saved cases** — if the user has zero active cases at day
+       31, opening a Munshi extension would charge ₹0 every cycle. We
+       skip the billing setup entirely, send the
+       ``nowlez_trial_ended_no_billing_v1`` template, audit, and bail.
+
+    Otherwise:
 
     1. Create (or no-op if exists) a ``users_munshi`` row with
        ``billing_anniversary_date = today_ist``.
@@ -58,12 +104,62 @@ async def fallback_to_munshi(
     from data_access.models.audit import AuditLog
     from data_access.models.billing import CaseBillingPeriod
     from data_access.models.case import Case
-    from data_access.models.user import User, UserMunshi
+    from data_access.models.user import User, UserMunshi, UserNowlez
 
     now = datetime.now(timezone.utc)
     today = date.today()
 
-    # 1. Munshi extension (no-op if already exists).
+    # Edge case (a): raced paid tier. If the user picked a tier between
+    # the cron's selection query and this invocation, abandon the
+    # fallback — they're already covered by Nowlez billing.
+    nowlez_tier = session.execute(
+        select(UserNowlez.tier).where(UserNowlez.user_id == user_id)
+    ).scalar_one_or_none()
+    if nowlez_tier in _PAID_NOWLEZ_TIERS:
+        session.add(AuditLog(
+            event_type="nowlez.trial_fallback_noop",
+            user_id=user_id,
+            source="nowlez",
+            metadata_={
+                "reason": "user_has_paid_tier",
+                "tier": nowlez_tier,
+            },
+        ))
+        session.flush()
+        return
+
+    # Edge case (b): zero saved cases. Don't open billing — there's
+    # nothing to bill against — but still acknowledge the trial ended.
+    active_case_count = session.execute(
+        select(Case.id)
+        .where(Case.user_id == user_id)
+        .where(Case.refresh_enabled.is_(True))
+        .limit(1)
+    ).first()
+    if active_case_count is None:
+        phone = session.execute(
+            select(User.phone).where(User.id == user_id)
+        ).scalar_one_or_none()
+        if phone:
+            await send_template_fn(
+                to=phone,
+                template="nowlez_trial_ended_no_billing_v1",
+                variables={},
+                brand="nowlez",
+            )
+        session.add(AuditLog(
+            event_type="nowlez.trial_fallback_noop",
+            user_id=user_id,
+            source="nowlez",
+            metadata_={"reason": "no_active_cases"},
+        ))
+        session.flush()
+        return
+
+    # 1. Munshi extension (no-op if already exists). The reused-extension
+    # case (operator created users_munshi via Munshi-only signup before
+    # the day-31 cron) is the same code path: we preserve the existing
+    # billing_anniversary_date rather than overwriting with today.
     munshi = session.execute(
         select(UserMunshi).where(UserMunshi.user_id == user_id)
     ).scalar_one_or_none()
@@ -157,13 +253,43 @@ async def freeze_account(
 
     Used when the operator sets ``BillingConfig.nowlez_lapsed_trial_action='freeze_account'``
     instead of the default Munshi fallback.
+
+    Task 14 edge case: if the user already picked a paid tier (raced
+    selection), the freeze is a no-op (logged for triage) — we must
+    not disable cases for a user who is now actively paying for Nowlez.
+
+    Leaves ``users_nowlez.tier=None`` explicitly so the user can pick a
+    tier later and be reactivated via the standard subscription flow.
     """
     from data_access.models.audit import AuditLog
     from data_access.models.billing import CaseBillingPeriod
     from data_access.models.case import Case
-    from data_access.models.user import User
+    from data_access.models.user import User, UserNowlez
 
     now = datetime.now(timezone.utc)
+
+    # Edge case: user raced into a paid tier before this cron call. Bail
+    # cleanly rather than freezing a paying customer's cases.
+    nowlez = session.execute(
+        select(UserNowlez).where(UserNowlez.user_id == user_id)
+    ).scalar_one_or_none()
+    if nowlez is not None and nowlez.tier in _PAID_NOWLEZ_TIERS:
+        session.add(AuditLog(
+            event_type="nowlez.trial_freeze_noop",
+            user_id=user_id,
+            source="nowlez",
+            metadata_={
+                "reason": "user_has_paid_tier",
+                "tier": nowlez.tier,
+            },
+        ))
+        session.flush()
+        return
+
+    # Belt-and-braces: explicitly null the tier so any half-set state
+    # (e.g. tier='free' legacy) resolves to "no Nowlez access".
+    if nowlez is not None and nowlez.tier is not None:
+        nowlez.tier = None
     session.execute(
         update(Case)
         .where(Case.user_id == user_id)
@@ -192,3 +318,50 @@ async def freeze_account(
         metadata_={"reason": "trial_lapsed_no_tier"},
     ))
     session.flush()
+
+
+async def apply_lapsed_trial_action(
+    user_id: uuid.UUID,
+    session: Session,
+    send_template_fn: Callable[..., Awaitable[Any]],
+    *,
+    action: str,
+) -> str:
+    """Dispatch to the configured lapsed-trial action (Task 14 entry point).
+
+    The day-31 cron passes ``BillingConfig.nowlez_lapsed_trial_action``
+    here so the choice of policy lives in config rather than code:
+
+    * ``'fallback_to_munshi'`` (default) →
+      :func:`fallback_to_munshi`
+    * ``'freeze_account'`` →
+      :func:`freeze_account`
+
+    Returns the action string that was actually executed (helpful for
+    the cron's structured log line).
+
+    Raises:
+        :class:`ValueError`: when ``action`` is not one of the
+            recognised constants — caller should treat this as a config
+            error and refuse to start.
+    """
+    if action == LAPSED_TRIAL_ACTION_FALLBACK:
+        await fallback_to_munshi(user_id, session, send_template_fn)
+        return LAPSED_TRIAL_ACTION_FALLBACK
+    if action == LAPSED_TRIAL_ACTION_FREEZE:
+        await freeze_account(user_id, session, send_template_fn)
+        return LAPSED_TRIAL_ACTION_FREEZE
+    raise ValueError(
+        f"Unknown nowlez_lapsed_trial_action {action!r}; expected one of "
+        f"{sorted(_VALID_LAPSED_ACTIONS)}"
+    )
+
+
+__all__ = [
+    "fallback_to_munshi",
+    "freeze_account",
+    "apply_lapsed_trial_action",
+    "NOWLEZ_FALLBACK_CASE_CAP",
+    "LAPSED_TRIAL_ACTION_FALLBACK",
+    "LAPSED_TRIAL_ACTION_FREEZE",
+]
