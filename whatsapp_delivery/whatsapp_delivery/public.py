@@ -1,35 +1,19 @@
-"""whatsapp_delivery — Meta WhatsApp Cloud API delivery for Nowlez and Munshi.
+"""Aggregator re-export module.
 
-Public API: any symbol re-exported here is part of the stable contract that
-downstream callers (Nowlez backend, Munshi bot_scaffold) depend on. The same
-surface is also available via :mod:`whatsapp_delivery.public` for tools that
-prefer importing from an explicit submodule.
+``from whatsapp_delivery import ...`` is the canonical import path for
+downstream callers (see :mod:`whatsapp_delivery.__init__`). This module
+exists per the plan's File Structure as a second-class aggregator that
+mirrors the same surface — useful for tooling that prefers an explicit
+module to ``__init__`` (e.g. import-graph linters).
 
-Stability note: removing a name from ``__all__`` is a breaking change. If
-you need to retire something, deprecate first (keep the re-export but add
-a ``DeprecationWarning`` in the underlying definition), then remove in a
-later major.
+If a symbol is in :data:`__all__` here, it is part of the stable public
+contract and removing it is a breaking change.
 """
-__version__ = "0.1.0"
+from __future__ import annotations
 
-try:
-    import sentry_sdk
-
-    sentry_sdk.set_tag("package", "whatsapp_delivery")
-except ImportError:  # pragma: no cover — Sentry is optional
-    pass
-
-
-# ---------------------------------------------------------------------------
-# Re-exports
-#
-# Order: config first (everything downstream reads env via WhatsAppConfig),
-# then errors (callers want to import these without pulling in heavier deps),
-# then models, then the meta + template clients, then the templates
-# registry, then the dispatch helpers, and finally the webhook layer. Lazy
-# imports are avoided here — the package is small and downstream consumers
-# expect every symbol to be available after `import whatsapp_delivery`.
-# ---------------------------------------------------------------------------
+# Imported here so the symbols are present on `whatsapp_delivery.public`
+# the same way they are on `whatsapp_delivery`. Both paths point at the
+# same underlying objects.
 from whatsapp_delivery.config import WhatsAppConfig
 from whatsapp_delivery.dispatch.queue import (
     enqueue_send_document,
