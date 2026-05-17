@@ -68,3 +68,33 @@ def test_get_orders_for_case_ordered_by_date_desc(db_session, fixture_case_id):
     orders = order_dao.get_orders_for_case(db_session, case_id=fixture_case_id)
     assert orders[0].order_id == "b"
     assert orders[1].order_id == "a"
+
+
+def test_get_legacy_orders_by_case_uses_canonical_column_name(db_session):
+    """Pins the schema contract between sub-project D and the re-fetch DAO.
+
+    The legacy schema column is ``client_case_id`` (historical artefact;
+    see RUNBOOK_refetch_nowlez_cases.md §0.1). If sub-project D's cutover
+    SQL ever produces a different name (e.g. ``legacy_case_id``), this
+    test breaks loudly instead of silently returning empty results in
+    production.
+    """
+    from sqlalchemy import text
+    db_session.execute(text(
+        "CREATE TABLE IF NOT EXISTS _legacy_nowlez_case_orders ("
+        "id INTEGER PRIMARY KEY, "
+        "client_case_id INTEGER, "
+        "order_id TEXT, "
+        "file_path TEXT"
+        ")"
+    ))
+    db_session.execute(text(
+        "INSERT INTO _legacy_nowlez_case_orders (id, client_case_id, order_id, file_path) "
+        "VALUES (1, 42, 'ord-x', 'orders/x.pdf')"
+    ))
+    db_session.commit()
+
+    rows = order_dao.get_legacy_orders_by_case(db_session, legacy_case_id=42)
+    assert len(rows) == 1
+    assert rows[0]["order_id"] == "ord-x"
+    assert rows[0]["file_path"] == "orders/x.pdf"

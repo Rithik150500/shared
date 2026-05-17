@@ -111,7 +111,13 @@ def get_orders_for_case(s: Session, *, case_id: uuid.UUID) -> list[CaseOrder]:
 
 
 def get_legacy_orders_by_case(s: Session, legacy_case_id: int) -> list[dict[str, Any]]:
-    """Used only by the migration script; reads from `_legacy_nowlez_case_orders`."""
+    """Used only by the migration script; reads from `_legacy_nowlez_case_orders`.
+
+    The schema column is named `client_case_id` (historical artefact of the
+    legacy SQLite schema). The Python parameter is named `legacy_case_id`
+    for clarity; the mapping happens here. See the canonical-schema block
+    in `migrations/RUNBOOK_refetch_nowlez_cases.md` §0.1.
+    """
     from sqlalchemy import text
     rows = s.execute(
         text("SELECT * FROM _legacy_nowlez_case_orders WHERE client_case_id = :cid"),

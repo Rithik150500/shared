@@ -27,6 +27,44 @@ roughly equal to the production Nowlez user-case count). If the result is
 `0`, Sub-project D's cutover has not yet materialised the legacy table on
 this DB — abort and follow up with the D team.
 
+#### Canonical legacy-table schema (contract with sub-project D)
+
+The re-fetch script and its DAOs (`data_access.daos.case_dao.upsert_case`,
+`data_access.daos.order_dao.get_legacy_orders_by_case`) expect EXACTLY
+these column names. If sub-project D's cutover produces different names,
+either rename in the cutover SQL or open a coordinated change with the A
+team — do NOT silently ALTER the local DB to match.
+
+```sql
+CREATE TABLE _legacy_nowlez_client_cases (
+    id              INTEGER PRIMARY KEY,
+    user_id         UUID,
+    cnr             TEXT,
+    client_id       TEXT,
+    refresh_enabled BOOLEAN,
+    notes           TEXT
+);
+
+CREATE TABLE _legacy_nowlez_case_orders (
+    id                   INTEGER PRIMARY KEY,
+    client_case_id       INTEGER,         -- FK to _legacy_nowlez_client_cases.id
+    order_id             TEXT,
+    file_path            TEXT,
+    page_count           INTEGER,
+    preprocessed         BOOLEAN,
+    preprocessed_at      TIMESTAMPTZ,
+    retry_count          INTEGER,
+    permanently_failed   BOOLEAN,
+    uploaded_at          TIMESTAMPTZ
+);
+```
+
+The column name `client_case_id` on the orders table is a historical
+artefact of the legacy SQLite schema and is preserved as-is for
+straight-copy compatibility. The DAO accepts a `legacy_case_id` parameter
+on the Python side (semantic name) but emits `WHERE client_case_id = :cid`
+in the raw SQL.
+
 ### 0.2 eCourts API is reachable from this host
 
 ```bash
