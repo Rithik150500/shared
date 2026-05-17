@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -60,6 +60,14 @@ class UserMunshi(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         primary_key=True,
     )
+    # Sub-project E (migration 20260601_subproject_e_billing): postpaid
+    # anniversary day-of-month used by `case_billing.munshi.cycles`.
+    # Nullable here for SQLite test compatibility (the migration backfills
+    # then ALTERs to NOT NULL on Postgres); tests that exercise the column
+    # always populate it.
+    billing_anniversary_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True,
+    )
     current_state: Mapped[dict] = mapped_column(
         JSONBType,
         nullable=False,
@@ -99,8 +107,18 @@ class UserNowlez(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
 
-    tier: Mapped[str] = mapped_column(Text, nullable=False, default="free", server_default="free")
+    # Sub-project E migration 20260601_subproject_e_billing drops NOT NULL on
+    # tier so the "trial / no tier picked" state can be represented as NULL.
+    # The check constraint there allows NULL or one of
+    # ('advocate','counsel','chambers','free').
+    tier: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     tier_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Sub-project E: 30-day Chambers trial state. NULL when the user has
+    # never been in a Nowlez trial (e.g. Munshi-only signup); set at
+    # `create_trial_for_new_signup` time.
+    trial_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     monthly_chat_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     daily_chat_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")

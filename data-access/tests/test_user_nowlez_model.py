@@ -18,8 +18,21 @@ def test_user_nowlez_referral_code_unique():
 
 
 def test_user_nowlez_default_tier_column_metadata():
+    """Sub-project E (migration 20260601_subproject_e_billing) drops
+    the NOT NULL on `tier` so the trial / no-tier state can be NULL,
+    and removes the 'free' Python-side default (no default now).
+    """
     col = UserNowlez.__table__.c["tier"]
-    assert col.default.arg == "free"
+    assert col.nullable is True
+    assert col.default is None
+
+
+def test_user_nowlez_trial_columns_present():
+    """Sub-project E migration adds trial_started_at / trial_ends_at."""
+    assert "trial_started_at" in UserNowlez.__table__.c
+    assert "trial_ends_at" in UserNowlez.__table__.c
+    assert UserNowlez.__table__.c["trial_started_at"].nullable is True
+    assert UserNowlez.__table__.c["trial_ends_at"].nullable is True
 
 
 def test_user_nowlez_has_razorpay_columns():
