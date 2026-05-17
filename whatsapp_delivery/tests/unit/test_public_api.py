@@ -52,6 +52,8 @@ EXPECTED_NAMES = {
     "IncomingButton",
     "IncomingMedia",
     "IncomingMessage",
+    "apply_status_update",
+    "apply_status_updates",
     "handle_stop_keyword",
     "is_stop_keyword",
     "parse_incoming",
@@ -114,6 +116,8 @@ _CLASSES = {
 }
 
 _FUNCTIONS = {
+    "apply_status_update",
+    "apply_status_updates",
     "claim_message",
     "enqueue_send_document",
     "enqueue_send_template",
