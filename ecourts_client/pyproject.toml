@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecourts_client"
+version = "0.1.0"
+description = "Shared eCourts mobile-API client for Nowlez and Munshi"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=42.0",
+    "httpx>=0.27",
+    "pdfplumber>=0.10",
+    "pydantic-settings>=2.0",
+    "requests>=2.32",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "responses>=0.25",
+    "respx>=0.21",
+]
+
+[tool.setuptools.packages.find]
+include = ["ecourts_client*"]
