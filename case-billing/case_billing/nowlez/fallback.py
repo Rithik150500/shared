@@ -44,6 +44,12 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy import asc, select, update
 from sqlalchemy.orm import Session
 
+from case_billing.metrics import (
+    billing_nowlez_trial_fallback_freeze_total,
+    billing_nowlez_trial_fallback_munshi_total,
+    billing_nowlez_trial_fallback_noop_total,
+)
+
 
 # Sub-project E spec: cap at 200 cases when falling back from Nowlez to
 # Munshi (spec Section 6.4 — "User has 200+ cases when falling back").
@@ -145,6 +151,9 @@ async def fallback_to_munshi(
                 },
             ))
             session.flush()
+            billing_nowlez_trial_fallback_noop_total.labels(
+                reason="user_has_paid_tier",
+            ).inc()
             return
         # Tier is set but no active subscription — this is the
         # post-cancellation fallback path. Fall through to the normal
@@ -176,6 +185,9 @@ async def fallback_to_munshi(
             metadata_={"reason": "no_active_cases"},
         ))
         session.flush()
+        billing_nowlez_trial_fallback_noop_total.labels(
+            reason="no_active_cases",
+        ).inc()
         return
 
     # 1. Munshi extension (no-op if already exists). The reused-extension
@@ -265,6 +277,10 @@ async def fallback_to_munshi(
     ))
     session.flush()
 
+    # Metric: the happy-path fallback counter. Paired with the freeze
+    # counter so the dashboard can show the policy distribution.
+    billing_nowlez_trial_fallback_munshi_total.inc()
+
 
 async def freeze_account(
     user_id: uuid.UUID,
@@ -319,6 +335,9 @@ async def freeze_account(
                 },
             ))
             session.flush()
+            billing_nowlez_trial_fallback_noop_total.labels(
+                reason="user_has_paid_tier",
+            ).inc()
             return
         # Otherwise tier is set but cancelled — proceed to freeze.
 
@@ -354,6 +373,9 @@ async def freeze_account(
         metadata_={"reason": "trial_lapsed_no_tier"},
     ))
     session.flush()
+
+    # Metric counterpart to billing_nowlez_trial_fallback_munshi_total.
+    billing_nowlez_trial_fallback_freeze_total.inc()
 
 
 async def apply_lapsed_trial_action(

@@ -36,6 +36,11 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from case_billing.metrics import (
+    billing_nowlez_trials_expired_total,
+    billing_nowlez_trials_started_total,
+)
+
 
 # Spec default for the trial duration (BillingConfig.nowlez_trial_duration_days).
 # Kept as a module-level constant so call sites don't have to instantiate
@@ -119,6 +124,10 @@ async def create_trial_for_new_signup(
             variables={"name": name, "trial_days": NOWLEZ_TRIAL_DURATION_DAYS},
             brand="nowlez",
         )
+
+    # Metric: only increment on the new-row path (existing-row early
+    # return above doesn't fall through to here).
+    billing_nowlez_trials_started_total.inc()
 
 
 async def is_in_trial(user_id: uuid.UUID, session: Session) -> bool:
@@ -208,6 +217,9 @@ async def expire_trial(user_id: uuid.UUID, session: Session) -> None:
         return
     row.trial_ends_at = datetime.now(timezone.utc)
     session.flush()
+    # Counter only fires for the cron/admin "expire now" path; natural
+    # tier-pick exits use the happy-path counter on `select_tier_and_subscribe`.
+    billing_nowlez_trials_expired_total.inc()
 
 
 # --- public aliases --------------------------------------------------------

@@ -33,6 +33,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from case_billing.errors import TierAlreadySelected
+from case_billing.metrics import (
+    billing_nowlez_intro_promo_applied_total,
+    billing_nowlez_subscriptions_activated_total,
+    billing_nowlez_subscriptions_created_total,
+    billing_nowlez_subscriptions_past_due_total,
+)
 from case_billing.nowlez.promos import get_intro_offer_id
 from case_billing.nowlez.referrals import find_or_create_referral
 from case_billing.pricing import is_eligible_for_intro_promo
@@ -169,6 +175,13 @@ async def select_tier_and_subscribe(
     ))
     session.flush()
 
+    # Metrics — subscription created counter (per-tier) + intro promo
+    # counter when one was attached. We emit after the audit log so a
+    # failure in the audit insert doesn't double-count on retry.
+    billing_nowlez_subscriptions_created_total.labels(tier=chosen_tier).inc()
+    if intro_offer_id is not None:
+        billing_nowlez_intro_promo_applied_total.labels(tier=chosen_tier).inc()
+
     return rzp_subscription.short_url
 
 
@@ -194,7 +207,7 @@ async def activate_subscription(
 
     Called from the ``subscription.activated`` webhook handler.
     Idempotent — re-running on an already-active subscription is a
-    no-op.
+    no-op (metric is only incremented on the actual transition).
     """
     from data_access.models.billing import Subscription
 
@@ -205,6 +218,7 @@ async def activate_subscription(
         return
     sub.status = "active"
     session.flush()
+    billing_nowlez_subscriptions_activated_total.labels(tier=sub.tier).inc()
 
 
 async def mark_past_due(
@@ -221,6 +235,7 @@ async def mark_past_due(
         return
     sub.status = "past_due"
     session.flush()
+    billing_nowlez_subscriptions_past_due_total.labels(tier=sub.tier).inc()
 
 
 __all__ = [

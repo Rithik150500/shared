@@ -38,6 +38,13 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from case_billing.metrics import (
+    billing_munshi_invoices_in_grace_total,
+    billing_munshi_reminders_sent_total,
+    billing_munshi_users_resumed_total,
+    billing_munshi_users_suspended_total,
+)
+
 
 # Grace window after the due date before the user is suspended (spec
 # Section 1.3: 7 days). Duplicated from BillingConfig for the same
@@ -92,8 +99,10 @@ async def send_payment_reminder(
         # in the spec). Silently no-op so the cron can call freely.
         return
 
+    transitioned_to_grace = False
     if days_offset >= 0 and invoice.status == "sent":
         invoice.status = "in_grace"
+        transitioned_to_grace = True
         if invoice.due_at is not None:
             invoice.grace_expires_at = invoice.due_at + timedelta(
                 days=MUNSHI_GRACE_PERIOD_DAYS
@@ -118,6 +127,14 @@ async def send_payment_reminder(
             },
             brand="munshi",
         )
+        # Reminder counter — labelled by offset so the dashboard can show
+        # which leg of the D-5 / D-3 / D-0 dunning ladder is firing most.
+        billing_munshi_reminders_sent_total.labels(
+            offset=str(days_offset),
+        ).inc()
+
+    if transitioned_to_grace:
+        billing_munshi_invoices_in_grace_total.inc()
 
 
 async def suspend_user(
@@ -216,6 +233,12 @@ async def suspend_user(
     )
     session.flush()
 
+    # Metric: every successful suspension increments the global counter.
+    # Sentry has a complementary alert on a high-cardinality search
+    # (`event_type:munshi.user_suspended`); the metric is the dashboard
+    # surface.
+    billing_munshi_users_suspended_total.inc()
+
 
 async def resume_user(
     user_id: uuid.UUID,
@@ -292,3 +315,8 @@ async def resume_user(
         )
     )
     session.flush()
+
+    # Metric: resume counter pairs with the suspend counter so the
+    # "delta-pending" gauge (suspended - resumed) is straightforward
+    # to compute in Grafana.
+    billing_munshi_users_resumed_total.inc()

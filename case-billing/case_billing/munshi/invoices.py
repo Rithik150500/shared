@@ -33,6 +33,7 @@ the module never has to know about RQ / WhatsApp delivery internals.
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Protocol
@@ -41,6 +42,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from case_billing.errors import InvoiceNotFound
+from case_billing.metrics import (
+    billing_munshi_amount_paise_total,
+    billing_munshi_invoice_generation_seconds,
+    billing_munshi_invoices_generated_total,
+    billing_munshi_invoices_paid_total,
+)
 from case_billing.munshi.cycles import compute_cycle_window
 from case_billing.munshi.usage import count_billable_cases_in_window
 from case_billing.razorpay_client.customers import (
@@ -131,9 +138,16 @@ async def generate_anniversary_invoice(
     3. Zero cases in the cycle window → None (no invoice for "0 × ₹10").
     4. A ``munshi_invoices`` row already exists for this ``(user_id,
        cycle_start, cycle_end)`` → None (idempotent; safe to retry).
+
+    Emits Prometheus metrics on success:
+    * ``billing_munshi_invoices_generated_total{cycle_day}``
+    * ``billing_munshi_amount_paise_total``
+    * ``billing_munshi_invoice_generation_seconds`` (histogram)
     """
     from data_access.models.billing import MunshiInvoice
     from data_access.models.user import User, UserMunshi
+
+    _t_start = time.monotonic()
 
     # 1. Cross-product gate (Task 13). Wraps the lower-level Munshi
     # eligibility predicate together with the two Nowlez overrides so
@@ -272,6 +286,18 @@ async def generate_anniversary_invoice(
         brand="munshi",
     )
 
+    # 11. Metrics — emit *after* the happy path completes so a failed
+    # Razorpay call upstream doesn't inflate the success counter.
+    # cycle_day uses today_value.day (1..31) so the per-day distribution
+    # is visible in Grafana without joining against the DB.
+    billing_munshi_invoices_generated_total.labels(
+        cycle_day=str(today_value.day),
+    ).inc()
+    billing_munshi_amount_paise_total.inc(amount_paise)
+    billing_munshi_invoice_generation_seconds.observe(
+        time.monotonic() - _t_start
+    )
+
     return invoice_row
 
 
@@ -329,6 +355,11 @@ async def mark_invoice_paid(
             },
             brand="munshi",
         )
+
+    # Metric: paid invoices count. The webhook router exercises this
+    # path on every invoice.paid event; the gauge of pending vs paid is
+    # the easiest "is reconciliation working?" check ops can run.
+    billing_munshi_invoices_paid_total.inc()
 
     return invoice
 
