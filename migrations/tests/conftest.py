@@ -2,9 +2,9 @@
 
 This conftest ensures:
 
-* The ``migrations`` package is importable — both with the editable install
-  (``pip install -e .`` in this directory) and via ``sys.path`` fallback if
-  the install hasn't been run.
+* The ``migrations`` package is importable via ``sys.path`` manipulation —
+  no editable install is required (see the README of this directory and the
+  Sub-project A Step 6 notes for the rationale).
 * An in-memory SQLite ``db_session`` fixture mirrors the data-access test
   pattern (UUID coercion + ``Base.metadata.create_all``) and additionally
   creates the two legacy tables (``_legacy_nowlez_client_cases``,
