@@ -7,10 +7,9 @@ Three side-effects per spec §5.3:
      the opt-out, but the user gets explicit confirmation when it lands)
 
 The ``enqueue_send_template`` symbol is imported eagerly here so tests can
-monkey-patch ``whatsapp_delivery.webhook.stop_handler.enqueue_send_template``.
-The real RQ implementation lives in ``whatsapp_delivery.dispatch.queue``
-(Task 6); until that lands we ship a no-op stub so importing the handler
-doesn't crash.
+monkey-patch ``whatsapp_delivery.webhook.stop_handler.enqueue_send_template``
+without having to reach into the dispatch package. The real RQ implementation
+lives in ``whatsapp_delivery.dispatch.queue`` (Task 6).
 """
 from __future__ import annotations
 
@@ -20,19 +19,8 @@ from typing import Any
 from data_access.daos.audit_dao import log_event as _log_audit
 from data_access.daos.whatsapp_dao import update_nowlez_preferences
 
+from whatsapp_delivery.dispatch.queue import enqueue_send_template
 from whatsapp_delivery.webhook.parser import IncomingMessage
-
-
-# Try the real queue helper from Task 6; fall back to an async no-op so
-# Task-5 callers can construct an opt-out flow today without the dispatch
-# subpackage existing yet. Tests patch the symbol bound at module import
-# time, so this fallback is invisible to test runs that monkey-patch.
-try:
-    from whatsapp_delivery.dispatch.queue import enqueue_send_template
-except ImportError:  # pragma: no cover — exercised once Task 6 lands
-    async def enqueue_send_template(**_kwargs: Any) -> None:
-        """No-op stub until whatsapp_delivery.dispatch.queue ships in Task 6."""
-        return None
 
 
 async def handle_stop_keyword(
