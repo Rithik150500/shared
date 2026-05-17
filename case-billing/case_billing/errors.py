@@ -16,7 +16,22 @@ class InvoiceNotFound(BillingError):
 
 
 class RazorpayApiError(BillingError):
-    """Raised when the Razorpay HTTP API returns a non-2xx response."""
+    """Raised when the Razorpay HTTP API returns a non-2xx response.
+
+    Carries the HTTP status_code and the (best-effort decoded) response body so
+    upstream retry/alert logic can inspect both without re-parsing.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        body: object | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
 
 
 class WebhookSignatureInvalid(BillingError):
