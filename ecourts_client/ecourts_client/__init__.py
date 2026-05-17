@@ -46,6 +46,9 @@ from ecourts_client.models import (
 )
 
 from ecourts_client.config import ECourtsConfig  # noqa: E402
+from ecourts_client.resilience.metrics import setup_sentry_tag  # noqa: E402
+
+setup_sentry_tag()
 
 __version__ = "0.1.0"
 
