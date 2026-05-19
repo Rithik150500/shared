@@ -12,6 +12,7 @@ dependencies = [
   "rq>=1.16",
   "sentry-sdk>=2.0",
   "pyjwt>=2.8",
+  "prometheus_client>=0.20",
 ]
 
 [project.optional-dependencies]
