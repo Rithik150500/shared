@@ -129,11 +129,16 @@ PLAN_SPECS: list[PlanSpec] = [
         env_var="RAZORPAY_PLAN_ID_CHAMBERS_MONTHLY",
     ),
     PlanSpec(
+        # Razorpay's period enum is daily|weekly|monthly|yearly — there is
+        # no "quarterly". A quarterly cadence is expressed as monthly with
+        # interval=3 (charged every 3 months). The plan name stays
+        # "chambers_quarterly" so consumer code references don't need to
+        # change.
         name="chambers_quarterly",
-        period="quarterly",
-        interval=1,
+        period="monthly",
+        interval=3,
         amount_paise=1_200_000,  # 3 × ₹4,000
-        description="Nowlez Chambers tier — quarterly subscription",
+        description="Nowlez Chambers tier — quarterly subscription (monthly×3)",
         env_var="RAZORPAY_PLAN_ID_CHAMBERS_QUARTERLY",
     ),
     PlanSpec(
@@ -331,14 +336,31 @@ async def _run(*, dry_run: bool) -> int:
     log.info("Razorpay reports %d existing plans on this account", len(existing_plans))
 
     log.info("Fetching existing offers...")
+    existing_offers: dict[str, str] = {}
+    offers_supported = True
     try:
         existing_offers = await _list_existing_offers(
             key_id=key_id, key_secret=key_secret,
         )
+    except httpx.HTTPStatusError as e:
+        # 404 typically means Offers feature isn't enabled for this account
+        # tier (Razorpay enables it on request for Subscriptions accounts).
+        # We degrade gracefully: skip offer creation entirely; plans still land.
+        if e.response is not None and e.response.status_code == 404:
+            log.warning(
+                "Offers API returned 404 — feature likely not enabled on this "
+                "Razorpay account. Skipping offer creation; plans will still be "
+                "created. Contact Razorpay support to enable Offers if needed."
+            )
+            offers_supported = False
+        else:
+            log.error("Could not list existing offers: %s", e)
+            return 1
     except httpx.HTTPError as e:
         log.error("Could not list existing offers: %s", e)
         return 1
-    log.info("Razorpay reports %d existing offers on this account", len(existing_offers))
+    if offers_supported:
+        log.info("Razorpay reports %d existing offers on this account", len(existing_offers))
 
     # Create-or-skip per spec.
     plan_ids: dict[str, str] = {}
@@ -360,21 +382,27 @@ async def _run(*, dry_run: bool) -> int:
         plan_ids[spec.env_var] = plan_id
 
     offer_ids: dict[str, str] = {}
-    for spec in OFFER_SPECS:
-        if spec.name in existing_offers:
-            offer_id = existing_offers[spec.name]
-            log.info("SKIP offer (already exists): %s -> %s", spec.name, offer_id)
-        else:
-            try:
-                offer_id = await _create_offer(
-                    spec, key_id=key_id, key_secret=key_secret,
-                )
-            except httpx.HTTPError as e:
-                failed += 1
-                log.error("FAILED to create offer %s: %s", spec.name, e)
-                continue
-            log.info("CREATED offer: %s -> %s", spec.name, offer_id)
-        offer_ids[spec.env_var] = offer_id
+    if not offers_supported:
+        log.warning(
+            "Skipping all %d offer creations (Offers API not enabled).",
+            len(OFFER_SPECS),
+        )
+    else:
+        for spec in OFFER_SPECS:
+            if spec.name in existing_offers:
+                offer_id = existing_offers[spec.name]
+                log.info("SKIP offer (already exists): %s -> %s", spec.name, offer_id)
+            else:
+                try:
+                    offer_id = await _create_offer(
+                        spec, key_id=key_id, key_secret=key_secret,
+                    )
+                except httpx.HTTPError as e:
+                    failed += 1
+                    log.error("FAILED to create offer %s: %s", spec.name, e)
+                    continue
+                log.info("CREATED offer: %s -> %s", spec.name, offer_id)
+            offer_ids[spec.env_var] = offer_id
 
     # Print env-var block. The operator pastes this into the deployment
     # env exactly as-is.
