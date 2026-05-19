@@ -32,8 +32,14 @@ class BillingConfig(BaseSettings):
     razorpay_plan_id_chambers_yearly: str
 
     # --- Razorpay offer IDs (intro promo) -----------------------------------
-    razorpay_offer_id_chambers_half_off: str
-    razorpay_offer_id_counsel_half_off: str
+    # Optional: the Razorpay Offers API is an account-tier-gated feature; not
+    # every merchant plan has it enabled. When absent, intro-promo eligible
+    # subscriptions are simply created without an offer attachment.
+    # Consumers (case_billing.nowlez.promos.get_intro_offer_id) already
+    # return None for the advocate tier — the None path was always supported,
+    # we're just making the schema match the runtime contract.
+    razorpay_offer_id_chambers_half_off: str | None = None
+    razorpay_offer_id_counsel_half_off: str | None = None
 
     # --- Munshi postpaid tunables -------------------------------------------
     munshi_price_per_case_paise: int = 1000  # ₹10 per case

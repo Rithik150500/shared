@@ -64,6 +64,46 @@ def test_billing_config_constructs_from_env(monkeypatch: pytest.MonkeyPatch) -> 
     _ = tmpdir
 
 
+def test_billing_config_loads_without_offer_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BillingConfig must construct when offer-ID env vars are absent.
+
+    Razorpay's Offers API is an account-tier-gated feature; not every merchant
+    plan has it. The schema must treat ``razorpay_offer_id_chambers_half_off``
+    and ``razorpay_offer_id_counsel_half_off`` as optional (None when absent)
+    rather than required. Otherwise consumers like casepilot's
+    /api/billing/razorpay-webhook 503 because BillingConfig() raises
+    ValidationError mid-import.
+
+    Consumers ALREADY handle ``offer_id=None`` (advocate tier returns None
+    from ``get_intro_offer_id`` — see promos.py:79-80), so making the env
+    vars optional aligns the schema with the runtime contract.
+    """
+    monkeypatch.chdir(__import__("tempfile").mkdtemp())
+
+    # Set ONLY the truly-required env vars; deliberately omit the two offer-id
+    # vars to mirror Railway production state.
+    required_no_offers = {
+        k: v for k, v in REQUIRED_ENV.items()
+        if not k.startswith("RAZORPAY_OFFER_ID_")
+    }
+    # Clear any offer-id env that the developer's shell may have set.
+    for k in ("RAZORPAY_OFFER_ID_CHAMBERS_HALF_OFF", "RAZORPAY_OFFER_ID_COUNSEL_HALF_OFF"):
+        monkeypatch.delenv(k, raising=False)
+    for key, value in required_no_offers.items():
+        monkeypatch.setenv(key, value)
+
+    from case_billing import BillingConfig
+
+    config = BillingConfig()
+
+    # Offer IDs default to None when not set.
+    assert config.razorpay_offer_id_chambers_half_off is None
+    assert config.razorpay_offer_id_counsel_half_off is None
+    # Other fields still populate normally.
+    assert config.razorpay_key_id == "rzp_test_key"
+    assert config.razorpay_plan_id_chambers_yearly == "plan_chambers_y"
+
+
 def test_error_hierarchy() -> None:
     """All billing errors share the BillingError base for blanket-catch use."""
     from case_billing.errors import (
