@@ -27,15 +27,15 @@ templates:
     category: UTILITY
     languages:
       en_US:
-        header: { type: text, text: "✅ Notifications paused" }
+        header: { type: text, text: "Notifications paused" }
         body: |
           You've been opted out of Nowlez WhatsApp notifications.
 
           We won't send you any more case updates or hearing reminders. If you change your mind, you can re-enable them anytime from your settings.
         buttons:
           - { type: url, text: "Open settings", url: "https://app.nowlez.in/settings" }
-      hi_IN:
-        header: { type: text, text: "✅ सूचनाएँ रोक दी गईं" }
+      hi:
+        header: { type: text, text: "सूचनाएँ रोक दी गईं" }
         body: |
           आपने Nowlez WhatsApp सूचनाओं से ऑप्ट-आउट कर दिया है।
 
@@ -52,7 +52,7 @@ templates:
     category: UTILITY
     languages:
       en_US:
-        header: { type: text, text: "👋 Welcome to Nowlez" }
+        header: { type: text, text: "Welcome to Nowlez" }
         body: |
           Hi *{{1}}*, welcome to Nowlez!
 
@@ -61,8 +61,8 @@ templates:
           - { type: url, text: "Notification settings", url: "https://app.nowlez.in/settings" }
         variables:
           - { name: user_name, position: 1, location: body }
-      hi_IN:
-        header: { type: text, text: "👋 Nowlez में आपका स्वागत है" }
+      hi:
+        header: { type: text, text: "Nowlez में आपका स्वागत है" }
         body: |
           नमस्ते *{{1}}*, Nowlez में आपका स्वागत है!
 
@@ -82,15 +82,15 @@ templates:
     category: UTILITY
     languages:
       en_US:
-        header: { type: text, text: "🔔 Notifications resumed" }
+        header: { type: text, text: "Notifications resumed" }
         body: |
           Your Nowlez WhatsApp notifications are back on.
 
           You'll start receiving case updates and hearing reminders again. You can fine-tune which notifications you want from your settings anytime.
         buttons:
           - { type: url, text: "Notification settings", url: "https://app.nowlez.in/settings" }
-      hi_IN:
-        header: { type: text, text: "🔔 सूचनाएँ पुनः सक्षम" }
+      hi:
+        header: { type: text, text: "सूचनाएँ पुनः सक्षम" }
         body: |
           आपकी Nowlez WhatsApp सूचनाएँ फिर से चालू हो गई हैं।
 
@@ -108,11 +108,11 @@ templates:
     category: UTILITY
     languages:
       en_US:
-        header: { type: text, text: "🧪 Smoke test" }
+        header: { type: text, text: "Smoke test" }
         body: |
           Nowlez smoke test — please ignore.
 
-          Message: {{1}}
+          Message: {{1}} (smoke).
         buttons:
           - { type: url, text: "Open Nowlez", url: "https://app.nowlez.in/" }
         variables:

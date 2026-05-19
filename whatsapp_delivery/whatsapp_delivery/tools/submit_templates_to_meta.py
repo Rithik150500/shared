@@ -289,7 +289,17 @@ def submit_filing(
         json=filing.body,
         timeout=_TIMEOUT,
     )
-    resp.raise_for_status()
+    # Capture Meta's response body in the exception so failures are
+    # actionable (Meta's 400s carry user_title + user_msg explaining
+    # which field is wrong; raise_for_status alone loses that).
+    if resp.status_code >= 400:
+        try:
+            err_body = resp.json()
+        except Exception:
+            err_body = {"raw": resp.text[:500]}
+        raise RuntimeError(
+            f"Meta {resp.status_code}: {err_body}"
+        )
     return resp.json()
 
 
@@ -412,11 +422,28 @@ def run(
             )
             skipped += 1
             continue
+        # Media-header templates need a separately-uploaded sample asset
+        # (example.header_handle) before Meta accepts them. The upload
+        # API needs a real file; for now, skip and let the operator file
+        # these manually via the Meta dashboard's file-picker UI.
+        media_header = any(
+            c.get("type") == "HEADER" and c.get("format") in ("DOCUMENT", "IMAGE", "VIDEO")
+            for c in f.body.get("components", [])
+        )
+        if media_header:
+            log.warning(
+                "SKIP (media header — file manually via Meta dashboard): %s [%s]",
+                f.full_name, f.language,
+            )
+            skipped += 1
+            continue
         try:
             response = submit_filing(
                 f, waba_id=waba_id, access_token=access_token,
             )
-        except httpx.HTTPError as e:
+        # NB: submit_filing raises RuntimeError on non-2xx (not httpx.HTTPError),
+        # so we catch broadly — one bad template must not kill the batch.
+        except Exception as e:
             failed += 1
             log.error(
                 "FAILED %s [%s]: %s",

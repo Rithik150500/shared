@@ -15,7 +15,7 @@ templates:
     category: UTILITY
     languages:
       en_US:
-        header: { type: text, text: "📅 Tomorrow's hearings" }
+        header: { type: text, text: "Tomorrow's hearings" }
         body: |
           You have *{{1}}* hearing(s) tomorrow:
 
@@ -27,8 +27,8 @@ templates:
         variables:
           - { name: count, position: 1, location: body }
           - { name: formatted_list, position: 2, location: body }
-      hi_IN:
-        header: { type: text, text: "📅 कल की सुनवाइयाँ" }
+      hi:
+        header: { type: text, text: "कल की सुनवाइयाँ" }
         body: |
           कल आपकी *{{1}}* सुनवाइयाँ हैं:
 
@@ -49,7 +49,7 @@ templates:
     category: UTILITY
     languages:
       en_US:
-        header: { type: text, text: "📊 Your weekly summary" }
+        header: { type: text, text: "Your weekly summary" }
         body: |
           Last week on your saved cases:
 
@@ -64,8 +64,8 @@ templates:
           - { name: new_orders_count, position: 1, location: body }
           - { name: hearings_completed, position: 2, location: body }
           - { name: hearings_scheduled, position: 3, location: body }
-      hi_IN:
-        header: { type: text, text: "📊 आपका साप्ताहिक सारांश" }
+      hi:
+        header: { type: text, text: "आपका साप्ताहिक सारांश" }
         body: |
           पिछले हफ्ते आपकी सहेजी गई केसों पर:
 
