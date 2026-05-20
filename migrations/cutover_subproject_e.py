@@ -249,12 +249,17 @@ def _reset_free_tier_to_trial(
         return int(count)
 
     trial_ends_at = now + timedelta(days=NOWLEZ_TRIAL_DURATION_DAYS)
+    # E-3: COALESCE preserves a real ``trial_started_at`` if alembic ran
+    # between the legacy users being created and this cutover, OR if a new
+    # signup landed after alembic completed but before the cutover runs.
+    # Without it, every reset would clobber the signup timestamp to NOW(),
+    # making trial-window analytics meaningless for the affected cohort.
     session.execute(
         text(
             """
             UPDATE users_nowlez
                SET tier = NULL,
-                   trial_started_at = :now,
+                   trial_started_at = COALESCE(trial_started_at, :now),
                    trial_ends_at = :ends_at
              WHERE tier = 'free'
             """
@@ -316,6 +321,29 @@ def run_cutover(
     """
     if now is None:
         now = datetime.now(timezone.utc)
+
+    # E-1: pin the cutover transaction to REPEATABLE READ. Under the default
+    # Postgres READ COMMITTED, a concurrent INSERT into ``subscriptions``
+    # between step 1's read of ``users_nowlez`` and step 2's count of
+    # ``tier='free'`` rows could cause the same user to be double-counted
+    # (once in step 1's backfill and again in step 2's free-tier reset).
+    # REPEATABLE READ takes a transaction-level snapshot so every read in
+    # the cutover sees a consistent view; on SQLite (used by the test
+    # path) this is effectively a no-op since the session is single-writer
+    # but the statement is parsed and accepted.
+    try:
+        session.execute(
+            text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        )
+    except Exception as e:  # pragma: no cover — SQLite parser may reject
+        # SQLite doesn't support SET TRANSACTION; the snapshot guarantee
+        # is moot there because tests run single-threaded against an
+        # in-memory engine. Log and continue — production hits Postgres,
+        # which handles the statement.
+        logger.debug(
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ rejected: %s "
+            "(non-fatal on SQLite/test path)", e,
+        )
 
     subscriptions_inserted = _backfill_subscriptions(
         session, now=now, dry_run=dry_run,
