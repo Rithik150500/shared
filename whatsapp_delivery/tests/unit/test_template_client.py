@@ -95,6 +95,49 @@ def test_send_template_other_4xx_raises_invalid():
         )
 
 
+# ---------------------------------------------------------------------------
+# D-1: template path mirrors the meta_client retry classification
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_send_template_429_raises_transient():
+    """A 429 on the template endpoint must surface as MetaTransientError."""
+    respx.post(_MESSAGES_URL).mock(
+        return_value=Response(429, text="too many requests")
+    )
+    with pytest.raises(MetaTransientError):
+        _make_client().send_template(
+            to="+919999999999", name="welcome_v1", language="en_US", variables=[],
+        )
+
+
+@respx.mock
+def test_send_template_429_with_retry_after_surfaces_seconds():
+    respx.post(_MESSAGES_URL).mock(
+        return_value=Response(429, text="slow", headers={"Retry-After": "5"})
+    )
+    with pytest.raises(MetaTransientError) as exc_info:
+        _make_client().send_template(
+            to="+919999999999", name="welcome_v1", language="en_US", variables=[],
+        )
+    assert exc_info.value.retry_after_seconds == 5
+
+
+@respx.mock
+def test_send_template_meta_error_code_130429_is_transient():
+    """Application-level rate-limit code is retry-able on the template path."""
+    respx.post(_MESSAGES_URL).mock(
+        return_value=Response(
+            400, json={"error": {"code": 130429, "message": "rate limit"}}
+        )
+    )
+    with pytest.raises(MetaTransientError):
+        _make_client().send_template(
+            to="+919999999999", name="welcome_v1", language="en_US", variables=[],
+        )
+
+
 # --- send_template_with_components (spec §3.9) ---
 
 @respx.mock

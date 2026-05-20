@@ -60,6 +60,71 @@ def test_send_text_other_4xx_raises_invalid():
 
 
 # ---------------------------------------------------------------------------
+# D-1: 429 + Meta retry-able error codes must raise MetaTransientError
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_send_text_429_raises_transient_not_invalid():
+    """HTTP 429 (rate-limited) must be retryable, not lumped into 4xx-invalid."""
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(429, text="too many requests")
+    )
+    with pytest.raises(MetaTransientError):
+        _make_client().send_text("+919999999999", "hello")
+
+
+@respx.mock
+def test_send_text_429_with_retry_after_header_surfaces_seconds():
+    """If Meta sends ``Retry-After``, the exception carries it for RQ to honor."""
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(429, text="slow down", headers={"Retry-After": "12"})
+    )
+    with pytest.raises(MetaTransientError) as exc_info:
+        _make_client().send_text("+919999999999", "hello")
+    assert exc_info.value.retry_after_seconds == 12
+
+
+@respx.mock
+def test_send_text_meta_error_code_130429_in_400_body_is_transient():
+    """Meta's 130429 (rate-limit at the application level) is retry-able even
+    when the HTTP status is 400 — caller MUST retry, not dead-letter."""
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(
+            400, json={"error": {"code": 130429, "message": "rate limit hit"}}
+        )
+    )
+    with pytest.raises(MetaTransientError):
+        _make_client().send_text("+919999999999", "hello")
+
+
+@respx.mock
+def test_send_text_meta_error_code_131056_is_transient():
+    """Meta's 131056 (pair rate limit hit) is documented as retry-able."""
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(
+            400, json={"error": {"code": 131056, "message": "pair rate limit"}}
+        )
+    )
+    with pytest.raises(MetaTransientError):
+        _make_client().send_text("+919999999999", "hello")
+
+
+@respx.mock
+def test_send_text_meta_error_code_133016_is_transient():
+    """Meta's 133016 (temporary registration error) is documented as retry-able."""
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(
+            400, json={"error": {"code": 133016, "message": "temporary registration"}}
+        )
+    )
+    with pytest.raises(MetaTransientError):
+        _make_client().send_text("+919999999999", "hello")
+
+
+
+
+# ---------------------------------------------------------------------------
 # send_interactive_buttons
 # ---------------------------------------------------------------------------
 

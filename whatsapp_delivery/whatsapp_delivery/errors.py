@@ -12,7 +12,17 @@ class ScaffoldError(Exception):
 
 
 class MetaTransientError(ScaffoldError):
-    """Meta returned 5xx or a network glitch. Caller should retry."""
+    """Meta returned 5xx, 429, or a documented retry-able error code. Caller should retry.
+
+    ``retry_after_seconds`` carries the value of the ``Retry-After`` HTTP header
+    if Meta sent one (typical on 429 throttling). Callers (RQ retry policy)
+    may honor it when scheduling the next attempt; ``None`` means Meta did
+    not specify a delay.
+    """
+
+    def __init__(self, message: str, *, retry_after_seconds: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class MetaInvalidMessage(ScaffoldError):

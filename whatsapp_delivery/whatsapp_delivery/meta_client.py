@@ -16,11 +16,14 @@ URLs we'd have to build. The media-upload path keeps PDFs inside Meta's
 
 Error mapping:
 - 5xx -> MetaTransientError (retryable)
+- 429, or 400 with one of {130429, 131056, 133016} -> MetaTransientError
+  (Meta's documented "retry after a delay" envelopes; D-1 audit fix)
 - 400 with code 131047 -> Meta24HourWindowExpired (only templates allowed)
 - other 4xx -> MetaInvalidMessage (do not retry)
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,6 +42,50 @@ _TIMEOUT = 30
 # Meta caps document filename and caption lengths; clip defensively.
 _MAX_DOCUMENT_FILENAME = 240
 _MAX_DOCUMENT_CAPTION = 1024
+
+# D-1: Meta documents these error codes as "retryable after a delay" — they
+# come back in a 400-shaped envelope but the right behavior is to re-enqueue,
+# not dead-letter as invalid.
+#   130429 — application-level rate limit
+#   131056 — pair (phone-pair) rate limit
+#   133016 — temporary registration / messaging unavailable
+_META_RETRYABLE_ERROR_CODES: frozenset[int] = frozenset({130429, 131056, 133016})
+
+# D-3: error envelopes from Meta can echo our Authorization header on upload
+# endpoints, and verbose bodies blow out logs. We truncate aggressively and
+# strip anything that looks like a bearer token / JWT before raising.
+_BEARER_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE)
+_AUTH_HEADER_PATTERN = re.compile(r"Authorization\s*:\s*[^\s,]+", re.IGNORECASE)
+_JWT_PATTERN = re.compile(r"[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+")
+_MAX_META_ERROR_BODY = 200
+
+
+def _sanitize_meta_response(text: str) -> str:
+    """Redact bearer tokens / JWTs from a Meta error body, then truncate.
+
+    Meta's media-upload endpoints occasionally echo the Authorization header
+    back in error responses (especially on auth-related 4xx). Surface the
+    body for debugging, but never leak the token. Order matters: redact
+    *before* truncating so a token spanning the truncation point still gets
+    scrubbed.
+    """
+    if not text:
+        return ""
+    scrubbed = _AUTH_HEADER_PATTERN.sub("Authorization: <redacted>", text)
+    scrubbed = _BEARER_PATTERN.sub("Bearer <redacted>", scrubbed)
+    scrubbed = _JWT_PATTERN.sub("<redacted-jwt>", scrubbed)
+    return scrubbed[:_MAX_META_ERROR_BODY]
+
+
+def _parse_retry_after(value: str | None) -> int | None:
+    """Parse a numeric ``Retry-After`` header value to seconds, or None."""
+    if not value:
+        return None
+    try:
+        return int(value.strip())
+    except (ValueError, AttributeError):
+        # Meta could also send an HTTP-date but we don't currently honor that.
+        return None
 
 
 @dataclass
@@ -265,15 +312,48 @@ class MetaClient:
         error semantics. The only path-specific behavior was the 131047
         24-hour-window code, which only fires on /messages -- safe to apply
         uniformly because /media never returns that code.
+
+        D-1: 429 (HTTP rate-limited) and Meta's documented retry-able error
+        codes (130429, 131056, 133016) raise MetaTransientError so RQ will
+        re-enqueue. ``Retry-After`` is surfaced on the exception for the
+        retry policy to honor.
+
+        D-3: bodies are run through ``_sanitize_meta_response`` so a leaked
+        bearer/Authorization in the upstream payload doesn't escape into
+        Sentry.
         """
         if resp.status_code >= 500:
-            raise MetaTransientError(f"{what} {resp.status_code}: {resp.text}")
+            raise MetaTransientError(
+                f"{what} {resp.status_code}: {_sanitize_meta_response(resp.text)}",
+                retry_after_seconds=_parse_retry_after(resp.headers.get("Retry-After")),
+            )
+        # 429 = rate-limited; always retryable. Check before the generic >=400
+        # branch so the explicit retry path wins.
+        if resp.status_code == 429:
+            raise MetaTransientError(
+                f"{what} 429: {_sanitize_meta_response(resp.text)}",
+                retry_after_seconds=_parse_retry_after(resp.headers.get("Retry-After")),
+            )
         if resp.status_code >= 400:
             try:
                 data = resp.json()
             except ValueError:
-                raise MetaInvalidMessage(f"{what} {resp.status_code}: {resp.text}")
+                raise MetaInvalidMessage(
+                    f"{what} {resp.status_code}: {_sanitize_meta_response(resp.text)}"
+                )
             err = data.get("error", {})
-            if err.get("code") == 131047:
+            err_code = err.get("code")
+            # D-1: a 4xx envelope with a documented retry-able code is still
+            # retryable. Check before the 131047 / generic-invalid branches
+            # so we don't dead-letter a rate-limit hit.
+            if err_code in _META_RETRYABLE_ERROR_CODES:
+                raise MetaTransientError(
+                    f"{what} {resp.status_code} code={err_code}: "
+                    f"{_sanitize_meta_response(err.get('message', '') or resp.text)}",
+                    retry_after_seconds=_parse_retry_after(resp.headers.get("Retry-After")),
+                )
+            if err_code == 131047:
                 raise Meta24HourWindowExpired(err.get("message", "24h window expired"))
-            raise MetaInvalidMessage(err.get("message", resp.text))
+            raise MetaInvalidMessage(
+                _sanitize_meta_response(err.get("message", "") or resp.text)
+            )

@@ -201,6 +201,11 @@ class TemplateClient:
         return self._post(body, what="send_template_with_components")
 
     def _post(self, body: dict[str, Any], *, what: str) -> str:
+        # Re-use MetaClient's shared error-mapping path so 429 / retry-able
+        # error codes (D-1) and bearer-token sanitization (D-3) stay in
+        # lock-step between the two clients.
+        from whatsapp_delivery.meta_client import MetaClient
+
         url = f"{_GRAPH_BASE}/{self.phone_number_id}/messages"
         resp = httpx.post(
             url,
@@ -211,17 +216,7 @@ class TemplateClient:
             json=body,
             timeout=_TIMEOUT,
         )
-        if resp.status_code >= 500:
-            raise MetaTransientError(f"{what} {resp.status_code}: {resp.text}")
-        if resp.status_code >= 400:
-            try:
-                data = resp.json()
-            except ValueError:
-                raise MetaInvalidMessage(f"{what} {resp.status_code}: {resp.text}")
-            err = data.get("error", {})
-            if err.get("code") == 131047:
-                raise Meta24HourWindowExpired(err.get("message", "24h window expired"))
-            raise MetaInvalidMessage(err.get("message", resp.text))
+        MetaClient._raise_for_status(resp, what=what)
         return resp.json()["messages"][0]["id"]
 
 
