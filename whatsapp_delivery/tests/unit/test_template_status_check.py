@@ -176,7 +176,7 @@ def test_load_expected_bundled_nowlez_has_21_filings() -> None:
 @respx.mock
 def test_fetch_meta_statuses_single_page() -> None:
     respx.get(
-        "https://graph.facebook.com/v15.0/WABA/message_templates"
+        "https://graph.facebook.com/v20.0/WABA/message_templates"
     ).mock(return_value=Response(200, json={
         "data": [
             {"name": "nowlez_foo_v1", "language": "en_US", "status": "APPROVED"},
@@ -203,15 +203,15 @@ def test_fetch_meta_statuses_single_page() -> None:
 def test_fetch_meta_statuses_paginates() -> None:
     # First page returns a next-URL; second page returns no next.
     respx.get(
-        "https://graph.facebook.com/v15.0/WABA/message_templates"
+        "https://graph.facebook.com/v20.0/WABA/message_templates"
     ).mock(return_value=Response(200, json={
         "data": [
             {"name": "nowlez_a_v1", "language": "en_US", "status": "APPROVED"},
         ],
-        "paging": {"next": "https://graph.facebook.com/v15.0/WABA/message_templates?after=p2"},
+        "paging": {"next": "https://graph.facebook.com/v20.0/WABA/message_templates?after=p2"},
     }))
     respx.get(
-        "https://graph.facebook.com/v15.0/WABA/message_templates",
+        "https://graph.facebook.com/v20.0/WABA/message_templates",
         params={"after": "p2"},
     ).mock(return_value=Response(200, json={
         "data": [
@@ -229,7 +229,7 @@ def test_fetch_meta_statuses_paginates() -> None:
 @respx.mock
 def test_fetch_meta_statuses_http_error_raises() -> None:
     respx.get(
-        "https://graph.facebook.com/v15.0/WABA/message_templates"
+        "https://graph.facebook.com/v20.0/WABA/message_templates"
     ).mock(return_value=Response(401, text="invalid token"))
     with pytest.raises(RuntimeError, match="Meta API 401"):
         tsc.fetch_meta_statuses(waba_id="WABA", access_token="TOK")
@@ -267,7 +267,7 @@ def test_run_all_approved_exits_zero(
     tmp_nowlez_dir: Path, tmp_munshi_yaml: Path, capsys: pytest.CaptureFixture,
 ) -> None:
     respx.get(
-        "https://graph.facebook.com/v15.0/WABA/message_templates"
+        "https://graph.facebook.com/v20.0/WABA/message_templates"
     ).mock(return_value=Response(200, json={
         "data": [
             {"name": "nowlez_foo_v1", "language": "en_US", "status": "APPROVED"},
@@ -299,7 +299,7 @@ def test_run_missing_template_exits_two(
     tmp_nowlez_dir: Path, tmp_munshi_yaml: Path, capsys: pytest.CaptureFixture,
 ) -> None:
     respx.get(
-        "https://graph.facebook.com/v15.0/WABA/message_templates"
+        "https://graph.facebook.com/v20.0/WABA/message_templates"
     ).mock(return_value=Response(200, json={
         "data": [
             {"name": "nowlez_foo_v1", "language": "en_US", "status": "APPROVED"},
@@ -327,7 +327,7 @@ def test_run_pending_status_exits_two(
     tmp_nowlez_dir: Path, capsys: pytest.CaptureFixture,
 ) -> None:
     respx.get(
-        "https://graph.facebook.com/v15.0/WABA/message_templates"
+        "https://graph.facebook.com/v20.0/WABA/message_templates"
     ).mock(return_value=Response(200, json={
         "data": [
             {"name": "nowlez_foo_v1", "language": "en_US", "status": "APPROVED"},
@@ -368,7 +368,7 @@ def test_run_brand_filter_skips_munshi(
 ) -> None:
     """``--brand nowlez`` should not require Munshi templates to be on Meta."""
     respx.get(
-        "https://graph.facebook.com/v15.0/WABA/message_templates"
+        "https://graph.facebook.com/v20.0/WABA/message_templates"
     ).mock(return_value=Response(200, json={
         "data": [
             {"name": "nowlez_foo_v1", "language": "en_US", "status": "APPROVED"},
@@ -394,7 +394,7 @@ def test_run_meta_api_5xx_exits_two(
     tmp_nowlez_dir: Path, capsys: pytest.CaptureFixture,
 ) -> None:
     respx.get(
-        "https://graph.facebook.com/v15.0/WABA/message_templates"
+        "https://graph.facebook.com/v20.0/WABA/message_templates"
     ).mock(return_value=Response(500, text="boom"))
     code = tsc.run(
         brand="nowlez",

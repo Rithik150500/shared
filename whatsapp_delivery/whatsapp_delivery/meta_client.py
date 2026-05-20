@@ -36,7 +36,27 @@ from whatsapp_delivery.errors import (
 )
 
 
-_GRAPH_VERSION = "v20.0"
+# D-11: single source of truth for the Graph API version. Pre-fix the
+# package shipped three different versions:
+#
+#   * meta_client / template_client (runtime send path): v20.0
+#   * tools/submit_templates_to_meta (operator filing tool): v15.0
+#   * tools/template_status_check (status-audit tool):       v15.0
+#
+# (And ``shared/identity/identity/delivery/whatsapp.py`` — a separate
+# package — uses v18.0 on its OTP send path. That's NOT unified here
+# because identity does not depend on whatsapp_delivery; importing this
+# constant from identity would create a backward dependency. The
+# operator can align identity to this version manually if/when they
+# re-touch that module — until then both versions work in parallel
+# because Meta retains old Graph API versions for the full deprecation
+# window.)
+#
+# All three call sites WITHIN whatsapp_delivery now import this constant
+# so a single edit here updates them in lock-step.
+META_GRAPH_API_VERSION: str = "v20.0"
+
+_GRAPH_VERSION = META_GRAPH_API_VERSION
 _GRAPH_BASE = f"https://graph.facebook.com/{_GRAPH_VERSION}"
 _TIMEOUT = 30
 # Meta caps document filename and caption lengths; clip defensively.

@@ -4,9 +4,10 @@ Mirrors Munshi's ``deploy/scripts/template_status_check.py`` but reads
 **both** the Munshi-side ``deploy/templates_filed.yml`` (if present)
 AND the Nowlez-side ``whatsapp_delivery/templates/nowlez/*.yml``
 registries. Calls Meta's
-``GET /v15.0/{WABA_ID}/message_templates`` endpoint, paginates through
-every filing on the WABA, and reports per template whether Meta's
-status matches the expected ``APPROVED``.
+``GET /<version>/{WABA_ID}/message_templates`` endpoint (version owned
+by ``whatsapp_delivery.meta_client.META_GRAPH_API_VERSION``), paginates
+through every filing on the WABA, and reports per template whether
+Meta's status matches the expected ``APPROVED``.
 
 Designed to run on demand (after a filing pass) and as a periodic CI
 job — Meta may auto-pause a template if quality drops, so a green
@@ -53,8 +54,13 @@ from typing import Any, Iterable
 import httpx
 import yaml
 
+from whatsapp_delivery.meta_client import META_GRAPH_API_VERSION
 
-_GRAPH_VERSION = "v15.0"
+
+# D-11: align with the runtime send path. The GET
+# ``{WABA_ID}/message_templates`` endpoint is stable across v15-v20 so
+# unifying is safe and removes one source of version drift.
+_GRAPH_VERSION = META_GRAPH_API_VERSION
 _GRAPH_BASE = f"https://graph.facebook.com/{_GRAPH_VERSION}"
 _TIMEOUT = 30
 

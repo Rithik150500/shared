@@ -8,10 +8,12 @@ shared YAML registries at::
     whatsapp_delivery/templates/nowlez/*.yml
 
 and POSTs every template to Meta's Cloud API endpoint
-``POST /v15.0/{WABA_ID}/message_templates``. Templates already present
-on Meta's side -- in ANY status (PENDING, APPROVED, REJECTED) -- are
-skipped so the script is idempotent and can be re-run safely after a
-partial failure or after editing a single template's wording.
+``POST /<version>/{WABA_ID}/message_templates`` (the version is owned by
+``whatsapp_delivery.meta_client.META_GRAPH_API_VERSION``). Templates
+already present on Meta's side -- in ANY status (PENDING, APPROVED,
+REJECTED) -- are skipped so the script is idempotent and can be re-run
+safely after a partial failure or after editing a single template's
+wording.
 
 Each successful submission is also recorded in the ``audit_log`` table
 with ``event_type='template.submitted'`` per Sub-project E plan §1.1.2,
@@ -55,8 +57,15 @@ from typing import Any, Iterable
 import httpx
 import yaml
 
+from whatsapp_delivery.meta_client import META_GRAPH_API_VERSION
 
-_GRAPH_VERSION = "v15.0"
+
+# D-11: align with the runtime send path. Pre-fix this tool used v15.0
+# while the runtime client used v20.0 — the template-management endpoint
+# (``POST {WABA_ID}/message_templates``) is stable across both versions,
+# so unifying is safe and removes one source of version drift in the
+# package.
+_GRAPH_VERSION = META_GRAPH_API_VERSION
 _GRAPH_BASE = f"https://graph.facebook.com/{_GRAPH_VERSION}"
 _TIMEOUT = 30
 

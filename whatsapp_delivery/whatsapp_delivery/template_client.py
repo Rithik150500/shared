@@ -27,11 +27,14 @@ from whatsapp_delivery.errors import (
     MetaInvalidMessage,
     MetaTransientError,
 )
+from whatsapp_delivery.meta_client import META_GRAPH_API_VERSION
 
 
 log = logging.getLogger(__name__)
 
-_GRAPH_VERSION = "v20.0"
+# D-11: Graph API version is owned by meta_client.META_GRAPH_API_VERSION
+# so the runtime send path and template path stay in lock-step.
+_GRAPH_VERSION = META_GRAPH_API_VERSION
 _GRAPH_BASE = f"https://graph.facebook.com/{_GRAPH_VERSION}"
 _TIMEOUT = 30
 
