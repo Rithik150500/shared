@@ -199,6 +199,27 @@ async def enqueue_send_template_with_components(
     return await asyncio.to_thread(_enqueue)
 
 
+_MAX_DOCUMENT_BYTES = 256 * 1024
+"""Upper bound for ``document_bytes`` in enqueue_send_document.
+
+Audit fix D-5: the worker pickles ``document_bytes`` into Redis as part
+of the RQ job kwargs. A 5 MB PDF × 3 RQ retries × failed-job-registry
+retention = ~60 MB of Redis bloat per failed job. Under any sustained
+outage this could push Redis OOM.
+
+The cap is set conservatively at 256 KB — large enough for cause-list
+PDFs and similar small attachments (the only current envisioned senders),
+small enough that even with retention + retries the Redis footprint
+stays bounded.
+
+For larger documents, producers should stage the file to object storage
+(S3/R2) themselves and pass a URL to a future ``enqueue_send_document_url``
+variant that fetches the bytes in the worker. That helper does not exist
+today (no caller needs it); see this constant's git blame for the
+rationale should the situation change.
+"""
+
+
 async def enqueue_send_document(
     *,
     to: str,
@@ -210,10 +231,22 @@ async def enqueue_send_document(
 ) -> str:
     """Enqueue an upload-and-send PDF job. Returns the RQ job id.
 
+    Raises :class:`ValueError` if ``document_bytes`` exceeds
+    :data:`_MAX_DOCUMENT_BYTES` — audit fix D-5 caps Redis-borne payloads
+    so a misuse can't OOM the queue under retry storms.
+
     ``dedup_key`` has the same D-4 semantics as in
     :func:`enqueue_send_text`: a stable producer-supplied key that makes
     RQ retries idempotent (and avoids re-uploading the same PDF).
     """
+    if len(document_bytes) > _MAX_DOCUMENT_BYTES:
+        raise ValueError(
+            f"document_bytes is {len(document_bytes):,} bytes which exceeds "
+            f"_MAX_DOCUMENT_BYTES ({_MAX_DOCUMENT_BYTES:,}). Either trim the "
+            f"document or stage it to object storage and use a URL-based "
+            f"send variant (does not exist yet — add it when first caller "
+            f"needs >256 KB)."
+        )
 
     def _enqueue() -> str:
         from whatsapp_delivery.dispatch.worker import _do_send_document
