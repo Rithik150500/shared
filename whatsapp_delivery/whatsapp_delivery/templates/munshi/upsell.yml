@@ -1,0 +1,235 @@
+# Munshi → Nowlez upsell templates (sub-project C Phase 2).
+#
+# Three upsell stages fire at 80/150/195-case (or ₹1000/₹1500 spend)
+# thresholds, with at-most-once-per-stage enforcement in the
+# munshi_upsell_events table (sub-project C Phase 1's schema). The fourth
+# template is the dual-product welcome fired when a Nowlez subscriber
+# first messages Munshi.
+#
+# Hindi variants follow the `_hi_v1` naming convention used by other
+# Munshi templates (e.g. re_engage_*_hi_v1). Each is filed as its own
+# template under a single language code because Meta requires that.
+#
+# Variable layout per stage:
+#   {{1}} = user_name
+#   {{2}} = active_case_count
+#   {{3}} = monthly_munshi_spend_rupees
+#   {{4}} = auto_login_jwt (URL param; one-time-use; 5-min TTL)
+#
+# URL pattern: https://app.nowlez.in/upgrade?token={{4}}
+# Sub-project C Phase 1's case_billing.nowlez.auto_login.mint_auto_login_jwt
+# mints the {{4}} value at template-send time.
+
+templates:
+  # ------------------------------------------------------------
+  # Stage 1: initial (80 cases OR ₹1000 spend)
+  # ------------------------------------------------------------
+  - name: munshi_upsell_initial_v1
+    full_name: munshi_upsell_initial_v1
+    category: MARKETING
+    languages:
+      en:
+        header:
+          type: text
+          text: "Tracking lots of cases"
+        body: |
+          Hi {{1}},
+
+          You're currently tracking *{{2}} cases* on Munshi (₹{{3}}/month at your usage).
+
+          Nowlez might fit your scale better — starting at ₹1,000/mo (Advocate) you get unlimited cases plus AI chat, document storage, and team features.
+
+          Chambers tier is FREE for first month.
+        buttons:
+          - type: url
+            text: "See plans"
+            url: "https://app.nowlez.in/upgrade?token={{1}}"
+        variables:
+          - { name: user_name, position: 1, location: body }
+          - { name: active_cases, position: 2, location: body }
+          - { name: monthly_spend, position: 3, location: body }
+          - { name: token, position: 1, location: button_url }
+
+  - name: munshi_upsell_initial_hi_v1
+    full_name: munshi_upsell_initial_hi_v1
+    category: MARKETING
+    languages:
+      hi:
+        header:
+          type: text
+          text: "बहुत सारे केस ट्रैक हो रहे हैं"
+        body: |
+          नमस्ते {{1}},
+
+          आप अभी Munshi पर *{{2}} केस* ट्रैक कर रहे हैं (आपके इस्तेमाल पर ₹{{3}}/महीना)।
+
+          Nowlez आपके लिए शायद बेहतर रहे — ₹1,000/महीना (Advocate) से शुरू, असीमित केस, AI चैट, दस्तावेज़ स्टोरेज, और टीम फीचर्स।
+
+          Chambers टियर पहले महीने मुफ़्त।
+        buttons:
+          - type: url
+            text: "प्लान देखें"
+            url: "https://app.nowlez.in/upgrade?token={{1}}"
+        variables:
+          - { name: user_name, position: 1, location: body }
+          - { name: active_cases, position: 2, location: body }
+          - { name: monthly_spend, position: 3, location: body }
+          - { name: token, position: 1, location: button_url }
+
+  # ------------------------------------------------------------
+  # Stage 2: reminder (150 cases OR ₹1500 spend)
+  # ------------------------------------------------------------
+  - name: munshi_upsell_reminder_v1
+    full_name: munshi_upsell_reminder_v1
+    category: MARKETING
+    languages:
+      en:
+        header:
+          type: text
+          text: "Approaching Munshi case limit"
+        body: |
+          Hi {{1}},
+
+          You've grown to *{{2}} cases* — that's ₹{{3}}/month and 75% of the 200-case Munshi limit.
+
+          Nowlez subscriptions offer unlimited cases starting at ₹1,000/mo. Try Chambers free for 30 days.
+        buttons:
+          - type: url
+            text: "Start free trial"
+            url: "https://app.nowlez.in/upgrade?token={{1}}"
+        variables:
+          - { name: user_name, position: 1, location: body }
+          - { name: active_cases, position: 2, location: body }
+          - { name: monthly_spend, position: 3, location: body }
+          - { name: token, position: 1, location: button_url }
+
+  - name: munshi_upsell_reminder_hi_v1
+    full_name: munshi_upsell_reminder_hi_v1
+    category: MARKETING
+    languages:
+      hi:
+        header:
+          type: text
+          text: "Munshi की केस सीमा के पास"
+        body: |
+          नमस्ते {{1}},
+
+          आपके पास अब *{{2}} केस* हैं — यह ₹{{3}}/महीना और 200-केस Munshi सीमा का 75% है।
+
+          Nowlez सब्सक्रिप्शन में असीमित केस ₹1,000/महीना से शुरू। Chambers 30 दिन मुफ़्त ट्राई करें।
+        buttons:
+          - type: url
+            text: "मुफ़्त ट्रायल शुरू करें"
+            url: "https://app.nowlez.in/upgrade?token={{1}}"
+        variables:
+          - { name: user_name, position: 1, location: body }
+          - { name: active_cases, position: 2, location: body }
+          - { name: monthly_spend, position: 3, location: body }
+          - { name: token, position: 1, location: button_url }
+
+  # ------------------------------------------------------------
+  # Stage 3: final (195 cases — case-count only)
+  # ------------------------------------------------------------
+  - name: munshi_upsell_final_v1
+    full_name: munshi_upsell_final_v1
+    category: MARKETING
+    languages:
+      en:
+        header:
+          type: text
+          text: "Near the Munshi case limit"
+        body: |
+          Hi {{1}},
+
+          You have *{{2}} cases* — just {{3}} below the 200-case Munshi cap. Adding new cases will be blocked once you hit the cap.
+
+          Upgrade to Nowlez for unlimited case tracking. Chambers tier: 1st month FREE.
+        buttons:
+          - type: url
+            text: "Upgrade now"
+            url: "https://app.nowlez.in/upgrade?token={{1}}"
+        variables:
+          - { name: user_name, position: 1, location: body }
+          - { name: active_cases, position: 2, location: body }
+          - { name: cases_remaining, position: 3, location: body }
+          - { name: token, position: 1, location: button_url }
+
+  - name: munshi_upsell_final_hi_v1
+    full_name: munshi_upsell_final_hi_v1
+    category: MARKETING
+    languages:
+      hi:
+        header:
+          type: text
+          text: "Munshi की केस सीमा के बहुत पास"
+        body: |
+          नमस्ते {{1}},
+
+          आपके पास *{{2}} केस* हैं — 200-केस Munshi सीमा से सिर्फ़ {{3}} कम। सीमा पर पहुँचते ही नए केस जोड़ना बंद हो जाएगा।
+
+          Nowlez पर अपग्रेड करें — असीमित केस ट्रैकिंग। Chambers टियर: पहला महीना मुफ़्त।
+        buttons:
+          - type: url
+            text: "अभी अपग्रेड करें"
+            url: "https://app.nowlez.in/upgrade?token={{1}}"
+        variables:
+          - { name: user_name, position: 1, location: body }
+          - { name: active_cases, position: 2, location: body }
+          - { name: cases_remaining, position: 3, location: body }
+          - { name: token, position: 1, location: button_url }
+
+  # ------------------------------------------------------------
+  # Dual-product welcome: fires when a Nowlez subscriber first
+  # messages Munshi (reverse-direction onboarding per spec 4.4-4.5).
+  # ------------------------------------------------------------
+  - name: munshi_nowlez_subscriber_welcome_v1
+    full_name: munshi_nowlez_subscriber_welcome_v1
+    category: UTILITY
+    languages:
+      en:
+        header:
+          type: text
+          text: "Welcome to Munshi!"
+        body: |
+          Hi {{1}},
+
+          You're a Nowlez *{{2}}* subscriber, so Munshi works alongside Nowlez for you:
+
+          ✓ Use Munshi WhatsApp for quick case lookups, daily reminders, and on-the-go notifications
+          ✓ All cases sync with your Nowlez workspace
+          ✓ No extra charges — your Nowlez subscription includes WhatsApp delivery
+
+          Reply STOP to pause WhatsApp notifications.
+        buttons:
+          - type: url
+            text: "Open Nowlez"
+            url: "https://app.nowlez.in/workspace"
+        variables:
+          - { name: user_name, position: 1, location: body }
+          - { name: nowlez_tier, position: 2, location: body }
+
+  - name: munshi_nowlez_subscriber_welcome_hi_v1
+    full_name: munshi_nowlez_subscriber_welcome_hi_v1
+    category: UTILITY
+    languages:
+      hi:
+        header:
+          type: text
+          text: "Munshi में आपका स्वागत है!"
+        body: |
+          नमस्ते {{1}},
+
+          आप एक Nowlez *{{2}}* सब्सक्राइबर हैं, इसलिए Munshi आपके लिए Nowlez के साथ काम करता है:
+
+          ✓ त्वरित केस लुकअप, दैनिक रिमाइंडर, और चलते-फिरते सूचनाओं के लिए Munshi WhatsApp का इस्तेमाल करें
+          ✓ सभी केस आपके Nowlez वर्कस्पेस के साथ सिंक होते हैं
+          ✓ कोई अतिरिक्त शुल्क नहीं — आपके Nowlez सब्सक्रिप्शन में WhatsApp डिलीवरी शामिल है
+
+          WhatsApp सूचनाएँ रोकने के लिए STOP भेजें।
+        buttons:
+          - type: url
+            text: "Nowlez खोलें"
+            url: "https://app.nowlez.in/workspace"
+        variables:
+          - { name: user_name, position: 1, location: body }
+          - { name: nowlez_tier, position: 2, location: body }
