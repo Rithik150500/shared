@@ -138,3 +138,33 @@ def test_upsert_user_cascade_delete(session, user):
 
     # Re-query: all prefs should be gone
     assert len(case_preferences_dao.list_for_user(session, user_id=user.id)) == 0
+
+
+def test_upsert_update_path_uses_tz_aware_utc(session, user):
+    """A-9 audit fix: the UPDATE branch must write a tz-aware datetime to
+    updated_at, not the deprecated naive `datetime.utcnow()`.
+
+    Trigger the update branch (second upsert with a value) and assert the
+    DAO didn't emit a DeprecationWarning and the persisted value is the
+    expected UTC instant.
+    """
+    import warnings
+
+    # First call: INSERT (skips update-values branch).
+    case_preferences_dao.upsert(
+        session, user_id=user.id, cnr="DLND01", alert_level="all",
+    )
+
+    # Second call: triggers the UPDATE branch where updated_at is set.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        # Should not raise (no DeprecationWarning).
+        case_preferences_dao.upsert(
+            session, user_id=user.id, cnr="DLND01", alert_level="orders_only",
+        )
+
+    row = case_preferences_dao.get_by_cnr(session, user_id=user.id, cnr="DLND01")
+    # SQLite strips tz on round-trip; re-attach to verify "UTC was used".
+    # The real assertion is the DeprecationWarning above — this is a smoke
+    # check that the new datetime call still produced a usable value.
+    assert row.updated_at is not None

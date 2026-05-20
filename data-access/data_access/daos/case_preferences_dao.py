@@ -8,7 +8,7 @@ explicitly (alert_level=None means "don't change in UPDATE clause").
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -87,7 +87,10 @@ def upsert(
         # Bump updated_at via Python-side datetime — server_default doesn't
         # apply to UPDATE in either dialect, and `onupdate=func.now()` on
         # the column only fires for ORM-level updates, not Core inserts.
-        update_values["updated_at"] = datetime.utcnow()
+        # A-9 audit fix: use tz-aware UTC. The column is DateTime(timezone=True);
+        # naive datetime.utcnow() emits DeprecationWarning on Python 3.12+ and
+        # would trip strict tz checks under Postgres (silently accepted today).
+        update_values["updated_at"] = datetime.now(timezone.utc)
         stmt = stmt.on_conflict_do_update(
             index_elements=["user_id", "cnr"],
             set_=update_values,
