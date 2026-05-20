@@ -9,9 +9,13 @@ The eligibility query (Section 2.1 of the sub-project C spec) is run by
 the daily cron; this module exposes the stage-determination logic
 separately so it can be unit-tested without mocking the cron query, and
 provides DAO helpers for recording sends + conversions.
+
+Sub-project C Phase 4 (2026-05-20) adds the pilot-rollout filter
+(SUBPROJECT_C_PILOT_USERS env var) + Prometheus metric counters.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -29,6 +33,91 @@ CASE_COUNT_FINAL = 195
 SPEND_INITIAL_RUPEES = 1000
 SPEND_REMINDER_RUPEES = 1500
 # Final stage: case-count only (~195 cases = 97.5% of 200 cap)
+
+
+# ----------------------------------------------------------------------
+# Sub-project C Phase 4: pilot-rollout filter + observability
+# ----------------------------------------------------------------------
+
+# Comma-separated list of user_id UUIDs allowed to receive upsells during
+# the pilot phase. When set, the daily cron silently skips every user not
+# in this set. When unset OR empty, the cron processes all eligible users
+# (full rollout).
+#
+# Pilot launch protocol (spec section 2.8): identify 10-20 Munshi users in
+# 80-case range or ≥₹1,000 cumulative spend, populate this env var with
+# their user_ids, monitor for 7 days, then unset for full rollout.
+PILOT_USER_IDS_ENV = "SUBPROJECT_C_PILOT_USERS"
+
+# Kill switch — if "true"/"1"/"yes", the upsell cron is a no-op. Used for
+# instant rollback (section 7.4 rollback table: ~5 min).
+UPSELL_CRON_DISABLED_ENV = "UPSELL_CRON_DISABLED"
+
+
+def get_pilot_user_ids() -> set[uuid.UUID] | None:
+    """Return the pilot allowlist, or None if pilot filter is OFF (full rollout).
+
+    Parses comma-separated UUIDs from the SUBPROJECT_C_PILOT_USERS env var.
+    Silently drops malformed UUIDs (logged but doesn't crash the cron) so a
+    typo in the env var can't take down the whole pipeline.
+    """
+    raw = os.environ.get(PILOT_USER_IDS_ENV, "").strip()
+    if not raw:
+        return None
+    ids: set[uuid.UUID] = set()
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            ids.add(uuid.UUID(entry))
+        except ValueError:
+            # Malformed entry; skip silently. Operators can verify via
+            # the metric upsell_pilot_filter_malformed_total below.
+            _METRICS["pilot_filter_malformed"] = _METRICS.get("pilot_filter_malformed", 0) + 1
+            continue
+    return ids
+
+
+def is_cron_disabled() -> bool:
+    """Kill switch — read once per cron run."""
+    val = (os.environ.get(UPSELL_CRON_DISABLED_ENV, "") or "").strip().lower()
+    return val in {"1", "true", "yes", "on"}
+
+
+def is_user_in_pilot(user_id: uuid.UUID) -> bool:
+    """True iff user is allowed by the current pilot filter.
+
+    Returns True for ALL users when the filter is OFF (full rollout).
+    """
+    allowlist = get_pilot_user_ids()
+    if allowlist is None:
+        return True
+    return user_id in allowlist
+
+
+# Minimal in-process counters. Production swaps in a real Prometheus
+# client; this in-process dict lets unit tests assert that the cron
+# pipeline went through the expected branches. Per spec section 7.2 the
+# metric names are stable contracts.
+_METRICS: dict[str, int] = {}
+
+
+def record_metric(name: str, value: int = 1) -> None:
+    """Increment a named counter. Used by the cron for the spec's
+    Prometheus metrics (upsell_sent_total, upsell_skipped_pilot_total,
+    upsell_skipped_cooling_off_total, etc.)."""
+    _METRICS[name] = _METRICS.get(name, 0) + value
+
+
+def reset_metrics() -> None:
+    """Test helper — zero the in-process counters."""
+    _METRICS.clear()
+
+
+def get_metric(name: str) -> int:
+    """Test helper — read the current counter."""
+    return _METRICS.get(name, 0)
 
 
 @dataclass
