@@ -7,10 +7,11 @@ from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from data_access.models.case import Case
+from data_access.models.case_preferences import CasePreferences
 from ecourts_client.models import Case as DataCase
 from ecourts_client.routing import classify_cnr
 
@@ -162,8 +163,28 @@ def mark_cnr_not_found(s: Session, *, user_id: uuid.UUID, cnr: str) -> Case:
 
 
 def delete_case(s: Session, *, user_id: uuid.UUID, cnr: str) -> bool:
+    """Delete the Case row plus its case_preferences sibling.
+
+    A-10 audit fix: case_preferences has FK only to users (ON DELETE CASCADE
+    on users.id), not to cases. Deleting the Case row alone leaves orphan
+    preference rows behind. We issue an explicit DELETE on case_preferences
+    in the same transaction.
+
+    Order follows audit fix A-R1 (see handlers/monitoring/forget_command.py
+    in 0705): delete prefs FIRST, then the Case row. Today both deletes
+    are in the same txn so order doesn't change observable behaviour, but
+    if a future refactor ever splits these across commits the prefs-first
+    order preserves the no-orphan invariant defense-in-depth.
+    """
+    s.execute(
+        delete(CasePreferences).where(
+            CasePreferences.user_id == user_id,
+            CasePreferences.cnr == cnr,
+        )
+    )
     row = get_by_cnr(s, user_id=user_id, cnr=cnr)
     if row is None:
+        s.flush()
         return False
     s.delete(row)
     s.flush()

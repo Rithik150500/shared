@@ -12,7 +12,7 @@ from datetime import date
 import pytest
 from sqlalchemy.orm import Session
 
-from data_access.daos import case_dao, user_dao
+from data_access.daos import case_dao, case_preferences_dao, user_dao
 from ecourts_client.models import Act, Case as DataCase, Party
 
 
@@ -95,3 +95,60 @@ def test_mark_cnr_not_found_creates_tombstone(db_session: Session, test_user_id:
     row = case_dao.get_by_cnr(db_session, user_id=test_user_id, cnr="MHCC019999992024")
     assert row is not None
     assert row.refresh_enabled is False
+
+
+def test_delete_case_cascades_to_case_preferences(
+    db_session: Session, test_user_id: uuid.UUID,
+):
+    """A-10 audit fix: delete_case must remove case_preferences too.
+
+    case_preferences has FK only to users (ON DELETE CASCADE) — NOT to cases.
+    So Case deletion would orphan preference rows without an explicit delete.
+    """
+    cnr = "MHCC010054732024"
+    # Seed both a Case row and a CasePreferences row for the same (user, cnr).
+    case_dao.upsert_case(
+        db_session, user_id=test_user_id, cnr=cnr, case_data=_case_dataclass(cnr),
+    )
+    case_preferences_dao.upsert(
+        db_session, user_id=test_user_id, cnr=cnr, alert_level="orders_only",
+    )
+    db_session.commit()
+    assert case_dao.get_by_cnr(db_session, user_id=test_user_id, cnr=cnr) is not None
+    assert case_preferences_dao.get_by_cnr(
+        db_session, user_id=test_user_id, cnr=cnr,
+    ) is not None
+
+    deleted = case_dao.delete_case(db_session, user_id=test_user_id, cnr=cnr)
+    db_session.commit()
+    assert deleted is True
+
+    # Both rows must be gone — no orphan prefs.
+    assert case_dao.get_by_cnr(db_session, user_id=test_user_id, cnr=cnr) is None
+    assert case_preferences_dao.get_by_cnr(
+        db_session, user_id=test_user_id, cnr=cnr,
+    ) is None
+
+
+def test_delete_case_returns_false_when_absent(
+    db_session: Session, test_user_id: uuid.UUID,
+):
+    """Even with no Case row, the call is a safe no-op (returns False)."""
+    assert case_dao.delete_case(
+        db_session, user_id=test_user_id, cnr="MHCC019999992024",
+    ) is False
+
+
+def test_delete_case_handles_no_prefs_row(
+    db_session: Session, test_user_id: uuid.UUID,
+):
+    """Case present but no prefs row: still deletes the case, returns True."""
+    cnr = "MHCC010054732024"
+    case_dao.upsert_case(
+        db_session, user_id=test_user_id, cnr=cnr, case_data=_case_dataclass(cnr),
+    )
+    db_session.commit()
+    deleted = case_dao.delete_case(db_session, user_id=test_user_id, cnr=cnr)
+    db_session.commit()
+    assert deleted is True
+    assert case_dao.get_by_cnr(db_session, user_id=test_user_id, cnr=cnr) is None
