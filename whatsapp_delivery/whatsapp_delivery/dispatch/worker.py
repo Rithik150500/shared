@@ -36,6 +36,25 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _redact_phone(phone: str | None) -> str:
+    """Reduce a phone number to ``***<last 4 digits>`` for log lines.
+
+    D-3: every per-failure log path used to emit the full ``to=<phone>``,
+    which is PII under DPDP and can land in Sentry on dead-letter. We
+    keep the last 4 digits so ops can correlate against a support ticket
+    or Razorpay record without exposing the full number.
+
+    A ``None`` phone returns ``"***"`` (constant placeholder). Inputs
+    shorter than 4 digits return ``"***"`` rather than a partial leak.
+    """
+    if not phone:
+        return "***"
+    digits = "".join(c for c in str(phone) if c.isdigit())
+    if len(digits) < 4:
+        return "***"
+    return f"***{digits[-4:]}"
+
+
 def _alert_dead_letter(reason: str, **ctx: Any) -> None:
     """Report a non-retryable failure to Sentry (if installed) and log it.
 
@@ -97,7 +116,8 @@ def _do_send_text(
     """RQ entry: send a free-text message."""
     cfg = WhatsAppConfig()
     if brand == "nowlez" and cfg.whatsapp_nowlez_disabled:
-        log.warning("nowlez kill-switch on; skipping send_text to=%s", to)
+        # D-3: never emit a full phone number into logs.
+        log.warning("nowlez kill-switch on; skipping send_text to=%s", _redact_phone(to))
         return ""
     client = MetaClient(
         phone_number_id=cfg.meta_phone_number_id,
@@ -111,7 +131,7 @@ def _do_send_text(
     except Meta24HourWindowExpired as e:
         _alert_dead_letter(
             "24h_window_expired_send_text",
-            to=to,
+            to=_redact_phone(to),
             brand=brand,
             user_id=user_id,
             err=str(e),
@@ -141,10 +161,11 @@ def _do_send_template(
     """
     cfg = WhatsAppConfig()
     if brand == "nowlez" and cfg.whatsapp_nowlez_disabled:
+        # D-3: redact phone in kill-switch logs too.
         log.warning(
             "nowlez kill-switch on; skipping send_template name=%s to=%s",
             template_name,
-            to,
+            _redact_phone(to),
         )
         return ""
 
@@ -191,7 +212,7 @@ def _do_send_template(
         # template name is wrong or Meta hasn't approved it yet.
         _alert_dead_letter(
             "24h_window_expired_send_template",
-            to=to,
+            to=_redact_phone(to),
             template_name=template_name,
             language=language,
             brand=brand,
@@ -218,10 +239,11 @@ def _do_send_template_with_components(
     """RQ entry: low-level template send (positional vars, pre-uploaded media)."""
     cfg = WhatsAppConfig()
     if brand == "nowlez" and cfg.whatsapp_nowlez_disabled:
+        # D-3: redact phone in kill-switch logs too.
         log.warning(
             "nowlez kill-switch on; skipping send_template_with_components name=%s to=%s",
             template_name,
-            to,
+            _redact_phone(to),
         )
         return ""
 
@@ -243,7 +265,7 @@ def _do_send_template_with_components(
     except Meta24HourWindowExpired as e:
         _alert_dead_letter(
             "24h_window_expired_send_template",
-            to=to,
+            to=_redact_phone(to),
             template_name=template_name,
             language=language,
             brand=brand,
@@ -284,7 +306,7 @@ def _do_send_document(
     except Meta24HourWindowExpired as e:
         _alert_dead_letter(
             "24h_window_expired_send_document",
-            to=to,
+            to=_redact_phone(to),
             brand=brand,
             err=str(e),
         )

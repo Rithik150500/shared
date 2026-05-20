@@ -368,10 +368,107 @@ def test_do_send_document_24h_dead_letters_and_raises(caplog):
     )
     with pytest.raises(Meta24HourWindowExpired):
         w._do_send_document(
-            to="+919999999999",
+            to="+919876543210",
             document_bytes=b"%PDF-1.4\n...",
             caption="cap",
             filename="x.pdf",
             brand="nowlez",
         )
     assert any("dead-letter" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# D-3: phone redaction in dead-letter logs / ctx
+# ---------------------------------------------------------------------------
+
+
+def test_redact_phone_returns_last_4_digits():
+    assert w._redact_phone("+919876543210") == "***3210"
+
+
+def test_redact_phone_short_input_does_not_crash():
+    """A pathological short input still returns *something* — never a full leak."""
+    out = w._redact_phone("12")
+    assert "12" not in out or out.startswith("***")
+
+
+def test_redact_phone_handles_none():
+    """None inputs are safe (returned as a constant placeholder)."""
+    assert w._redact_phone(None) == "***"
+
+
+def test_redact_phone_strips_non_digits():
+    """A phone with formatting still ends with the underlying last 4 digits."""
+    assert w._redact_phone("+91-98765-43210") == "***3210"
+
+
+@respx.mock
+def test_dead_letter_log_redacts_phone(caplog):
+    """The dead-letter helper must never log the full phone."""
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(
+            400, json={"error": {"code": 131047, "message": "outside 24h"}}
+        )
+    )
+    with pytest.raises(Meta24HourWindowExpired):
+        w._do_send_text(
+            to="+919876543210", body="hi", brand="nowlez", user_id="u-1",
+        )
+    # No record should contain the full phone, but the redacted form
+    # SHOULD appear so operators can match against support tickets.
+    for rec in caplog.records:
+        # The message text after format substitution
+        assert "+919876543210" not in rec.getMessage()
+        assert "919876543210" not in rec.getMessage()
+    assert any("***3210" in rec.getMessage() for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# D-3: _sanitize_meta_response — bearer/JWT scrubbing in meta_client
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_meta_response_strips_bearer_token():
+    from whatsapp_delivery.meta_client import _sanitize_meta_response
+
+    out = _sanitize_meta_response("error: Bearer abc123tokensecret was invalid")
+    assert "abc123tokensecret" not in out
+    assert "Bearer <redacted>" in out
+
+
+def test_sanitize_meta_response_strips_authorization_header():
+    """An echoed Authorization: ... header line is scrubbed.
+
+    Real-world Meta error bodies sometimes echo request headers in the
+    debug envelope. Both ``Authorization: <value>`` and bare ``Bearer
+    <token>`` forms must be redacted before raising.
+    """
+    from whatsapp_delivery.meta_client import _sanitize_meta_response
+
+    secret = "supersecrettoken123XYZ"
+    out = _sanitize_meta_response(f"debug headers Authorization: {secret} end")
+    assert secret not in out
+    assert "<redacted>" in out
+
+
+def test_sanitize_meta_response_strips_jwt():
+    from whatsapp_delivery.meta_client import _sanitize_meta_response
+
+    jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature_x"
+    out = _sanitize_meta_response(f"echoed back: {jwt} bye")
+    assert jwt not in out
+    assert "<redacted-jwt>" in out
+
+
+def test_sanitize_meta_response_truncates_to_200_chars():
+    from whatsapp_delivery.meta_client import _sanitize_meta_response
+
+    long = "x" * 1000
+    out = _sanitize_meta_response(long)
+    assert len(out) == 200
+
+
+def test_sanitize_meta_response_handles_empty():
+    from whatsapp_delivery.meta_client import _sanitize_meta_response
+
+    assert _sanitize_meta_response("") == ""
