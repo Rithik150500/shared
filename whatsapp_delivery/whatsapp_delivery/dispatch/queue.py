@@ -46,8 +46,18 @@ async def enqueue_send_text(
     body: str,
     brand: str,
     user_id: str | None = None,
+    dedup_key: str | None = None,
 ) -> str:
-    """Enqueue a free-text send. Returns the RQ job id."""
+    """Enqueue a free-text send. Returns the RQ job id.
+
+    Args:
+      dedup_key: D-4 producer-side idempotency. When provided, the worker
+        claims a Redis SETNX slot keyed by ``send_dedup:<dedup_key>``
+        (10-min TTL) before sending; a second job execution for the same
+        key (e.g. RQ retry of an already-acknowledged enqueue) short-
+        circuits without calling Meta. Default ``None`` preserves the
+        existing fire-and-forget behavior.
+    """
 
     def _enqueue() -> str:
         # Import inside the closure so RQ's pickler captures the worker
@@ -62,6 +72,7 @@ async def enqueue_send_text(
                 "body": body,
                 "brand": brand,
                 "user_id": user_id,
+                "dedup_key": dedup_key,
             },
             retry=_RETRY_POLICY,
             job_timeout="2m",
@@ -85,6 +96,7 @@ async def enqueue_send_template(
     related_order_id: str | None = None,
     user_id: str | None = None,
     dedup_per_day: bool = False,
+    dedup_key: str | None = None,
 ) -> str:
     """Enqueue a template send (body + optional document header + URL button).
 
@@ -100,6 +112,14 @@ async def enqueue_send_template(
         running on a once-per-user-per-day cron should pass True — see
         ``shared/whatsapp_delivery/dispatch/worker.py:_DEDUP_DAILY_TEMPLATES``
         for the authoritative allowlist.
+      dedup_key: D-4 producer-side idempotency. When provided, the worker
+        claims a Redis SETNX slot keyed by ``send_dedup:<dedup_key>``
+        (10-min TTL) and short-circuits any subsequent execution with the
+        same key. Use this for transactional sends (signup welcome, OTP,
+        order-uploaded) so an RQ retry of an already-acknowledged job
+        does not double-bill Meta or double-message the user. Independent
+        of ``dedup_per_day`` (they use different storage and can both be
+        in effect).
     """
 
     def _enqueue() -> str:
@@ -120,6 +140,7 @@ async def enqueue_send_template(
                 "related_order_id": related_order_id,
                 "user_id": user_id,
                 "dedup_per_day": dedup_per_day,
+                "dedup_key": dedup_key,
             },
             retry=_RETRY_POLICY,
             job_timeout="2m",
@@ -140,6 +161,7 @@ async def enqueue_send_template_with_components(
     button_url_variables: list[str] | None = None,
     user_id: str | None = None,
     dedup_per_day: bool = False,
+    dedup_key: str | None = None,
 ) -> str:
     """Enqueue a low-level template send when the caller already has positional
     variables + a pre-uploaded media id.
@@ -148,7 +170,7 @@ async def enqueue_send_template_with_components(
     component args itself) — callers that just have a ``dict`` of variable
     names should use :func:`enqueue_send_template` instead.
 
-    ``dedup_per_day`` has the same semantics as in
+    ``dedup_per_day`` and ``dedup_key`` have the same semantics as in
     :func:`enqueue_send_template`.
     """
 
@@ -167,6 +189,7 @@ async def enqueue_send_template_with_components(
                 "button_url_variables": button_url_variables,
                 "user_id": user_id,
                 "dedup_per_day": dedup_per_day,
+                "dedup_key": dedup_key,
             },
             retry=_RETRY_POLICY,
             job_timeout="2m",
@@ -183,8 +206,14 @@ async def enqueue_send_document(
     caption: str,
     filename: str,
     brand: str,
+    dedup_key: str | None = None,
 ) -> str:
-    """Enqueue an upload-and-send PDF job. Returns the RQ job id."""
+    """Enqueue an upload-and-send PDF job. Returns the RQ job id.
+
+    ``dedup_key`` has the same D-4 semantics as in
+    :func:`enqueue_send_text`: a stable producer-supplied key that makes
+    RQ retries idempotent (and avoids re-uploading the same PDF).
+    """
 
     def _enqueue() -> str:
         from whatsapp_delivery.dispatch.worker import _do_send_document
@@ -197,6 +226,7 @@ async def enqueue_send_document(
                 "caption": caption,
                 "filename": filename,
                 "brand": brand,
+                "dedup_key": dedup_key,
             },
             retry=_RETRY_POLICY,
             job_timeout="2m",

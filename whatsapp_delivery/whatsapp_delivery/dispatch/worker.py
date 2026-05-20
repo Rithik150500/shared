@@ -39,6 +39,8 @@ from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from redis import Redis
+
 from whatsapp_delivery.config import WhatsAppConfig
 from whatsapp_delivery.errors import (
     Meta24HourWindowExpired,
@@ -48,6 +50,26 @@ from whatsapp_delivery.meta_client import MetaClient
 from whatsapp_delivery.template_client import TemplateClient
 
 log = logging.getLogger(__name__)
+
+
+# D-4 producer-side idempotency. When the producer passes a stable
+# ``dedup_key`` we treat the FIRST job execution as the authoritative send
+# and short-circuit any subsequent execution (RQ retry, accidental
+# re-enqueue) that lands inside the TTL window. The 10-minute TTL is chosen
+# to comfortably cover the retry policy (1m -> 5m -> 15m back-off = 21m
+# max) without holding the key forever — once the retry budget is
+# exhausted the key naturally expires and a fresh enqueue is allowed.
+#
+# Distinct from B-3's per-day dedup: that one uses a DB-backed
+# ``(user_id, template_name, send_date_ist)`` claim row for daily-cadence
+# templates. This one uses a Redis SETNX keyed by an arbitrary string
+# supplied by the producer, suitable for transactional sends (signup
+# welcome, OTP, order-uploaded, stop confirmation) where the natural
+# dedup key is e.g. ``f"signup:{user_id}"`` or ``f"order:{order_id}"``.
+# The two systems intentionally use DIFFERENT key prefixes/storage so
+# they can't collide.
+_SEND_DEDUP_PREFIX = "send_dedup:"
+_SEND_DEDUP_TTL_SECONDS = 600  # 10 minutes; safely covers the retry budget.
 
 
 # B-3 dedup allowlist: templates whose cron fires at most once per
@@ -73,6 +95,79 @@ _IST = ZoneInfo("Asia/Kolkata")
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _get_redis() -> Redis:
+    """Construct a Redis connection from the shared config.
+
+    Mirrors ``queue._get_redis`` so tests can monkey-patch this single
+    symbol to stand in fakeredis. Kept module-local rather than imported
+    from queue.py to avoid an import cycle (queue.py imports from worker
+    for the RQ callable references).
+    """
+    cfg = WhatsAppConfig()
+    return Redis.from_url(cfg.shared_redis_url)
+
+
+def _claim_send_dedup_key(dedup_key: str | None) -> bool:
+    """Try to claim a producer-supplied dedup key. Return True on first claim.
+
+    Uses Redis SETNX with the documented prefix + TTL. If the key is
+    already set (a prior worker execution for the same logical send
+    already completed) the function returns False and the worker SHOULD
+    short-circuit without calling Meta.
+
+    Best-effort: if Redis is unreachable we log and return True so the
+    worker still attempts the send — the alternative (silently dropping
+    sends on a Redis hiccup) is worse than an occasional duplicate.
+
+    ``None``/empty dedup_key returns True (claim is a no-op) so callers
+    that don't opt in keep their existing behavior.
+    """
+    if not dedup_key:
+        return True
+    try:
+        client = _get_redis()
+        # ``nx=True`` makes set fail (return None/False) if the key already
+        # exists; ``ex`` sets the TTL atomically with the write so we never
+        # leave a no-TTL key behind on a connection drop between SET and
+        # EXPIRE.
+        ok = client.set(
+            name=f"{_SEND_DEDUP_PREFIX}{dedup_key}",
+            value="1",
+            nx=True,
+            ex=_SEND_DEDUP_TTL_SECONDS,
+        )
+        return bool(ok)
+    except Exception as e:  # pragma: no cover — best-effort
+        log.warning(
+            "send_dedup: Redis SETNX failed (%s) for key=%r; proceeding without claim",
+            e,
+            dedup_key,
+        )
+        return True
+
+
+def _record_send_dedup_short_circuit(
+    *,
+    dedup_key: str,
+    what: str,
+    brand: str | None,
+    template_name: str | None = None,
+) -> None:
+    """Emit the structured log line for a D-4 dedup short-circuit.
+
+    Mirrors :func:`_record_dedup_short_circuit` (B-3 daily dedup) so the
+    log-based metric scrapers can pick this up without code change. The
+    metric name is intentionally distinct (``whatsapp_send_dedup_short_circuit_total``)
+    so the two dedup systems can be observed independently.
+    """
+    log.info(
+        "metric=whatsapp_send_dedup_short_circuit_total what=%s brand=%s template=%s",
+        what,
+        brand or "-",
+        template_name or "-",
+    )
 
 
 def _redact_phone(phone: str | None) -> str:
@@ -276,12 +371,29 @@ def _do_send_text(
     body: str,
     brand: str,
     user_id: str | None = None,
+    dedup_key: str | None = None,
 ) -> str:
-    """RQ entry: send a free-text message."""
+    """RQ entry: send a free-text message.
+
+    D-4: when ``dedup_key`` is provided, the worker claims a Redis SETNX
+    slot keyed by ``send_dedup:<dedup_key>`` (10-min TTL) before sending.
+    A second invocation with the same dedup_key (e.g. RQ retry of an
+    already-acknowledged enqueue) short-circuits without calling Meta.
+    """
     cfg = WhatsAppConfig()
     if brand == "nowlez" and cfg.whatsapp_nowlez_disabled:
         # D-3: never emit a full phone number into logs.
         log.warning("nowlez kill-switch on; skipping send_text to=%s", _redact_phone(to))
+        return ""
+    if dedup_key and not _claim_send_dedup_key(dedup_key):
+        _record_send_dedup_short_circuit(
+            dedup_key=dedup_key, what="send_text", brand=brand,
+        )
+        log.info(
+            "send_dedup short-circuit: what=send_text key=%s to=%s",
+            dedup_key,
+            _redact_phone(to),
+        )
         return ""
     client = MetaClient(
         phone_number_id=cfg.meta_phone_number_id,
@@ -317,6 +429,7 @@ def _do_send_template(
     related_order_id: str | None = None,
     user_id: str | None = None,
     dedup_per_day: bool = False,
+    dedup_key: str | None = None,
 ) -> str:
     """RQ entry: send a registry-backed template by name + variable dict.
 
@@ -332,6 +445,12 @@ def _do_send_template(
     ``whatsapp_dedup_short_circuit_total`` metric. The default is False so
     transactional templates (signup welcome, OTP, order-uploaded, etc.)
     keep their current behavior.
+
+    D-4: when ``dedup_key`` is provided, the worker also runs a Redis
+    SETNX claim (``send_dedup:<dedup_key>``, 10-min TTL) and short-circuits
+    on duplicate. Intended for transactional sends where the producer has
+    a natural stable key (e.g. ``f"welcome:{user_id}"``). B-3 and D-4 use
+    distinct key spaces and can be applied independently.
     """
     cfg = WhatsAppConfig()
     if brand == "nowlez" and cfg.whatsapp_nowlez_disabled:
@@ -361,6 +480,24 @@ def _do_send_template(
                 _redact_phone(to),
             )
             return ""
+
+    # D-4: producer-side idempotency for transactional sends. Runs AFTER
+    # the daily-dedup check so a (daily + dedup_key) combination first
+    # confirms the day-slot before claiming the Redis key.
+    if dedup_key and not _claim_send_dedup_key(dedup_key):
+        _record_send_dedup_short_circuit(
+            dedup_key=dedup_key,
+            what="send_template",
+            brand=brand,
+            template_name=template_name,
+        )
+        log.info(
+            "send_dedup short-circuit: what=send_template name=%s key=%s to=%s",
+            template_name,
+            dedup_key,
+            _redact_phone(to),
+        )
+        return ""
 
     # Lazy import so the templates package can be torn down/replaced in tests
     # without forcing every queue.py import to also pull YAML loaders.
@@ -429,12 +566,13 @@ def _do_send_template_with_components(
     button_url_variables: list[str] | None = None,
     user_id: str | None = None,
     dedup_per_day: bool = False,
+    dedup_key: str | None = None,
 ) -> str:
     """RQ entry: low-level template send (positional vars, pre-uploaded media).
 
-    See :func:`_do_send_template` for the ``dedup_per_day`` semantics — it
-    is honored here too so both template entry points behave identically
-    when the producer opts in.
+    See :func:`_do_send_template` for the ``dedup_per_day`` and
+    ``dedup_key`` semantics — both are honored here too so the two
+    template entry points behave identically when the producer opts in.
     """
     cfg = WhatsAppConfig()
     if brand == "nowlez" and cfg.whatsapp_nowlez_disabled:
@@ -462,6 +600,23 @@ def _do_send_template_with_components(
                 _redact_phone(to),
             )
             return ""
+
+    # D-4: producer-side idempotency, same shape as _do_send_template.
+    if dedup_key and not _claim_send_dedup_key(dedup_key):
+        _record_send_dedup_short_circuit(
+            dedup_key=dedup_key,
+            what="send_template_with_components",
+            brand=brand,
+            template_name=template_name,
+        )
+        log.info(
+            "send_dedup short-circuit: what=send_template_with_components "
+            "name=%s key=%s to=%s",
+            template_name,
+            dedup_key,
+            _redact_phone(to),
+        )
+        return ""
 
     client = TemplateClient(
         phone_number_id=cfg.meta_phone_number_id,
@@ -501,10 +656,26 @@ def _do_send_document(
     caption: str,
     filename: str,
     brand: str,
+    dedup_key: str | None = None,
 ) -> str:
-    """RQ entry: upload + send a PDF in one call."""
+    """RQ entry: upload + send a PDF in one call.
+
+    D-4: when ``dedup_key`` is provided, the worker claims a Redis SETNX
+    slot before the upload (so a retry won't re-upload the same PDF
+    either) and short-circuits on duplicate.
+    """
     cfg = WhatsAppConfig()
     if brand == "nowlez" and cfg.whatsapp_nowlez_disabled:
+        return ""
+    if dedup_key and not _claim_send_dedup_key(dedup_key):
+        _record_send_dedup_short_circuit(
+            dedup_key=dedup_key, what="send_document", brand=brand,
+        )
+        log.info(
+            "send_dedup short-circuit: what=send_document key=%s to=%s",
+            dedup_key,
+            _redact_phone(to),
+        )
         return ""
     client = MetaClient(
         phone_number_id=cfg.meta_phone_number_id,

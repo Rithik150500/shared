@@ -50,6 +50,9 @@ def test_enqueue_send_text_returns_job_id(fake_redis):
         "body": "hello",
         "brand": "munshi",
         "user_id": "u-1",
+        # D-4: dedup_key threads through to the worker (None when caller
+        # doesn't opt in, preserving existing fire-and-forget behavior).
+        "dedup_key": None,
     }
 
 
@@ -206,3 +209,110 @@ def test_enqueue_send_template_with_components_threads_dedup_per_day(fake_redis)
     )
     job = Queue("whatsapp_send", connection=fake_redis).jobs[0]
     assert job.kwargs["dedup_per_day"] is True
+
+
+# ---------------------------------------------------------------------------
+# D-4: dedup_key threads through all four enqueue helpers.
+# ---------------------------------------------------------------------------
+
+
+def test_enqueue_send_text_threads_dedup_key(fake_redis):
+    _run(
+        q.enqueue_send_text(
+            to="+919999999999",
+            body="hi",
+            brand="munshi",
+            user_id="u-1",
+            dedup_key="signup-otp-1",
+        )
+    )
+    job = Queue("whatsapp_send", connection=fake_redis).jobs[0]
+    assert job.kwargs["dedup_key"] == "signup-otp-1"
+
+
+def test_enqueue_send_template_threads_dedup_key(fake_redis):
+    _run(
+        q.enqueue_send_template(
+            to="+919999999999",
+            template_name="nowlez_signup_welcome_v1",
+            language="en_US",
+            variables={"user_name": "Asha"},
+            brand="nowlez",
+            user_id="u-1",
+            dedup_key="welcome-u-1",
+        )
+    )
+    job = Queue("whatsapp_send", connection=fake_redis).jobs[0]
+    assert job.kwargs["dedup_key"] == "welcome-u-1"
+
+
+def test_enqueue_send_template_with_components_threads_dedup_key(fake_redis):
+    _run(
+        q.enqueue_send_template_with_components(
+            to="+919999999999",
+            template_name="nowlez_signup_welcome_v1",
+            language="en",
+            body_variables=["Asha"],
+            brand="nowlez",
+            user_id="u-1",
+            dedup_key="cmp-welcome-1",
+        )
+    )
+    job = Queue("whatsapp_send", connection=fake_redis).jobs[0]
+    assert job.kwargs["dedup_key"] == "cmp-welcome-1"
+
+
+def test_enqueue_send_document_threads_dedup_key(fake_redis):
+    _run(
+        q.enqueue_send_document(
+            to="+919999999999",
+            document_bytes=b"%PDF-1.4\n...",
+            caption="cap",
+            filename="x.pdf",
+            brand="munshi",
+            dedup_key="doc-order-1",
+        )
+    )
+    job = Queue("whatsapp_send", connection=fake_redis).jobs[0]
+    assert job.kwargs["dedup_key"] == "doc-order-1"
+
+
+def test_enqueue_helpers_default_dedup_key_to_none(fake_redis):
+    """Default ``dedup_key=None`` for all four helpers so unaware callers
+    keep their fire-and-forget behavior."""
+    _run(
+        q.enqueue_send_text(
+            to="+1", body="x", brand="munshi", user_id=None,
+        )
+    )
+    _run(
+        q.enqueue_send_template(
+            to="+1",
+            template_name="t",
+            language="en",
+            variables={},
+            brand="munshi",
+        )
+    )
+    _run(
+        q.enqueue_send_template_with_components(
+            to="+1",
+            template_name="t",
+            language="en",
+            body_variables=[],
+            brand="munshi",
+        )
+    )
+    _run(
+        q.enqueue_send_document(
+            to="+1",
+            document_bytes=b"",
+            caption="",
+            filename="x.pdf",
+            brand="munshi",
+        )
+    )
+    jobs = Queue("whatsapp_send", connection=fake_redis).jobs
+    assert len(jobs) == 4
+    for j in jobs:
+        assert j.kwargs.get("dedup_key") is None
