@@ -11,6 +11,23 @@ Error handling per spec §6:
   the only fix is filing a template or waiting for the user to message us.
 - All other errors propagate naturally.
 
+**B-3 cross-pod dedup (audit fix):** When the producer passes
+``dedup_per_day=True``, the template worker first attempts an INSERT ...
+ON CONFLICT DO NOTHING claim on ``whatsapp_delivery_log`` keyed by
+``(user_id, template_name, send_date_ist)`` before calling Meta. If another
+pod already owns the slot the worker short-circuits without sending.
+Default is ``False`` so transactional sends (signup welcome, OTP, order
+upload notifications) preserve their current fire-and-forget behavior —
+those templates may legitimately fire multiple times per user per day.
+
+**Crash safety note:** the claim row is written BEFORE the Meta call, so if
+the worker crashes between claim and send the row is left as ``pending``
+forever and that user misses the send for that day. For daily-cadence
+templates this is acceptable: the next day's cron retries. For one-shot
+transactional sends (signup welcome, OTP) the dedup is INTENTIONALLY off —
+those use the existing producer-side ``log_send_enqueued`` and rely on the
+caller's idempotency, not the per-day key.
+
 The :func:`process_send_queue` entry point is for ad-hoc local dev only —
 production runs the worker process owned by Munshi (see
 ``0705/bot_scaffold/worker.py``).
@@ -18,7 +35,9 @@ production runs the worker process owned by Munshi (see
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from whatsapp_delivery.config import WhatsAppConfig
 from whatsapp_delivery.errors import (
@@ -29,6 +48,26 @@ from whatsapp_delivery.meta_client import MetaClient
 from whatsapp_delivery.template_client import TemplateClient
 
 log = logging.getLogger(__name__)
+
+
+# B-3 dedup allowlist: templates whose cron fires at most once per
+# user per IST day. The producer side (casepilot/backend/scheduler.py) is
+# the source of truth; this allowlist exists so a misconfigured
+# ``dedup_per_day=True`` on a transactional template (e.g. accidental
+# refactor) doesn't silently silence sends. The set is intentionally small
+# and explicit — extending it should be paired with a producer-side
+# audit.
+#
+# Keep in sync with ``_DAILY_CADENCE_TEMPLATES`` in
+# ``shared/data-access/data_access/alembic/versions/20260606_b3_dedup_send_per_day.py``.
+_DEDUP_DAILY_TEMPLATES: frozenset[str] = frozenset({
+    "nowlez_tomorrow_hearings_v1",
+    "nowlez_weekly_summary_v1",
+})
+
+# IST timezone for per-day key computation. Computed once at module load —
+# ``ZoneInfo`` is cheap to look up but doing it per-send is wasteful.
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +119,131 @@ def _alert_dead_letter(reason: str, **ctx: Any) -> None:
             )
     except Exception:  # pragma: no cover — Sentry optional and best-effort
         pass
+
+
+def _today_ist() -> date:
+    """Return the current IST date.
+
+    Computed from UTC ``now()`` rather than ``datetime.now(_IST).date()``
+    so the function is mock-friendly: tests patch
+    ``whatsapp_delivery.dispatch.worker._utcnow`` to inject a deterministic
+    moment, and the IST conversion happens through the public ``astimezone``
+    path which respects the patched value.
+    """
+    return _utcnow().astimezone(_IST).date()
+
+
+def _utcnow() -> datetime:
+    """Wall-clock now in UTC.
+
+    Wrapped so tests can monkey-patch one symbol to freeze time across
+    every per-day-key computation in the worker.
+    """
+    return datetime.now(timezone.utc)
+
+
+def _record_dedup_short_circuit(template_name: str, brand: str) -> None:
+    """Bump the cross-pod dedup short-circuit metric.
+
+    The worker module has no prom counter infrastructure of its own (see the
+    audit's broader observability scope); for now we emit a structured log
+    line that downstream log-based metrics can parse. The line shape is
+    stable: ``metric=whatsapp_dedup_short_circuit_total
+    template=<name> brand=<brand>``.
+
+    A future enhancement should replace this with a
+    ``prometheus_client.Counter`` when the package gains a metrics module;
+    until then this is the lowest-coupling option.
+    """
+    log.info(
+        "metric=whatsapp_dedup_short_circuit_total template=%s brand=%s",
+        template_name,
+        brand,
+    )
+
+
+def _claim_daily_send_slot(
+    *,
+    user_id: str,
+    template_name: str,
+    brand: str,
+    rq_job_id: str | None,
+) -> bool:
+    """Try to claim the per-day dedup slot. Return True on first claim.
+
+    Best-effort: failures here (DB unreachable, ORM model not registered,
+    etc.) are logged and the worker proceeds with the send. The DB-side
+    UNIQUE INDEX is the *guarantee* — this function is the optimization
+    that avoids paying for a Meta call when we can detect the duplicate
+    locally. A worker without DB access would still be safe because the
+    producer-side ``log_send_enqueued`` INSERT would raise IntegrityError
+    if a row already exists for today (the constraint is enforced at the
+    DB level regardless of which code path inserts).
+
+    Returns:
+      True  — the calling worker now owns the daily slot; proceed to send.
+      False — another pod already claimed; skip the Meta call.
+    """
+    if not user_id:
+        # No user context (ad-hoc / test path). Treat as a successful claim
+        # so we don't change behavior for callers that don't pass user_id.
+        return True
+
+    try:
+        # Imported lazily so this module doesn't force callers to install
+        # the data-access dependency for worker functions that don't dedup.
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        from data_access.engine import get_session
+        from data_access.models import WhatsAppDeliveryLog
+    except Exception as e:  # pragma: no cover — data-access optional in test
+        log.warning(
+            "dedup claim: data-access import failed (%s); proceeding without claim",
+            e,
+        )
+        return True
+
+    today_ist = _today_ist()
+
+    try:
+        with get_session() as s:
+            dialect = s.get_bind().dialect.name
+            insert_fn = pg_insert if dialect == "postgresql" else sqlite_insert
+            # The partial unique index uses ``WHERE send_date_ist IS NOT
+            # NULL``; both Postgres and SQLite require the upsert to
+            # carry the same predicate via ``index_where`` for the
+            # conflict-arbiter lookup to find it.
+            stmt = (
+                insert_fn(WhatsAppDeliveryLog)
+                .values(
+                    user_id=user_id,
+                    template_name=template_name,
+                    brand=brand,
+                    rq_job_id=rq_job_id,
+                    send_date_ist=today_ist,
+                    delivery_status="pending",
+                )
+                .on_conflict_do_nothing(
+                    index_elements=["user_id", "template_name", "send_date_ist"],
+                    index_where=WhatsAppDeliveryLog.send_date_ist.isnot(None),
+                )
+            )
+            result = s.execute(stmt)
+            # get_session() commits on context exit; ``rowcount`` is set
+            # before the commit so we can read it here.
+            return result.rowcount > 0
+    except Exception as e:
+        # B-3 fail-open: a DB hiccup MUST NOT block legitimate sends. The
+        # UNIQUE INDEX still backstops at the DB layer for any path that
+        # inserts via the ORM (producer-side log_send_enqueued).
+        log.warning(
+            "dedup claim: DB error (%s) on (user=%s, tmpl=%s); proceeding without claim",
+            e,
+            user_id,
+            template_name,
+        )
+        return True
 
 
 def _bind_wamid_to_delivery_log(rq_job_id: str | None, wamid: str) -> None:
@@ -152,12 +316,22 @@ def _do_send_template(
     related_case_id: str | None = None,
     related_order_id: str | None = None,
     user_id: str | None = None,
+    dedup_per_day: bool = False,
 ) -> str:
     """RQ entry: send a registry-backed template by name + variable dict.
 
     Looks the template up in the registry, picks the variable ordering Meta
     expects from the template spec, optionally uploads a document header,
     and dispatches via :class:`TemplateClient`.
+
+    B-3: when ``dedup_per_day`` is True and the template is in the
+    :data:`_DEDUP_DAILY_TEMPLATES` allowlist, the worker first attempts to
+    claim the ``(user_id, template_name, send_date_ist=today_IST)`` slot
+    via INSERT ON CONFLICT DO NOTHING. If another pod already claimed,
+    returns ``""`` without calling Meta and bumps the
+    ``whatsapp_dedup_short_circuit_total`` metric. The default is False so
+    transactional templates (signup welcome, OTP, order-uploaded, etc.)
+    keep their current behavior.
     """
     cfg = WhatsAppConfig()
     if brand == "nowlez" and cfg.whatsapp_nowlez_disabled:
@@ -168,6 +342,25 @@ def _do_send_template(
             _redact_phone(to),
         )
         return ""
+
+    # B-3: per-day dedup short-circuit. Only honored when the producer
+    # explicitly opts in AND the template is in the allowlist, so a
+    # mis-set kwarg can't silently silence a transactional send.
+    if dedup_per_day and template_name in _DEDUP_DAILY_TEMPLATES and user_id:
+        if not _claim_daily_send_slot(
+            user_id=user_id,
+            template_name=template_name,
+            brand=brand,
+            rq_job_id=_current_rq_job_id(),
+        ):
+            _record_dedup_short_circuit(template_name, brand)
+            log.info(
+                "dedup short-circuit: another pod claimed name=%s user=%s to=%s",
+                template_name,
+                user_id,
+                _redact_phone(to),
+            )
+            return ""
 
     # Lazy import so the templates package can be torn down/replaced in tests
     # without forcing every queue.py import to also pull YAML loaders.
@@ -235,8 +428,14 @@ def _do_send_template_with_components(
     header_media_id: str | None = None,
     button_url_variables: list[str] | None = None,
     user_id: str | None = None,
+    dedup_per_day: bool = False,
 ) -> str:
-    """RQ entry: low-level template send (positional vars, pre-uploaded media)."""
+    """RQ entry: low-level template send (positional vars, pre-uploaded media).
+
+    See :func:`_do_send_template` for the ``dedup_per_day`` semantics — it
+    is honored here too so both template entry points behave identically
+    when the producer opts in.
+    """
     cfg = WhatsAppConfig()
     if brand == "nowlez" and cfg.whatsapp_nowlez_disabled:
         # D-3: redact phone in kill-switch logs too.
@@ -246,6 +445,23 @@ def _do_send_template_with_components(
             _redact_phone(to),
         )
         return ""
+
+    # B-3: same per-day dedup short-circuit as _do_send_template.
+    if dedup_per_day and template_name in _DEDUP_DAILY_TEMPLATES and user_id:
+        if not _claim_daily_send_slot(
+            user_id=user_id,
+            template_name=template_name,
+            brand=brand,
+            rq_job_id=_current_rq_job_id(),
+        ):
+            _record_dedup_short_circuit(template_name, brand)
+            log.info(
+                "dedup short-circuit: another pod claimed name=%s user=%s to=%s",
+                template_name,
+                user_id,
+                _redact_phone(to),
+            )
+            return ""
 
     client = TemplateClient(
         phone_number_id=cfg.meta_phone_number_id,

@@ -156,3 +156,53 @@ def test_enqueue_attaches_retry_policy(fake_redis):
     # implementation detail.
     retries_left = getattr(job, "retries_left", None)
     assert retries_left == 3
+
+
+def test_enqueue_send_template_threads_dedup_per_day(fake_redis):
+    """B-3: producer's ``dedup_per_day`` kwarg lands on the worker job kwargs."""
+    _run(
+        q.enqueue_send_template(
+            to="+919999999999",
+            template_name="nowlez_tomorrow_hearings_v1",
+            language="en_US",
+            variables={"count": "1", "formatted_list": "X"},
+            brand="nowlez",
+            user_id="u-1",
+            dedup_per_day=True,
+        )
+    )
+    job = Queue("whatsapp_send", connection=fake_redis).jobs[0]
+    assert job.kwargs["dedup_per_day"] is True
+
+
+def test_enqueue_send_template_dedup_default_false(fake_redis):
+    """B-3 safety: default is False so transactional callers are unaffected."""
+    _run(
+        q.enqueue_send_template(
+            to="+919999999999",
+            template_name="nowlez_signup_welcome_v1",
+            language="en_US",
+            variables={"user_name": "Asha"},
+            brand="nowlez",
+            user_id="u-2",
+        )
+    )
+    job = Queue("whatsapp_send", connection=fake_redis).jobs[0]
+    assert job.kwargs["dedup_per_day"] is False
+
+
+def test_enqueue_send_template_with_components_threads_dedup_per_day(fake_redis):
+    """The components-flavored producer also threads the kwarg through."""
+    _run(
+        q.enqueue_send_template_with_components(
+            to="+919999999999",
+            template_name="nowlez_tomorrow_hearings_v1",
+            language="en",
+            body_variables=["1", "X"],
+            brand="nowlez",
+            user_id="u-3",
+            dedup_per_day=True,
+        )
+    )
+    job = Queue("whatsapp_send", connection=fake_redis).jobs[0]
+    assert job.kwargs["dedup_per_day"] is True

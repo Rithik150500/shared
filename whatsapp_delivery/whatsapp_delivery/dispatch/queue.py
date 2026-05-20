@@ -84,12 +84,22 @@ async def enqueue_send_template(
     related_case_id: str | None = None,
     related_order_id: str | None = None,
     user_id: str | None = None,
+    dedup_per_day: bool = False,
 ) -> str:
     """Enqueue a template send (body + optional document header + URL button).
 
     Returns the RQ job id; the wamid is bound to the producer-side
     ``whatsapp_delivery_log`` row by the worker once Meta acknowledges the
     send.
+
+    Args:
+      dedup_per_day: B-3 cross-pod dedup. When True the worker
+        short-circuits if another pod has already sent this
+        ``(user_id, template_name)`` pair today (IST). Default False
+        (transactional sends preserve fire-and-forget). Only callers
+        running on a once-per-user-per-day cron should pass True — see
+        ``shared/whatsapp_delivery/dispatch/worker.py:_DEDUP_DAILY_TEMPLATES``
+        for the authoritative allowlist.
     """
 
     def _enqueue() -> str:
@@ -109,6 +119,7 @@ async def enqueue_send_template(
                 "related_case_id": related_case_id,
                 "related_order_id": related_order_id,
                 "user_id": user_id,
+                "dedup_per_day": dedup_per_day,
             },
             retry=_RETRY_POLICY,
             job_timeout="2m",
@@ -128,6 +139,7 @@ async def enqueue_send_template_with_components(
     header_media_id: str | None = None,
     button_url_variables: list[str] | None = None,
     user_id: str | None = None,
+    dedup_per_day: bool = False,
 ) -> str:
     """Enqueue a low-level template send when the caller already has positional
     variables + a pre-uploaded media id.
@@ -135,6 +147,9 @@ async def enqueue_send_template_with_components(
     Used by Munshi's existing notifier code (which already builds the
     component args itself) — callers that just have a ``dict`` of variable
     names should use :func:`enqueue_send_template` instead.
+
+    ``dedup_per_day`` has the same semantics as in
+    :func:`enqueue_send_template`.
     """
 
     def _enqueue() -> str:
@@ -151,6 +166,7 @@ async def enqueue_send_template_with_components(
                 "header_media_id": header_media_id,
                 "button_url_variables": button_url_variables,
                 "user_id": user_id,
+                "dedup_per_day": dedup_per_day,
             },
             retry=_RETRY_POLICY,
             job_timeout="2m",
