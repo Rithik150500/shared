@@ -70,9 +70,13 @@ class CasePreferences(Base):
             name="case_preferences_alert_level_check",
         ),
         Index("case_preferences_user_id_idx", "user_id"),
-        # implicit_returning=False dodges SQLAlchemy 2.0's batched
-        # INSERT...RETURNING sentinel-matching bug on sqlite for composite
-        # UUID PK tables. See bot_scaffold.SavedCase rewrite (0705 commit
-        # 9111fc4) for the same lesson.
+        # implicit_returning=False dodges a SQLAlchemy 2.0 bug: batched
+        # INSERTs against tables with a (UUID, ...) composite PK on SQLite
+        # cause sentinel-matching failures because the dialect can't reliably
+        # map the RETURNING-clause rows back to the original parameter dicts.
+        # Without this flag, two .add() calls in one .flush() raise
+        # InvalidRequestError on commit. data_access.models.upsell sets the
+        # same flag for the same reason (audit fix A-11: cleaned up stale
+        # reference to the now-deleted bot_scaffold.SavedCase model).
         {"implicit_returning": False},
     )
