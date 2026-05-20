@@ -6,6 +6,12 @@ Covers the WhatsApp upsell auto-login JWT primitive:
 - Wrong-purpose token returns None (cross-key compromise containment).
 - Replay (jti consumed) returns None.
 - Wrong signing secret returns None.
+
+Audit fix C-2: the previous two-callable (is_jti_consumed +
+mark_jti_consumed) shape was replaced with a single atomic
+``consume_jti`` callable to eliminate the cross-pod TOCTOU race.
+The in-memory tracker below mirrors a Redis SETNX: it returns True
+on the first call for a given jti, False thereafter.
 """
 from __future__ import annotations
 
@@ -26,29 +32,39 @@ from case_billing.nowlez.auto_login import (
 SECRET = "test-secret"
 
 
-@pytest.fixture
-def tracker():
-    """In-memory jti tracker matching the prod tracker interface."""
+def _make_consume_fn():
+    """In-memory atomic jti tracker matching the prod (Redis SETNX) contract.
+
+    Returns a ``consume`` callable that returns True the first time a
+    given jti is seen (claim succeeded) and False thereafter (replay).
+    """
     consumed: set[str] = set()
-    return {
-        "is_consumed": lambda jti: jti in consumed,
-        "mark_consumed": lambda jti: consumed.add(jti),
-        "consumed": consumed,
-    }
+
+    def consume(jti: str) -> bool:
+        if jti in consumed:
+            return False
+        consumed.add(jti)
+        return True
+
+    return consume
 
 
-def test_mint_and_validate_round_trip(tracker):
+@pytest.fixture
+def consume_jti():
+    return _make_consume_fn()
+
+
+def test_mint_and_validate_round_trip(consume_jti):
     user_id = uuid.uuid4()
     token = mint_auto_login_jwt(user_id, SECRET)
     result = validate_auto_login_jwt(
         token, SECRET,
-        is_jti_consumed=tracker["is_consumed"],
-        mark_jti_consumed=tracker["mark_consumed"],
+        consume_jti=consume_jti,
     )
     assert result == user_id
 
 
-def test_validate_returns_none_for_expired_jwt(tracker):
+def test_validate_returns_none_for_expired_jwt(consume_jti):
     # Forge an already-expired token.
     user_id = uuid.uuid4()
     payload = {
@@ -63,13 +79,12 @@ def test_validate_returns_none_for_expired_jwt(tracker):
     token = jwt.encode(payload, SECRET, algorithm="HS256")
     result = validate_auto_login_jwt(
         token, SECRET,
-        is_jti_consumed=tracker["is_consumed"],
-        mark_jti_consumed=tracker["mark_consumed"],
+        consume_jti=consume_jti,
     )
     assert result is None
 
 
-def test_validate_returns_none_for_wrong_purpose(tracker):
+def test_validate_returns_none_for_wrong_purpose(consume_jti):
     user_id = uuid.uuid4()
     payload = {
         "sub": str(user_id),
@@ -83,38 +98,35 @@ def test_validate_returns_none_for_wrong_purpose(tracker):
     token = jwt.encode(payload, SECRET, algorithm="HS256")
     result = validate_auto_login_jwt(
         token, SECRET,
-        is_jti_consumed=tracker["is_consumed"],
-        mark_jti_consumed=tracker["mark_consumed"],
+        consume_jti=consume_jti,
     )
     assert result is None
 
 
-def test_validate_returns_none_for_replay(tracker):
+def test_validate_returns_none_for_replay(consume_jti):
     user_id = uuid.uuid4()
     token = mint_auto_login_jwt(user_id, SECRET)
-    # First validation succeeds.
+    # First validation succeeds (consume_jti returns True).
     first = validate_auto_login_jwt(
         token, SECRET,
-        is_jti_consumed=tracker["is_consumed"],
-        mark_jti_consumed=tracker["mark_consumed"],
+        consume_jti=consume_jti,
     )
     assert first == user_id
-    # Second validation (replay) must fail because jti was marked consumed.
+    # Second validation (replay) must fail because consume_jti now returns
+    # False for that jti.
     second = validate_auto_login_jwt(
         token, SECRET,
-        is_jti_consumed=tracker["is_consumed"],
-        mark_jti_consumed=tracker["mark_consumed"],
+        consume_jti=consume_jti,
     )
     assert second is None
 
 
-def test_validate_returns_none_for_invalid_signature(tracker):
+def test_validate_returns_none_for_invalid_signature(consume_jti):
     user_id = uuid.uuid4()
     token = mint_auto_login_jwt(user_id, SECRET)
     result = validate_auto_login_jwt(
         token, "wrong-secret",
-        is_jti_consumed=tracker["is_consumed"],
-        mark_jti_consumed=tracker["mark_consumed"],
+        consume_jti=consume_jti,
     )
     assert result is None
 
@@ -122,3 +134,21 @@ def test_validate_returns_none_for_invalid_signature(tracker):
 def test_ttl_constant_matches_spec():
     """Sanity check — spec mandates 5-minute TTL."""
     assert AUTO_LOGIN_JWT_TTL_MINUTES == 5
+
+
+def test_consume_jti_loser_side_returns_none():
+    """Audit fix C-2: when consume_jti reports the caller is the loser of
+    a concurrent claim race (returns False on the very first call to
+    validate for that token), validate_auto_login_jwt must return None
+    so the loser pod can't auth.
+    """
+    def always_loses(_jti: str) -> bool:
+        return False
+
+    user_id = uuid.uuid4()
+    token = mint_auto_login_jwt(user_id, SECRET)
+    result = validate_auto_login_jwt(
+        token, SECRET,
+        consume_jti=always_loses,
+    )
+    assert result is None

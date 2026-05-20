@@ -9,12 +9,13 @@ landing endpoint, auto-authenticates the user. Specs:
 - Separate signing key from auth-JWT (sub-project D's session JWT) —
   cross-key compromise containment.
 
-The JTI consumption tracker is dependency-injected via callables: the
-calling Nowlez upgrade landing endpoint supplies a Redis-backed (or
-DB-backed via ``consumed_jwt_jti``) tracker without this module having to
-know about it. For Phase 1 only the mint/validate primitive ships;
-production will swap in the Redis-backed implementation when sub-project
-C ships end-to-end.
+The JTI consumption tracker is dependency-injected via a single atomic
+``consume_jti`` callable: the calling Nowlez upgrade landing endpoint
+supplies a Redis-backed (SETNX) or DB-backed (INSERT … ON CONFLICT DO
+NOTHING) implementation without this module having to know about it.
+Production swaps in the Redis-backed implementation at the casepilot
+``upgrade_landing`` endpoint (``casepilot/backend/routers/auth.py``);
+see ``_consume_auto_login_jti`` there.
 """
 from __future__ import annotations
 
@@ -57,26 +58,28 @@ def validate_auto_login_jwt(
     token: str,
     secret: str,
     *,
-    is_jti_consumed: Callable[[str], bool],
-    mark_jti_consumed: Callable[[str], None],
+    consume_jti: Callable[[str], bool],
 ) -> uuid.UUID | None:
     """Validate the JWT.
 
     Returns user_id on success; ``None`` on expired / invalid signature /
-    wrong-purpose / replay (jti consumed).
+    wrong-purpose / replay (jti already consumed).
 
-    ``is_jti_consumed`` and ``mark_jti_consumed`` are dependency-injected
-    so the caller (the Nowlez upgrade landing endpoint) supplies a
-    Redis-backed or DB-backed tracker without this module having to know
-    about it.
+    ``consume_jti`` is a single atomic dependency-injected callable that
+    MUST claim-or-skip the jti in one step and return:
 
-    Note: the order of the jti check is "check first, then mark". A second
-    concurrent validation racing on the same token will both pass the
-    "is consumed" check before either marks — production trackers SHOULD
-    use an atomic check-and-set primitive (Redis SETNX, Postgres INSERT
-    with ON CONFLICT DO NOTHING) and report consumed=True on the loser
-    side. The in-memory test tracker is single-threaded so a sequential
-    check+mark is sufficient there.
+    * ``True`` if the jti was fresh and is now consumed (caller is the
+      winner — proceed with auth).
+    * ``False`` if the jti was already consumed (replay — caller is the
+      loser, including the concurrent-pod race case).
+
+    Audit fix C-2: the previous two-callable (``is_jti_consumed`` +
+    ``mark_jti_consumed``) shape was TOCTOU-vulnerable across processes
+    — two pods could both observe "not consumed" and both call "mark"
+    before either claim was visible. The single-callable contract makes
+    the atomic check-and-set primitive (Redis SETNX, Postgres INSERT
+    with ON CONFLICT DO NOTHING) the implementer's responsibility,
+    eliminating the race at the API level.
     """
     try:
         payload = jwt.decode(token, secret, algorithms=["HS256"])
@@ -89,9 +92,8 @@ def validate_auto_login_jwt(
     jti = payload.get("jti")
     if not jti:
         return None
-    if is_jti_consumed(jti):
-        return None
-    mark_jti_consumed(jti)
+    if not consume_jti(jti):
+        return None  # replay (already consumed; possibly by another pod)
 
     try:
         return uuid.UUID(payload["sub"])
