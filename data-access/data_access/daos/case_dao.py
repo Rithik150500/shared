@@ -1,6 +1,7 @@
 """DAO for the unified cases table."""
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timezone
@@ -20,6 +21,26 @@ from ecourts_client.routing import classify_cnr
 # in order_dao, not here.
 _DIFFABLE_FIELDS = ("stage", "case_status", "next_hearing_date", "judge", "court", "history")
 
+# A-4 audit fix: defense-in-depth CNR validation at every DAO write entry.
+# Handler-level _CNR_RE (handlers/monitoring/save_command.py) is the first
+# line of defense but non-handler write paths (backfill, scheduler workers,
+# future refactors) bypass it. Without this assertion any caller could
+# persist garbage CNRs into the cases table.
+#
+# Pattern: 16 chars total — 4 alpha (state + court code) + 12 alphanumeric.
+# Mirrors ecourts_client.routing.CNR_REGEX but kept local so DAO callers
+# get a plain ValueError instead of CNRMalformed (no ecourts_client import
+# in the contract of writes here).
+_CNR_REGEX = re.compile(r"^[A-Z]{2}[A-Z]{2}[A-Z0-9]{12}$")
+
+
+def _assert_valid_cnr(cnr: str) -> None:
+    """Raise ValueError if `cnr` is not a syntactically valid 16-char CNR."""
+    if not isinstance(cnr, str) or not _CNR_REGEX.match(cnr):
+        raise ValueError(
+            f"Invalid CNR {cnr!r}: must match {_CNR_REGEX.pattern}",
+        )
+
 
 def upsert_case(
     s: Session,
@@ -33,6 +54,7 @@ def upsert_case(
     last_refreshed_at: datetime | None = None,
 ) -> Case:
     """Insert-or-update a case row from the shared `Case` dataclass."""
+    _assert_valid_cnr(cnr)
     existing = get_by_cnr(s, user_id=user_id, cnr=cnr)
     payload = _case_to_row_payload(case_data)
     payload["user_id"] = user_id
@@ -91,6 +113,7 @@ def diff_and_update(
     case_data: DataCase,
 ) -> list[str]:
     """Apply fresh fetch, returning the names of columns whose value changed."""
+    _assert_valid_cnr(cnr)
     existing = get_by_cnr(s, user_id=user_id, cnr=cnr)
     if existing is None:
         upsert_case(s, user_id=user_id, cnr=cnr, case_data=case_data)
@@ -119,6 +142,7 @@ def mark_cnr_not_found(s: Session, *, user_id: uuid.UUID, cnr: str) -> Case:
 
     `refresh_enabled=False` so the scheduler skips it; portal inferred from CNR.
     """
+    _assert_valid_cnr(cnr)
     existing = get_by_cnr(s, user_id=user_id, cnr=cnr)
     if existing is not None:
         existing.refresh_enabled = False
