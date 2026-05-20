@@ -36,6 +36,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from case_billing.errors import BillingError
+# Sub-project C Phase 1: re-export the lifetime-once eligibility check
+# from case_billing.pricing under the nowlez.promos namespace so callers
+# can import it alongside the rest of the intro-promo surface. The
+# canonical implementation lives in pricing.py because the lifetime-once
+# rule sits at the price-decision boundary (calculate_first_payment_paise
+# also reads the same column), not in the state machine here.
+from case_billing.pricing import is_eligible_for_intro_promo  # noqa: F401
 
 
 # State machine — keys are (from_state, event); values are the target state.

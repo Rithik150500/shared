@@ -10,6 +10,7 @@ from .billing import (
 )
 from .case import Case, CaseOrder, CaseOrderNowlez
 from .case_preferences import CasePreferences
+from .upsell import MunshiUpsellEvent
 from .user import User, UserMunshi, UserNowlez
 from .whatsapp import MessageLog, WhatsAppDeliveryLog
 
@@ -30,6 +31,7 @@ __all__ = [
     "Referral",
     "CaseBillingPeriod",
     "MunshiInvoice",
+    "MunshiUpsellEvent",
     "MessageLog",
     "WhatsAppDeliveryLog",
 ]

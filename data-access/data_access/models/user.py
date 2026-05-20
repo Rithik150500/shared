@@ -164,6 +164,17 @@ class UserNowlez(Base):
         Boolean, nullable=False, default=True, server_default=text("true")
     )
 
+    # Sub-project C amendment to sub-project D: per-user dismissal of the
+    # post-merge welcome banner shown to users whose Munshi account merged
+    # into a Nowlez login. Boolean (default FALSE) + nullable timestamp so
+    # we can audit when the banner was dismissed.
+    merge_banner_dismissed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    merge_banner_dismissed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

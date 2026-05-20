@@ -1,0 +1,192 @@
+"""Munshi upsell cron logic.
+
+Three stages: initial (80 cases OR ₹1000 spend), reminder (150 cases OR
+₹1500 spend), final (195 cases — case-count only for final). Each stage
+fires at most once per user (UNIQUE constraint in DB). 14-day cooling-off
+between stages.
+
+The eligibility query (Section 2.1 of the sub-project C spec) is run by
+the daily cron; this module exposes the stage-determination logic
+separately so it can be unit-tested without mocking the cron query, and
+provides DAO helpers for recording sends + conversions.
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+
+COOLING_OFF_DAYS = 14
+
+# Thresholds (Section 2.2 of spec):
+CASE_COUNT_INITIAL = 80
+CASE_COUNT_REMINDER = 150
+CASE_COUNT_FINAL = 195
+SPEND_INITIAL_RUPEES = 1000
+SPEND_REMINDER_RUPEES = 1500
+# Final stage: case-count only (~195 cases = 97.5% of 200 cap)
+
+
+@dataclass
+class UpsellEligibility:
+    """Cron-query result row, agnostic of DB driver."""
+
+    user_id: uuid.UUID
+    active_cases: int
+    lifetime_spend_rupees: int
+    last_sent_at: datetime | None
+
+
+def determine_upsell_stage(
+    elig: UpsellEligibility, sent_stages: set[str],
+) -> str | None:
+    """Pure function: given current eligibility + which stages were already
+    sent, return the next stage to send or None.
+
+    Returns ``"initial"``, ``"reminder"``, ``"final"``, or ``None``.
+    Caller is responsible for the cooling-off check (which depends on
+    last_sent_at being recent) — see :func:`is_within_cooling_off`.
+
+    The order of checks descends from highest-priority stage so that a
+    user who blows past the initial threshold without a send (e.g.,
+    burst case-add) still gets the most-relevant stage rather than the
+    earliest one. Each stage's eligibility is independent of the
+    previous ones being sent.
+    """
+    if elig.active_cases >= CASE_COUNT_FINAL and "final" not in sent_stages:
+        return "final"
+    if (
+        (
+            elig.active_cases >= CASE_COUNT_REMINDER
+            or elig.lifetime_spend_rupees >= SPEND_REMINDER_RUPEES
+        )
+        and "reminder" not in sent_stages
+    ):
+        return "reminder"
+    if (
+        (
+            elig.active_cases >= CASE_COUNT_INITIAL
+            or elig.lifetime_spend_rupees >= SPEND_INITIAL_RUPEES
+        )
+        and "initial" not in sent_stages
+    ):
+        return "initial"
+    return None
+
+
+def is_within_cooling_off(
+    last_sent_at: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Returns True if last_sent_at is within COOLING_OFF_DAYS of now.
+
+    Naive datetimes (no tzinfo) are assumed UTC for backward-compat with
+    callers that strip tzinfo on the way out of the DB.
+    """
+    if last_sent_at is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    last_aware = (
+        last_sent_at
+        if last_sent_at.tzinfo
+        else last_sent_at.replace(tzinfo=timezone.utc)
+    )
+    return last_aware > now - timedelta(days=COOLING_OFF_DAYS)
+
+
+def was_stage_sent(
+    session: Session, *, user_id: uuid.UUID, stage: str,
+) -> bool:
+    """Has the given upsell stage already been sent to this user?"""
+    from data_access.models import MunshiUpsellEvent
+
+    row = session.execute(
+        select(MunshiUpsellEvent.id)
+        .where(MunshiUpsellEvent.user_id == user_id)
+        .where(MunshiUpsellEvent.stage == stage)
+        .limit(1)
+    ).first()
+    return row is not None
+
+
+def record_upsell_event(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    stage: str,
+    trigger_reason: str,
+    case_count_at_send: int,
+    spend_at_send_rupees: int,
+    template_name: str,
+    meta_message_id: str | None = None,
+) -> None:
+    """Insert a new munshi_upsell_events row. Caller commits.
+
+    UNIQUE(user_id, stage) on the table guards against double-sends from
+    a racing cron worker — if a duplicate is attempted the second
+    transaction's commit() raises IntegrityError, which the cron treats
+    as a benign "another worker beat me to it" no-op.
+    """
+    from data_access.models import MunshiUpsellEvent
+
+    event = MunshiUpsellEvent(
+        user_id=user_id,
+        stage=stage,
+        trigger_reason=trigger_reason,
+        case_count_at_send=case_count_at_send,
+        spend_at_send_rupees=spend_at_send_rupees,
+        template_name=template_name,
+        meta_message_id=meta_message_id,
+    )
+    session.add(event)
+
+
+def record_upgrade_conversion(
+    session: Session, *, user_id: uuid.UUID, tier: str,
+) -> None:
+    """Mark the most-recent unconverted upsell event as converted.
+
+    Called from the Razorpay subscription.activated webhook handler. If
+    the user has no unconverted upsell events (e.g., they upgraded via a
+    different path — direct Nowlez signup, trial conversion), this is a
+    no-op.
+
+    Only the most-recent unconverted event is marked. Older un-acted-on
+    upsells from previous threshold-cross events stay unconverted in the
+    audit trail; the analytics layer joins on (most-recent before
+    conversion) to attribute the conversion to its likely trigger.
+    """
+    from data_access.models import MunshiUpsellEvent
+
+    event = session.execute(
+        select(MunshiUpsellEvent)
+        .where(MunshiUpsellEvent.user_id == user_id)
+        .where(MunshiUpsellEvent.converted_at.is_(None))
+        .order_by(MunshiUpsellEvent.sent_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if event is None:
+        return
+    event.converted_at = datetime.now(timezone.utc)
+    event.converted_to_tier = tier
+
+
+__all__ = [
+    "COOLING_OFF_DAYS",
+    "CASE_COUNT_INITIAL",
+    "CASE_COUNT_REMINDER",
+    "CASE_COUNT_FINAL",
+    "SPEND_INITIAL_RUPEES",
+    "SPEND_REMINDER_RUPEES",
+    "UpsellEligibility",
+    "determine_upsell_stage",
+    "is_within_cooling_off",
+    "was_stage_sent",
+    "record_upsell_event",
+    "record_upgrade_conversion",
+]

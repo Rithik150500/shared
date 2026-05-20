@@ -343,6 +343,7 @@ async def _handle_subscription_activated(
     from case_billing.nowlez.referrals import (
         apply_referral_at_first_payment,
     )
+    from case_billing.nowlez.upsell import record_upgrade_conversion
 
     sub_payload = _extract_subscription_payload(payload)
     rzp_sub_id = sub_payload.get("id")
@@ -429,6 +430,12 @@ async def _handle_subscription_activated(
         period.period_end = now
     session.flush()
     details["billing_periods_closed"] = len(open_periods)
+
+    # Sub-project C: stamp the most-recent unconverted upsell event so
+    # the analytics layer can attribute this conversion to its trigger.
+    # No-op when the user never received an upsell (direct signup path).
+    record_upgrade_conversion(session, user_id=user_id, tier=sub.tier)
+    session.flush()
 
     # 5. Send welcome template.
     phone = session.execute(
