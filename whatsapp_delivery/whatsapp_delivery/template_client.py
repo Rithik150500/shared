@@ -14,6 +14,7 @@ Behaviour per environment:
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -27,9 +28,53 @@ from whatsapp_delivery.errors import (
 )
 
 
+log = logging.getLogger(__name__)
+
 _GRAPH_VERSION = "v20.0"
 _GRAPH_BASE = f"https://graph.facebook.com/{_GRAPH_VERSION}"
 _TIMEOUT = 30
+
+
+# D-9: ``META_TEMPLATES_FALLBACK_TO_TEXT=1`` is a dev/staging escape hatch
+# that silently degrades every UTILITY template to plain text. Pre-fix this
+# was a hidden state -- the only visible symptom was a wave of Meta 24h
+# window errors days after the env var leaked into prod.
+#
+# Make it observable two ways:
+#   * a once-per-process WARNING log (operators see it on pod startup if
+#     the flag is set), and
+#   * a counter in ``_METRICS["fallback_to_text_total"]`` that ticks up on
+#     every fallback so the rate is visible even after the warning is gone.
+#
+# The counter dict shape mirrors what dispatch/worker.py emits via
+# structured log lines today; a follow-up commit can promote both to a
+# prometheus_client.Counter when the package gains a metrics module.
+_FALLBACK_TO_TEXT_WARNED: bool = False
+_METRICS: dict[str, int] = {"fallback_to_text_total": 0}
+
+
+def _check_fallback_to_text() -> bool:
+    """Return True if templates should silently degrade to plain text.
+
+    On the first ``True`` return per process, emit a WARNING log. Every
+    ``True`` return increments the ``fallback_to_text_total`` counter.
+    """
+    global _FALLBACK_TO_TEXT_WARNED
+    on = os.environ.get("META_TEMPLATES_FALLBACK_TO_TEXT") == "1"
+    if not on:
+        return False
+    if not _FALLBACK_TO_TEXT_WARNED:
+        log.warning(
+            "META_TEMPLATES_FALLBACK_TO_TEXT=1 is set; all template sends "
+            "will degrade to plain text. This is for dev/staging only -- "
+            "verify the env var is not leaking into prod."
+        )
+        _FALLBACK_TO_TEXT_WARNED = True
+    _METRICS["fallback_to_text_total"] = _METRICS.get("fallback_to_text_total", 0) + 1
+    # Mirror dispatch/worker.py's "metric=<name> ..." log convention so the
+    # existing log-based metric scrapers can pick this up without code change.
+    log.info("metric=whatsapp_template_fallback_to_text_total")
+    return True
 
 
 @dataclass
@@ -45,7 +90,7 @@ class TemplateClient:
 
     def send_template(self, *, to: str, name: str, language: str, variables: list[str]) -> str:
         """Send a UTILITY template. Returns the wamid on success."""
-        if os.environ.get("META_TEMPLATES_FALLBACK_TO_TEXT") == "1":
+        if _check_fallback_to_text():
             # Test / dev mode: fall back to free-text. Useful when templates haven't been
             # filed yet but we still want to exercise the notification pipeline.
             from whatsapp_delivery.meta_client import MetaClient
@@ -91,7 +136,7 @@ class TemplateClient:
 
         Returns the wamid on success.
         """
-        if os.environ.get("META_TEMPLATES_FALLBACK_TO_TEXT") == "1":
+        if _check_fallback_to_text():
             from whatsapp_delivery.meta_client import MetaClient
             inline = " ".join(str(v) for v in variables)
             return MetaClient(
@@ -152,7 +197,7 @@ class TemplateClient:
 
         Returns the wamid on success.
         """
-        if os.environ.get("META_TEMPLATES_FALLBACK_TO_TEXT") == "1":
+        if _check_fallback_to_text():
             from whatsapp_delivery.meta_client import MetaClient
             inline = " ".join(str(v) for v in body_variables)
             extras: list[str] = []
