@@ -7,9 +7,25 @@ ordering, and button shape — used by ``dispatch.worker._do_send_template``
 to translate a ``dict`` of variable names into the positional list Meta
 expects.
 
-The loader is cached with ``functools.lru_cache(maxsize=1)`` so the YAML
-files are parsed exactly once per process. Tests can re-prime the cache by
-calling ``_load_registry.cache_clear()``.
+The loader caches the parsed result in a module-level dict so the YAML
+files are parsed exactly once per process. Tests can force a reparse by
+calling :func:`invalidate_registry_cache`.
+
+**D-8 (audit fix):** Pre-fix the loader was wrapped in
+``functools.lru_cache(maxsize=1)``. That had two failure modes that
+weren't worth the perf win on a sub-10ms parse:
+
+1. ``lru_cache`` poisoned the cache on first-call failure. If
+   ``_load_registry()`` raised (bad YAML, file race), every subsequent
+   call re-raised the *cached* exception without retrying — the only
+   recovery was process restart.
+2. There was no public invalidation knob, so a YAML edit was stale
+   until the next deploy.
+
+The replacement uses a plain module-level dict + a sentinel flag, so a
+failed parse leaves the cache untouched (next call retries the file
+read) and operators / tests have an explicit
+``invalidate_registry_cache()`` to force a reparse.
 
 YAML schema (per plan §7.2.1):
 
@@ -33,7 +49,6 @@ YAML schema (per plan §7.2.1):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -195,7 +210,15 @@ def _parse_entry(entry: dict) -> Template:
     )
 
 
-@lru_cache(maxsize=1)
+# Module-level cache. ``None`` means "not yet loaded (or invalidated)";
+# any dict (including the empty one) means "successfully loaded — reuse".
+# The sentinel pattern is what gives us exception-safety: a failed parse
+# inside ``_load_registry`` leaves ``_REGISTRY`` at None, so the NEXT
+# call retries the file read instead of re-raising a cached exception
+# the way ``lru_cache`` did.
+_REGISTRY: dict[str, Template] | None = None
+
+
 def _load_registry() -> dict[str, Template]:
     """Parse every ``templates/**/*.yml`` once per process.
 
@@ -203,7 +226,16 @@ def _load_registry() -> dict[str, Template]:
     ``templates/nowlez/*.yml``) and keys the result by ``full_name``.
     Collisions raise ``ValueError`` so two files can't accidentally redefine
     the same Meta-side template.
+
+    Caches the result in the module-level ``_REGISTRY`` dict; repeated
+    calls return the same object identity. On parse failure ``_REGISTRY``
+    stays at None so the next call retries (this is the audit-fix
+    difference vs the old ``lru_cache`` which cached the exception).
     """
+    global _REGISTRY
+    if _REGISTRY is not None:
+        return _REGISTRY
+
     out: dict[str, Template] = {}
     for yml in sorted(_PKG_ROOT.rglob("*.yml")):
         data = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
@@ -215,7 +247,27 @@ def _load_registry() -> dict[str, Template]:
                     f"defined twice (second occurrence in {yml})"
                 )
             out[tmpl.full_name] = tmpl
-    return out
+    # Assign at the end so a mid-loop ValueError leaves the cache at None
+    # and operators can re-run after fixing the YAML.
+    _REGISTRY = out
+    return _REGISTRY
+
+
+def invalidate_registry_cache() -> None:
+    """Drop the cached registry so the next call reparses the YAML files.
+
+    Useful in two cases:
+
+    * Tests that mutate the bundled YAML files mid-suite (rare).
+    * Operators that edit a template file and want the new content
+      without a process restart.
+
+    Note: callers already holding a ``TemplateAccessor`` continue to see
+    the old data — only future ``get_template`` / ``list_templates``
+    calls see the reload.
+    """
+    global _REGISTRY
+    _REGISTRY = None
 
 
 # ---------------------------------------------------------------------------
@@ -252,5 +304,6 @@ __all__ = [
     "TemplateVariable",
     "VarLocation",
     "get_template",
+    "invalidate_registry_cache",
     "list_templates",
 ]

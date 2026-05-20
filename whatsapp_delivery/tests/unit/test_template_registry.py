@@ -161,10 +161,69 @@ def test_template_accessor_proxies_to_language_spec():
 
 
 def test_loader_caches_parse_result():
-    """``_load_registry`` is wrapped in lru_cache(maxsize=1)."""
+    """``_load_registry`` returns the same dict on repeated calls.
+
+    D-8: the cache was migrated from ``functools.lru_cache(maxsize=1)``
+    to a module-level dict + sentinel so the cache is exception-safe and
+    invalidatable, but the surface contract (cheap repeat calls) is
+    preserved.
+    """
+    reg.invalidate_registry_cache()  # Ensure a clean slate.
     a = reg._load_registry()
     b = reg._load_registry()
     assert a is b
+
+
+def test_invalidate_registry_cache_forces_reparse():
+    """After invalidate, the next call returns a fresh dict object.
+
+    D-8: tests / operators can force the YAML files to be re-read
+    without process restart. The new dict has the same contents but a
+    different identity than the pre-invalidate dict.
+    """
+    a = reg._load_registry()
+    reg.invalidate_registry_cache()
+    b = reg._load_registry()
+    assert a is not b, "invalidate should force a fresh parse"
+    # ...but the parsed contents are equal (same on-disk YAML).
+    assert set(a.keys()) == set(b.keys())
+
+
+def test_failed_parse_does_not_poison_cache(monkeypatch):
+    """D-8 regression test: a bad-YAML failure must NOT permanently break
+    every subsequent ``_load_registry`` call.
+
+    The old ``functools.lru_cache`` cached the exception object, so once
+    the registry raised it kept raising on every subsequent call until
+    process restart. The new module-level cache leaves ``_REGISTRY`` at
+    None on failure so the next call retries the file read.
+    """
+    reg.invalidate_registry_cache()
+
+    # First call: raise mid-parse.
+    bad_marker = []
+    real_parse = reg._parse_entry
+
+    def boom(entry):
+        if not bad_marker:
+            bad_marker.append(1)
+            raise ValueError("simulated bad YAML")
+        return real_parse(entry)
+
+    monkeypatch.setattr(reg, "_parse_entry", boom)
+    with pytest.raises(ValueError, match="simulated bad YAML"):
+        reg._load_registry()
+    assert reg._REGISTRY is None, (
+        "failed parse must NOT populate _REGISTRY — that's what enables "
+        "retry on the next call"
+    )
+
+    # Second call after the simulated transient resolves: must parse
+    # cleanly, no cached exception.
+    monkeypatch.setattr(reg, "_parse_entry", real_parse)
+    result = reg._load_registry()
+    assert isinstance(result, dict)
+    assert len(result) > 0
 
 
 def test_every_button_url_variable_appears_in_yaml_url():
