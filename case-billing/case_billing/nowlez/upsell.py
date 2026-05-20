@@ -15,6 +15,7 @@ Sub-project C Phase 4 (2026-05-20) adds the pilot-rollout filter
 """
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -22,6 +23,9 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+
+log = logging.getLogger(__name__)
 
 
 COOLING_OFF_DAYS = 14
@@ -58,13 +62,23 @@ def get_pilot_user_ids() -> set[uuid.UUID] | None:
     """Return the pilot allowlist, or None if pilot filter is OFF (full rollout).
 
     Parses comma-separated UUIDs from the SUBPROJECT_C_PILOT_USERS env var.
-    Silently drops malformed UUIDs (logged but doesn't crash the cron) so a
-    typo in the env var can't take down the whole pipeline.
+    Malformed UUIDs are dropped with a per-entry WARNING log so operators
+    can spot a typo without taking down the pipeline.
+
+    C-5 (audit fix): pre-fix the malformed entries were dropped silently
+    (only a metric counter). An operator who typo'd one of the 10 pilot
+    UUIDs would silently get a 9-user pilot instead. Now each malformed
+    entry emits a WARNING line naming the bad value. **If every entry
+    is malformed** (env var was non-empty but the resulting set is empty),
+    we raise ``RuntimeError`` — silently processing zero users would be
+    worse than the cron not running at all, and the operator wants to
+    know immediately rather than 24 hours later when they check metrics.
     """
     raw = os.environ.get(PILOT_USER_IDS_ENV, "").strip()
     if not raw:
         return None
     ids: set[uuid.UUID] = set()
+    malformed_count = 0
     for entry in raw.split(","):
         entry = entry.strip()
         if not entry:
@@ -72,10 +86,27 @@ def get_pilot_user_ids() -> set[uuid.UUID] | None:
         try:
             ids.add(uuid.UUID(entry))
         except ValueError:
-            # Malformed entry; skip silently. Operators can verify via
-            # the metric upsell_pilot_filter_malformed_total below.
+            malformed_count += 1
+            # C-5: log per-entry so the operator sees which value was
+            # bad without a metrics dashboard round-trip. Length is
+            # included because copy-paste truncation is the most common
+            # cause of bad UUIDs in env vars.
+            log.warning(
+                "Skipping malformed pilot UUID entry: %r (length %d)",
+                entry,
+                len(entry),
+            )
             _METRICS["pilot_filter_malformed"] = _METRICS.get("pilot_filter_malformed", 0) + 1
             continue
+    # C-5: if the env var was non-empty but EVERY entry was malformed the
+    # cron would otherwise silently process zero users. Hard-fail so the
+    # operator notices on the first run.
+    if malformed_count > 0 and not ids:
+        raise RuntimeError(
+            f"{PILOT_USER_IDS_ENV} is set but every entry is malformed "
+            f"({malformed_count} bad UUID(s)). Fix the env var or unset "
+            "it to disable the pilot filter."
+        )
     return ids
 
 

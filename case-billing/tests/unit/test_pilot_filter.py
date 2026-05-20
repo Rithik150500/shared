@@ -85,6 +85,65 @@ def test_pilot_filter_skips_malformed_uuids(monkeypatch):
 
 
 # ----------------------------------------------------------------------
+# C-5: malformed-UUID observability + all-malformed hard-fail
+# ----------------------------------------------------------------------
+
+
+def test_pilot_filter_logs_warning_for_each_malformed_entry(monkeypatch, caplog):
+    """C-5: pre-fix malformed entries were dropped silently. Now each one
+    emits a WARNING line so operators see the typo without a dashboard
+    round-trip.
+    """
+    import logging
+    u = uuid.uuid4()
+    monkeypatch.setenv(
+        PILOT_USER_IDS_ENV,
+        f"{u},not-a-uuid,short",
+    )
+    caplog.set_level(logging.WARNING, logger="case_billing.nowlez.upsell")
+    result = get_pilot_user_ids()
+    assert result == {u}
+    warnings = [
+        r for r in caplog.records
+        if "Skipping malformed pilot UUID entry" in r.getMessage()
+    ]
+    assert len(warnings) == 2, (
+        f"expected one WARNING per malformed entry; got {len(warnings)}: "
+        f"{[r.getMessage() for r in warnings]}"
+    )
+    # Both bad entries should appear by their literal value.
+    msgs = " ".join(r.getMessage() for r in warnings)
+    assert "not-a-uuid" in msgs
+    assert "short" in msgs
+
+
+def test_pilot_filter_all_malformed_raises_runtime_error(monkeypatch):
+    """C-5: if every entry is malformed the cron would otherwise silently
+    process zero users. Hard-fail so the operator notices on the first run.
+    """
+    monkeypatch.setenv(
+        PILOT_USER_IDS_ENV,
+        "not-a-uuid,also-bad,half-a-uuid",
+    )
+    with pytest.raises(RuntimeError, match="every entry is malformed"):
+        get_pilot_user_ids()
+
+
+def test_pilot_filter_empty_env_var_still_returns_none(monkeypatch):
+    """C-5 regression guard: the empty-env-var path (full rollout) must
+    NOT be affected by the new all-malformed RuntimeError gate.
+    """
+    monkeypatch.setenv(PILOT_USER_IDS_ENV, "")
+    assert get_pilot_user_ids() is None
+    monkeypatch.setenv(PILOT_USER_IDS_ENV, "   ,  ,  ")
+    # Whitespace-only entries are skipped (not counted as malformed) so
+    # this returns an empty set, not RuntimeError. Per C-5 we differentiate
+    # "empty after parse" (no real entries) from "every entry was malformed"
+    # — only the latter is operator error worth crashing on.
+    assert get_pilot_user_ids() == set()
+
+
+# ----------------------------------------------------------------------
 # is_user_in_pilot
 # ----------------------------------------------------------------------
 
