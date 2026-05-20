@@ -9,10 +9,11 @@ SQLite works for fast unit tests.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -124,6 +126,14 @@ class WhatsAppDeliveryLog(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # B-3 dedup key: IST-localized date of the send. NULL for transactional
+    # templates that may legitimately fire multiple times per user per day
+    # (signup welcome, OTP, order-uploaded, etc.). Set by the worker via an
+    # INSERT ... ON CONFLICT DO NOTHING claim for daily-cadence templates
+    # (``nowlez_tomorrow_hearings_v1``, ``nowlez_weekly_summary_v1``) — the
+    # partial unique index below makes the at-most-once-per-day guarantee
+    # cross-pod serializable.
+    send_date_ist: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -140,4 +150,16 @@ class WhatsAppDeliveryLog(Base):
             postgresql_where="delivery_status IN ('pending', 'failed')",
         ),
         Index("whatsapp_delivery_log_meta_msg_idx", "meta_message_id"),
+        # B-3: PARTIAL unique index — only rows with ``send_date_ist IS NOT
+        # NULL`` participate. This lets daily-cadence sends share the table
+        # with transactional sends that intentionally have no per-day key.
+        # The same predicate is used on both Postgres (production) and
+        # SQLite (tests) — modern SQLite (3.8+) supports partial indexes.
+        Index(
+            "whatsapp_delivery_log_user_template_day_unique",
+            "user_id", "template_name", "send_date_ist",
+            unique=True,
+            postgresql_where=text("send_date_ist IS NOT NULL"),
+            sqlite_where=text("send_date_ist IS NOT NULL"),
+        ),
     )
