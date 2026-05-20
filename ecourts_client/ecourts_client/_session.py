@@ -16,7 +16,6 @@ See docs/RE_NOTES.md sections 2.4 and 2.5 for the full provenance.
 from __future__ import annotations
 
 import json
-import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -39,8 +38,17 @@ _USER_AGENT = "eCourts-Bot/0.1 (+https://github.com/yourorg/ecourts-bot)"
 _PACKAGE_NAME = "in.gov.ecourts.eCourtsServices"
 _APP_VERSION = "3.0"
 _REQUEST_TIMEOUT = 30
-_MAX_5XX_RETRIES = 3
-_BACKOFF_BASE = 1.0
+
+# A-5 audit fix: the transport layer is now retry-free. The outer
+# ``ecourts_client.resilience.retry.with_retry`` decorator (composed by
+# ``client._wrap_with_resilience``) is the single source of retry truth and
+# catches ``CourtSiteDown``. Removing the inner loop avoids the multiplicative
+# blow-up (inner 4 * outer 3 = 12 attempts under a sticky 5xx) that starved
+# the bot-session pool during eCourts brownouts.
+#
+# This module continues to *classify* transport failures as ``CourtSiteDown``
+# (or ``RateLimited`` / ``BlockedByGeoIP``); the outer policy decides whether
+# they are retryable.
 
 
 class JWTExpired(ECourtsError):
@@ -124,34 +132,27 @@ class Session:
                 raise ECourtsError("attempt to send authenticated call without JWT")
             headers["Authorization"] = f"Bearer {wrap_bearer(self.jwt)}"
 
-        last_exc: Exception | None = None
-        for attempt in range(_MAX_5XX_RETRIES + 1):
-            try:
-                resp = self._http.get(
-                    url,
-                    params={"params": encrypted_body},
-                    headers=headers,
-                    timeout=_REQUEST_TIMEOUT,
-                )
-            except (requests.ConnectionError, requests.Timeout) as e:
-                last_exc = e
-                if attempt < _MAX_5XX_RETRIES:
-                    time.sleep(_BACKOFF_BASE * (2**attempt))
-                    continue
-                raise CourtSiteDown(f"connection error after {_MAX_5XX_RETRIES} retries: {e}") from e
+        # A-5: no inner retry loop. Classify the failure and let the outer
+        # ``with_retry`` decorator decide. Transport-level connection errors
+        # and HTTP 5xx both become ``CourtSiteDown`` and are retryable; 429
+        # and GeoIP-403 are *not* retryable (no rationale to hammer the
+        # same throttled endpoint or relocate the egress IP).
+        try:
+            resp = self._http.get(
+                url,
+                params={"params": encrypted_body},
+                headers=headers,
+                timeout=_REQUEST_TIMEOUT,
+            )
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise CourtSiteDown(f"connection error on {endpoint}: {e}") from e
 
-            if resp.status_code == 429:
-                raise RateLimited(f"eCourts returned 429 for {endpoint}")
-            if resp.status_code == 403 and "geographic" in resp.text.lower():
-                raise BlockedByGeoIP(f"GeoIP block for {endpoint}")
-            if 500 <= resp.status_code < 600:
-                if attempt < _MAX_5XX_RETRIES:
-                    time.sleep(_BACKOFF_BASE * (2**attempt))
-                    continue
-                raise CourtSiteDown(f"{resp.status_code} after {_MAX_5XX_RETRIES} retries on {endpoint}")
-            break
-        else:
-            raise CourtSiteDown("retries exhausted") from last_exc
+        if resp.status_code == 429:
+            raise RateLimited(f"eCourts returned 429 for {endpoint}")
+        if resp.status_code == 403 and "geographic" in resp.text.lower():
+            raise BlockedByGeoIP(f"GeoIP block for {endpoint}")
+        if 500 <= resp.status_code < 600:
+            raise CourtSiteDown(f"{resp.status_code} on {endpoint}")
 
         # eCourts returns plaintext JSON on validation/auth errors (e.g. {"status":"N","msg":"ERROR"})
         # and an encrypted envelope on success. Detect the cleartext path by trying to parse
