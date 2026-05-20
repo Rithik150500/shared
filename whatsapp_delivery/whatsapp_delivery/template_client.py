@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,6 +34,64 @@ log = logging.getLogger(__name__)
 _GRAPH_VERSION = "v20.0"
 _GRAPH_BASE = f"https://graph.facebook.com/{_GRAPH_VERSION}"
 _TIMEOUT = 30
+
+
+# D-6: every variable that flows into a template component used to be
+# interpolated via ``str(v)`` with no escape, no control-char filter, no
+# RTL/bidi-override strip, and no ``{{N}}`` escape. A user-supplied case
+# title containing a newline, NULL byte, right-to-left override codepoint,
+# literal ``{{2}}`` placeholder, or a thousand-character paste could
+# silently break Meta template validation OR inject extra placeholder
+# slots that Meta would then attempt to fill.
+#
+# ``_sanitize_var`` is the single chokepoint: strip C0/C1 control chars
+# (keep tab), strip RTL/LTR override + isolate codepoints, defuse the
+# ``{{N}}`` placeholder pattern, and length-cap with a trailing ellipsis
+# so the receiver sees data was elided rather than silent truncation.
+#
+# Tab (0x09) is intentionally kept because some templates legitimately
+# use tab-aligned bodies; if Meta ever rejects tabs we can add it to the
+# strip set without a behavior surprise for callers (the rendered text
+# would just be slightly tighter). Newline (\\x0a) and carriage return
+# (\\x0d) ARE stripped — Meta's template variable slots are single-line
+# values and a user-supplied newline breaks rendering on the recipient
+# side (and, in some cases, the template validation pre-send).
+_BIDI_CHARS = (
+    "‪‫‬‭‮"   # LRE RLE PDF LRO RLO
+    "⁦⁧⁨⁩"          # LRI RLI FSI PDI
+)
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+_LITERAL_PLACEHOLDER_RE = re.compile(r"\{\{(\d+)\}\}")
+_DEFAULT_VAR_MAX_LEN = 256
+
+
+def _sanitize_var(value: Any, max_len: int = _DEFAULT_VAR_MAX_LEN) -> str:
+    """Make a template variable value safe to interpolate into Meta's payload.
+
+    Order of operations:
+
+    1. Coerce to ``str`` (preserves the original ``str(v)`` semantics).
+    2. Strip C0/C1 control characters EXCEPT tab (\\x09) which some
+       templates use for alignment.
+    3. Strip RTL/LTR override + isolate codepoints (known phishing vector
+       and a source of "the rendered string isn't what was typed" bugs).
+    4. Defuse any literal ``{{N}}`` substrings the user typed so they
+       can't masquerade as template placeholders Meta will try to fill.
+    5. Length-cap to ``max_len`` (default 256) with a trailing ``…`` so
+       the recipient sees that data was elided.
+    """
+    s = str(value)
+    s = _CTRL_CHARS_RE.sub("", s)
+    if any(ch in s for ch in _BIDI_CHARS):
+        for ch in _BIDI_CHARS:
+            s = s.replace(ch, "")
+    # Replace ``{{N}}`` with ``{ {N} }`` — keeps the digits visible to
+    # the recipient while breaking Meta's placeholder regex on both ends.
+    s = _LITERAL_PLACEHOLDER_RE.sub(r"{ {\1} }", s)
+    if len(s) > max_len:
+        # -1 to leave room for the ellipsis; ``…`` is 1 visual char.
+        s = s[: max_len - 1] + "…"
+    return s
 
 
 # D-9: ``META_TEMPLATES_FALLBACK_TO_TEXT=1`` is a dev/staging escape hatch
@@ -94,7 +153,7 @@ class TemplateClient:
             # Test / dev mode: fall back to free-text. Useful when templates haven't been
             # filed yet but we still want to exercise the notification pipeline.
             from whatsapp_delivery.meta_client import MetaClient
-            inline = " ".join(str(v) for v in variables)
+            inline = " ".join(_sanitize_var(v) for v in variables)
             return MetaClient(
                 phone_number_id=self.phone_number_id,
                 access_token=self.access_token,
@@ -111,7 +170,7 @@ class TemplateClient:
                     {
                         "type": "body",
                         "parameters": [
-                            {"type": "text", "text": str(v)} for v in variables
+                            {"type": "text", "text": _sanitize_var(v)} for v in variables
                         ],
                     }
                 ],
@@ -138,7 +197,7 @@ class TemplateClient:
         """
         if _check_fallback_to_text():
             from whatsapp_delivery.meta_client import MetaClient
-            inline = " ".join(str(v) for v in variables)
+            inline = " ".join(_sanitize_var(v) for v in variables)
             return MetaClient(
                 phone_number_id=self.phone_number_id,
                 access_token=self.access_token,
@@ -162,7 +221,7 @@ class TemplateClient:
                     {
                         "type": "body",
                         "parameters": [
-                            {"type": "text", "text": str(v)} for v in variables
+                            {"type": "text", "text": _sanitize_var(v)} for v in variables
                         ],
                     },
                 ],
@@ -199,12 +258,12 @@ class TemplateClient:
         """
         if _check_fallback_to_text():
             from whatsapp_delivery.meta_client import MetaClient
-            inline = " ".join(str(v) for v in body_variables)
+            inline = " ".join(_sanitize_var(v) for v in body_variables)
             extras: list[str] = []
             if header_media_id:
                 extras.append(f"PDF: {header_media_id}")
             if button_url_variables:
-                extras.append("link: " + "/".join(str(v) for v in button_url_variables))
+                extras.append("link: " + "/".join(_sanitize_var(v) for v in button_url_variables))
             suffix = f" ({'; '.join(extras)})" if extras else ""
             return MetaClient(
                 phone_number_id=self.phone_number_id,
@@ -221,7 +280,7 @@ class TemplateClient:
 
         components.append({
             "type": "body",
-            "parameters": [{"type": "text", "text": str(v)} for v in body_variables],
+            "parameters": [{"type": "text", "text": _sanitize_var(v)} for v in body_variables],
         })
 
         if button_url_variables:
@@ -229,7 +288,7 @@ class TemplateClient:
                 "type": "button",
                 "sub_type": "url",
                 "index": "0",
-                "parameters": [{"type": "text", "text": str(v)} for v in button_url_variables],
+                "parameters": [{"type": "text", "text": _sanitize_var(v)} for v in button_url_variables],
             })
 
         body: dict = {
