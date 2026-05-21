@@ -154,3 +154,61 @@ def test_stop_handler_truncates_long_inbound_text_in_audit(db_session, monkeypat
     row = db_session.query(AuditLog).one()
     # Cap at 100 chars per the spec to keep audit-log payloads sane.
     assert len(row.metadata_["inbound_text"]) == 100
+
+
+def test_stop_handler_does_not_revoke_consent_when_enqueue_fails(db_session, monkeypatch):
+    """D-10 fix: enqueue must run BEFORE the DB commit so a producer crash
+    between commit and enqueue can't leave the user opted-out with no
+    confirmation message. We simulate the failure by raising from
+    ``enqueue_send_template`` and asserting:
+        * the consent flags are still True (no revocation persisted)
+        * no audit row was written
+
+    The user retries STOP later; the handler re-processes cleanly and they
+    end up correctly opted-out (acceptable failure mode per the audit note).
+    The unacceptable current behavior — consent revoked, no confirmation,
+    user thinks the bot is dead — is what this test guards against.
+    """
+    user, _ = user_dao.get_or_create_by_phone(db_session, phone="+919876543210")
+    db_session.commit()
+    user_dao.ensure_nowlez_extension(db_session, user.id, name="N")
+    db_session.commit()
+
+    # Sanity: pre-state has both flags True (the default established by
+    # ensure_nowlez_extension).
+    ext_before = db_session.get(UserNowlez, user.id)
+    assert ext_before.whatsapp_events_enabled is True
+    assert ext_before.whatsapp_reminders_enabled is True
+
+    class _EnqueueBoom(RuntimeError):
+        pass
+
+    async def fake_enqueue(**kwargs):
+        raise _EnqueueBoom("simulated queue/producer failure")
+
+    monkeypatch.setattr(
+        "whatsapp_delivery.webhook.stop_handler.enqueue_send_template",
+        fake_enqueue,
+    )
+
+    with pytest.raises(_EnqueueBoom):
+        _run(handle_stop_keyword(user.id, _msg(), db_session))
+
+    # The handler raised; the DB transaction must be rolled back so the
+    # consent flags are unchanged and no audit row was committed. We open a
+    # fresh session against the same engine to bypass the original session's
+    # identity-map cache (which could mask an uncommitted in-memory mutation).
+    engine = db_session.get_bind()
+    from sqlalchemy.orm import sessionmaker as _sm
+    fresh = _sm(bind=engine, future=True)()
+    try:
+        ext_after = fresh.get(UserNowlez, user.id)
+        assert ext_after.whatsapp_events_enabled is True, (
+            "consent must NOT be revoked when enqueue fails — D-10 regression"
+        )
+        assert ext_after.whatsapp_reminders_enabled is True
+        assert fresh.query(AuditLog).count() == 0, (
+            "no audit row should be persisted when the enqueue step fails"
+        )
+    finally:
+        fresh.close()
