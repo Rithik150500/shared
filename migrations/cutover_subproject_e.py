@@ -101,6 +101,18 @@ REFERRAL_STATE_HAS_REFERRER: str = "mutual_applied"
 REFERRAL_STATE_NO_REFERRER: str = "no_referral"
 
 
+class CutoverPreflightFailed(RuntimeError):
+    """Pre-flight check (E-2) found a data-integrity problem that would
+    silently break downstream work — for example, ``users_munshi`` rows
+    missing ``billing_anniversary_date`` cause the billing cron to drop
+    users on the floor.
+
+    Subclasses ``RuntimeError`` so that existing callers handling the
+    broader exception type (and the pre-E-2 test asserting
+    ``pytest.raises(RuntimeError, ...)``) keep working unchanged.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Step 1 — subscriptions backfill
 # ---------------------------------------------------------------------------
@@ -315,9 +327,20 @@ def run_cutover(
             "munshi_missing_anniversary": int, "dry_run": bool}``.
 
     Raises:
-        RuntimeError: if step 3 reports any Munshi user missing a
-            ``billing_anniversary_date``. The cutover refuses to commit
-            so ops can investigate.
+        CutoverPreflightFailed: if the pre-flight verification finds any
+            ``users_munshi`` row missing a ``billing_anniversary_date``.
+            Raised BEFORE any writes happen. Subclasses ``RuntimeError``
+            for back-compat with broader exception handlers.
+
+    Ordering (E-2). The original code ran backfill → free-tier-reset →
+    verify; if the verify step failed, the two write steps had already
+    executed (with their writes rolled back via ``session.rollback()``)
+    and ops had wasted compute + log noise. We now run verify FIRST as a
+    pure-read pre-flight gate: any failure aborts the orchestrator before
+    a single INSERT/UPDATE is issued. Dry-run mode preserves the old
+    "report everything, don't raise" behavior so the canary CI run can
+    still observe a missing-anniversary count alongside the would-be
+    backfill counts.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -345,27 +368,39 @@ def run_cutover(
             "(non-fatal on SQLite/test path)", e,
         )
 
-    subscriptions_inserted = _backfill_subscriptions(
-        session, now=now, dry_run=dry_run,
-    )
-    free_users_reset = _reset_free_tier_to_trial(
-        session, now=now, dry_run=dry_run,
-    )
+    # E-2: pre-flight verification runs FIRST. ``_verify_munshi_anniversary``
+    # is a pure read so this is cheap; a non-zero result aborts the cutover
+    # before any writes have happened. Dry-run mode keeps the old "report
+    # but don't raise" behavior so the canary CI run still surfaces the
+    # missing-anniversary count alongside the would-be backfill counts.
     munshi_missing = _verify_munshi_anniversary(session)
 
     if munshi_missing > 0:
         # Surface loudly. The alembic migration is supposed to flip the
         # column to NOT NULL after backfilling; if we got here, either
         # alembic wasn't run, the backfill failed, or someone INSERTed
-        # a Munshi user between alembic and this cutover.
+        # a Munshi user between alembic and this cutover. The error
+        # message keeps the substring "billing_anniversary_date is NULL"
+        # so existing log-scraping/test regexes that match on it still
+        # work after the E-2 reorder.
         msg = (
             f"users_munshi.billing_anniversary_date is NULL for "
             f"{munshi_missing} row(s) — alembic backfill did not complete"
         )
         if not dry_run:
+            # No writes have happened yet — nothing to roll back, but
+            # call rollback() defensively in case the SET TRANSACTION
+            # above (or some future pre-flight) opened an implicit tx.
             session.rollback()
-            raise RuntimeError(msg)
+            raise CutoverPreflightFailed(msg)
         logger.warning("DRY-RUN: %s", msg)
+
+    subscriptions_inserted = _backfill_subscriptions(
+        session, now=now, dry_run=dry_run,
+    )
+    free_users_reset = _reset_free_tier_to_trial(
+        session, now=now, dry_run=dry_run,
+    )
 
     if not dry_run:
         session.commit()

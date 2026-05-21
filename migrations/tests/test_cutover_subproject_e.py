@@ -11,6 +11,9 @@ Covers:
 * Idempotency: running ``run_cutover`` twice produces the same final
   state — second run is a no-op (counts == 0).
 * ``--dry-run`` mode reports counts but commits nothing.
+* E-2: ``_verify_munshi_anniversary`` runs as a pre-flight gate; a
+  positive count aborts before any writes (no backfill, no free-tier
+  reset).
 """
 from __future__ import annotations
 
@@ -21,7 +24,9 @@ import pytest
 
 from data_access.models.billing import Subscription
 from data_access.models.user import User, UserMunshi, UserNowlez
+from migrations import cutover_subproject_e as _cutover_mod
 from migrations.cutover_subproject_e import (
+    CutoverPreflightFailed,
     REFERRAL_STATE_HAS_REFERRER,
     REFERRAL_STATE_NO_REFERRER,
     INTRO_PROMO_STATE_BACKFILL,
@@ -294,3 +299,76 @@ def test_dry_run_reports_counts_without_mutating(db_session):
     ).one()
     assert freebie_row.tier == "free"
     assert freebie_row.trial_started_at is None
+
+
+# ---------------------------------------------------------------------------
+# E-2 — verify step runs as a pre-flight (no writes when it fails)
+# ---------------------------------------------------------------------------
+
+
+def test_verify_runs_first_and_aborts_before_any_writes(db_session, monkeypatch):
+    """E-2 fix: ``_verify_munshi_anniversary`` must execute BEFORE the
+    backfill and free-tier reset. When it reports missing rows, the
+    orchestrator must raise immediately and never call the two write
+    steps. Seed enough data that both write steps would run if reached,
+    so a regression (writes happening despite the verify failure) is
+    observable both in mock-call count and in the DB state.
+    """
+    # Seed a paying user (backfill candidate) and a free user (reset
+    # candidate) so both write steps would have non-zero work to do if
+    # they were reached.
+    payer = _make_user(db_session, phone="+91PRE1")
+    _attach_nowlez(
+        db_session, payer,
+        tier="counsel",
+        razorpay_customer_id="cust_pre1",
+        razorpay_subscription_id="sub_pre1",
+    )
+    freebie = _make_user(db_session, phone="+91PRE2")
+    _attach_nowlez(db_session, freebie, tier="free", name="PreFree")
+    db_session.commit()
+
+    backfill_calls: list[bool] = []
+    reset_calls: list[bool] = []
+
+    def _spy_backfill(session, *, now, dry_run):
+        backfill_calls.append(True)
+        return 0
+
+    def _spy_reset(session, *, now, dry_run):
+        reset_calls.append(True)
+        return 0
+
+    def _fake_verify(session):
+        return 3  # >0 → pre-flight failure
+
+    monkeypatch.setattr(_cutover_mod, "_backfill_subscriptions", _spy_backfill)
+    monkeypatch.setattr(_cutover_mod, "_reset_free_tier_to_trial", _spy_reset)
+    monkeypatch.setattr(_cutover_mod, "_verify_munshi_anniversary", _fake_verify)
+
+    with pytest.raises(CutoverPreflightFailed, match="billing_anniversary_date"):
+        run_cutover(db_session, now=_NOW)
+
+    # The write steps must not have been called.
+    assert backfill_calls == [], (
+        "backfill ran despite pre-flight failure — E-2 regression"
+    )
+    assert reset_calls == [], (
+        "free-tier reset ran despite pre-flight failure — E-2 regression"
+    )
+
+    # And no DB rows were mutated (defense in depth — proves the
+    # mock-spy assertions aren't masking a direct SQL write).
+    assert db_session.query(Subscription).count() == 0
+    freebie_row = db_session.query(UserNowlez).filter_by(
+        user_id=freebie.id,
+    ).one()
+    assert freebie_row.tier == "free"
+    assert freebie_row.trial_started_at is None
+
+
+def test_cutover_preflight_failed_is_runtimeerror_subclass():
+    """Existing callers catch ``RuntimeError`` (see the pre-E-2 test
+    above). The new ``CutoverPreflightFailed`` must remain catchable by
+    that broader handler — keep it as a RuntimeError subclass."""
+    assert issubclass(CutoverPreflightFailed, RuntimeError)
