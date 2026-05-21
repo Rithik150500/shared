@@ -109,10 +109,15 @@ def test_enqueue_send_template_with_components(fake_redis):
 
 
 def test_enqueue_send_document(fake_redis):
+    """D-5: the queue carries a URL string, not raw bytes.
+
+    A URL is constant-size regardless of document size, so failed jobs
+    can no longer push Redis OOM via the failed-job registry.
+    """
     job_id = _run(
         q.enqueue_send_document(
             to="+919999999999",
-            document_bytes=b"%PDF-1.4\n...",
+            document_url="file:///tmp/order.pdf",
             caption="Order PDF",
             filename="order.pdf",
             brand="munshi",
@@ -127,7 +132,10 @@ def test_enqueue_send_document(fake_redis):
     kwargs = job.kwargs
     assert kwargs["filename"] == "order.pdf"
     assert kwargs["caption"] == "Order PDF"
-    assert kwargs["document_bytes"] == b"%PDF-1.4\n..."
+    assert kwargs["document_url"] == "file:///tmp/order.pdf"
+    # Old field MUST be gone — pickling a 5 MB blob into Redis was the
+    # audit finding that motivated this refactor.
+    assert "document_bytes" not in kwargs
 
 
 def test_queue_uses_whatsapp_send_name(fake_redis):
@@ -266,7 +274,7 @@ def test_enqueue_send_document_threads_dedup_key(fake_redis):
     _run(
         q.enqueue_send_document(
             to="+919999999999",
-            document_bytes=b"%PDF-1.4\n...",
+            document_url="file:///tmp/x.pdf",
             caption="cap",
             filename="x.pdf",
             brand="munshi",
@@ -306,7 +314,7 @@ def test_enqueue_helpers_default_dedup_key_to_none(fake_redis):
     _run(
         q.enqueue_send_document(
             to="+1",
-            document_bytes=b"",
+            document_url="file:///tmp/x.pdf",
             caption="",
             filename="x.pdf",
             brand="munshi",

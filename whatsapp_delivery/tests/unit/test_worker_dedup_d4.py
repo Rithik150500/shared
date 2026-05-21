@@ -201,7 +201,10 @@ def test_send_template_with_components_second_call_short_circuits(fake_redis):
 
 
 @respx.mock
-def test_send_document_first_call_with_dedup_key_sends(fake_redis):
+def test_send_document_first_call_with_dedup_key_sends(fake_redis, tmp_path):
+    pdf = tmp_path / "doc1.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n...")
+
     respx.post("https://graph.facebook.com/v20.0/111/media").mock(
         return_value=Response(200, json={"id": "media-abc"})
     )
@@ -210,7 +213,7 @@ def test_send_document_first_call_with_dedup_key_sends(fake_redis):
     )
     wamid = w._do_send_document(
         to="+919999999999",
-        document_bytes=b"%PDF-1.4\n...",
+        document_url=f"file:///{pdf.as_posix().lstrip('/')}",
         caption="cap",
         filename="x.pdf",
         brand="munshi",
@@ -222,7 +225,18 @@ def test_send_document_first_call_with_dedup_key_sends(fake_redis):
 
 
 @respx.mock
-def test_send_document_second_call_with_same_dedup_key_short_circuits(fake_redis):
+def test_send_document_second_call_with_same_dedup_key_short_circuits(
+    fake_redis, tmp_path,
+):
+    """D-4 dedup: a retry must not re-fetch the URL AND must not re-call Meta.
+
+    The dedup short-circuit runs BEFORE URL resolution, so the second
+    invocation also avoids the (potentially expensive) object-storage
+    fetch — important for D-5's R2/S3 path where each fetch costs egress.
+    """
+    pdf = tmp_path / "doc2.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n...")
+
     media_route = respx.post("https://graph.facebook.com/v20.0/111/media").mock(
         return_value=Response(200, json={"id": "media-abc"})
     )
@@ -231,7 +245,7 @@ def test_send_document_second_call_with_same_dedup_key_short_circuits(fake_redis
     )
     common = dict(
         to="+919999999999",
-        document_bytes=b"%PDF-1.4\n...",
+        document_url=f"file:///{pdf.as_posix().lstrip('/')}",
         caption="cap",
         filename="x.pdf",
         brand="munshi",

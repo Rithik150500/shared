@@ -4,6 +4,15 @@ Each function is a top-level callable RQ can import. They construct fresh
 :class:`MetaClient` / :class:`TemplateClient` instances per call (cheap; both
 just wrap env vars + an httpx call).
 
+**Audit fix D-5 (document URL):** ``_do_send_document`` takes a
+``document_url`` string (file:// or http(s)://) instead of raw bytes.
+The worker resolves the URL just-in-time via
+:func:`_resolve_document_url` before the Meta upload, so the bytes
+never enter the RQ job payload — eliminating the failed-job-registry
+Redis OOM risk that the earlier bytes-in-kwargs API created. The
+worker caps URL responses at 16 MB (:data:`_DOCUMENT_MAX_BYTES`) so a
+malicious URL can't pull gigabytes into memory.
+
 Error handling per spec §6:
 - :class:`MetaTransientError` → re-raise so RQ's ``Retry`` policy kicks in.
 - :class:`Meta24HourWindowExpired` → swallowed locally and re-raised after a
@@ -35,10 +44,13 @@ production runs the worker process owned by Munshi (see
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
 from redis import Redis
 
 from whatsapp_delivery.config import WhatsAppConfig
@@ -90,6 +102,21 @@ _DEDUP_DAILY_TEMPLATES: frozenset[str] = frozenset({
 # IST timezone for per-day key computation. Computed once at module load —
 # ``ZoneInfo`` is cheap to look up but doing it per-send is wasteful.
 _IST = ZoneInfo("Asia/Kolkata")
+
+
+# D-5: maximum bytes the worker will load when resolving a
+# ``document_url``. Realistic order PDFs are sub-5 MB; Meta's WhatsApp
+# Cloud API documents a 100 MB document cap. 16 MB is comfortable
+# headroom that still bounds worker memory + outbound bandwidth in the
+# event a producer points at a malicious/misconfigured URL.
+_DOCUMENT_MAX_BYTES = 16 * 1024 * 1024
+
+# D-5: timeout for the http(s) GET when fetching a document_url. Kept
+# short (10 s) so a stalled object-storage backend doesn't tie up an RQ
+# worker slot — the producer-side 2 m job_timeout already covers the
+# whole job, but a tighter per-fetch timeout fails faster and lets RQ's
+# retry policy soak the failure.
+_DOCUMENT_FETCH_TIMEOUT_SECONDS = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +366,79 @@ def _claim_daily_send_slot(
             template_name,
         )
         return True
+
+
+def _resolve_document_url(
+    document_url: str,
+    *,
+    max_bytes: int = _DOCUMENT_MAX_BYTES,
+) -> bytes:
+    """Fetch document bytes from a ``file://`` or ``http(s)://`` URL.
+
+    D-5: producers stage the document either on the worker's local
+    filesystem (case-tracker today, same-host producer/consumer) or in
+    object storage (R2/S3/Cubbit). The URL travels through Redis cheaply
+    (tens of bytes); the bytes are pulled into memory only when the
+    worker is about to call Meta's media upload.
+
+    Args:
+      document_url: A URL with a supported scheme:
+        - ``file:///abs/path``  → read from local disk (URL-decoded).
+        - ``http://`` / ``https://``  → HTTP GET via ``httpx``.
+      max_bytes: Upper bound on the fetched payload size. Defaults to
+        :data:`_DOCUMENT_MAX_BYTES` (16 MB).
+
+    Returns:
+      The raw bytes of the document.
+
+    Raises:
+      ValueError: unsupported scheme, missing scheme, or payload exceeds
+        ``max_bytes``.
+      FileNotFoundError: ``file://`` URL points at a path that doesn't
+        exist (propagated from :meth:`pathlib.Path.read_bytes`).
+      httpx.HTTPError: network-level failure or non-2xx response on an
+        ``http(s)://`` URL (callers may want to map these to
+        ``MetaTransientError`` if retry-worthy, but the current single
+        worker caller lets them propagate so the failed-job registry
+        captures the exact error).
+    """
+    parsed = urllib.parse.urlparse(document_url)
+    if parsed.scheme == "file":
+        # urlparse leaves the leading slash on the path component for
+        # ``file:///abs/...`` URLs; on Windows a leading ``/`` followed
+        # by a drive letter has to be stripped manually because
+        # ``Path('/C:/...')`` is misinterpreted as an absolute POSIX
+        # path. ``unquote`` decodes %20 etc.
+        raw_path = urllib.parse.unquote(parsed.path)
+        if raw_path.startswith("/") and len(raw_path) >= 3 and raw_path[2] == ":":
+            # ``/C:/foo`` → ``C:/foo`` (Windows drive-letter case)
+            raw_path = raw_path[1:]
+        data = Path(raw_path).read_bytes()
+    elif parsed.scheme in ("http", "https"):
+        # httpx (not stdlib urllib) so respx can mock these in tests and
+        # the timeout/connection semantics match the rest of the
+        # whatsapp_delivery package. ``follow_redirects=True`` so a
+        # pre-signed R2/S3 URL that 302s to the actual blob works.
+        with httpx.Client(
+            timeout=_DOCUMENT_FETCH_TIMEOUT_SECONDS,
+            follow_redirects=True,
+        ) as client:
+            resp = client.get(document_url)
+            resp.raise_for_status()
+            data = resp.content
+    else:
+        raise ValueError(
+            f"Unsupported document_url scheme: {parsed.scheme!r} "
+            f"(supported: file://, http://, https://)"
+        )
+
+    if len(data) > max_bytes:
+        raise ValueError(
+            f"document_url payload is {len(data):,} bytes which exceeds "
+            f"max_bytes={max_bytes:,}. Stage a smaller file or raise "
+            f"_DOCUMENT_MAX_BYTES with a paired Redis-OOM review."
+        )
+    return data
 
 
 def _bind_wamid_to_delivery_log(rq_job_id: str | None, wamid: str) -> None:
@@ -652,17 +752,31 @@ def _do_send_template_with_components(
 def _do_send_document(
     *,
     to: str,
-    document_bytes: bytes,
+    document_url: str,
     caption: str,
     filename: str,
     brand: str,
     dedup_key: str | None = None,
 ) -> str:
-    """RQ entry: upload + send a PDF in one call.
+    """RQ entry: resolve a document URL then upload + send via Meta.
+
+    D-5: ``document_url`` (file:// or http(s)://) replaces the earlier
+    ``document_bytes`` kwarg so the queue carries a string instead of
+    the full PDF. :func:`_resolve_document_url` pulls the bytes into
+    memory only here, just before the Meta upload, capped at
+    :data:`_DOCUMENT_MAX_BYTES`.
 
     D-4: when ``dedup_key`` is provided, the worker claims a Redis SETNX
-    slot before the upload (so a retry won't re-upload the same PDF
-    either) and short-circuits on duplicate.
+    slot before resolving the URL (so a retry doesn't re-fetch from
+    object storage either) and short-circuits on duplicate.
+
+    Failure modes:
+    - URL resolution errors (FileNotFoundError, httpx.HTTPError,
+      ValueError-on-oversize) propagate to RQ. Since they're not
+      :class:`MetaTransientError`, RQ's Retry policy ignores them and
+      the job lands in the failed-job registry for ops triage.
+    - Meta API errors keep their existing semantics (transient →
+      retry, 24h → dead-letter).
     """
     cfg = WhatsAppConfig()
     if brand == "nowlez" and cfg.whatsapp_nowlez_disabled:
@@ -677,6 +791,12 @@ def _do_send_document(
             _redact_phone(to),
         )
         return ""
+
+    # D-5: resolve AFTER the kill-switch and dedup checks so a
+    # short-circuit doesn't pay the I/O cost. URL resolution failures
+    # bubble up (they're not Meta transient, RQ won't retry them).
+    document_bytes = _resolve_document_url(document_url)
+
     client = MetaClient(
         phone_number_id=cfg.meta_phone_number_id,
         access_token=cfg.meta_access_token,

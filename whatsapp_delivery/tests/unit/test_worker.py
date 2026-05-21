@@ -205,7 +205,11 @@ def test_do_send_template_with_components_success():
 
 
 @respx.mock
-def test_do_send_document_uploads_then_sends():
+def test_do_send_document_uploads_then_sends(tmp_path):
+    """D-5: ``document_url=file:///path`` is read from disk then uploaded."""
+    pdf = tmp_path / "order.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n...")
+
     respx.post("https://graph.facebook.com/v20.0/111/media").mock(
         return_value=Response(200, json={"id": "media-xyz"})
     )
@@ -214,7 +218,7 @@ def test_do_send_document_uploads_then_sends():
     )
     wamid = w._do_send_document(
         to="+919999999999",
-        document_bytes=b"%PDF-1.4\n...",
+        document_url=f"file:///{pdf.as_posix().lstrip('/')}",
         caption="Order PDF",
         filename="order.pdf",
         brand="munshi",
@@ -329,10 +333,11 @@ def test_do_send_template_with_components_nowlez_kill_switch_short_circuits(monk
 
 
 def test_do_send_document_nowlez_kill_switch_short_circuits(monkeypatch):
+    """Kill switch runs before URL resolution — a bogus path is fine."""
     monkeypatch.setenv("WHATSAPP_NOWLEZ_DISABLED", "1")
     out = w._do_send_document(
         to="+919999999999",
-        document_bytes=b"%PDF-1.4\n...",
+        document_url="file:///nonexistent/x.pdf",
         caption="cap",
         filename="x.pdf",
         brand="nowlez",
@@ -341,14 +346,17 @@ def test_do_send_document_nowlez_kill_switch_short_circuits(monkeypatch):
 
 
 @respx.mock
-def test_do_send_document_5xx_propagates_transient():
+def test_do_send_document_5xx_propagates_transient(tmp_path):
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n...")
+
     respx.post("https://graph.facebook.com/v20.0/111/media").mock(
         return_value=Response(503, text="boom")
     )
     with pytest.raises(MetaTransientError):
         w._do_send_document(
             to="+919999999999",
-            document_bytes=b"%PDF-1.4\n...",
+            document_url=f"file:///{pdf.as_posix().lstrip('/')}",
             caption="cap",
             filename="x.pdf",
             brand="munshi",
@@ -356,8 +364,11 @@ def test_do_send_document_5xx_propagates_transient():
 
 
 @respx.mock
-def test_do_send_document_24h_dead_letters_and_raises(caplog):
+def test_do_send_document_24h_dead_letters_and_raises(caplog, tmp_path):
     """A 24h error on document send dead-letters (and re-raises)."""
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n...")
+
     respx.post("https://graph.facebook.com/v20.0/111/media").mock(
         return_value=Response(200, json={"id": "media-doc"})
     )
@@ -369,7 +380,7 @@ def test_do_send_document_24h_dead_letters_and_raises(caplog):
     with pytest.raises(Meta24HourWindowExpired):
         w._do_send_document(
             to="+919876543210",
-            document_bytes=b"%PDF-1.4\n...",
+            document_url=f"file:///{pdf.as_posix().lstrip('/')}",
             caption="cap",
             filename="x.pdf",
             brand="nowlez",
