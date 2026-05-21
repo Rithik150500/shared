@@ -286,6 +286,98 @@ def test_send_template_with_components_24h_window_raises():
         )
 
 
+# ---------------------------------------------------------------------------
+# Per-call timeout_seconds override (added for identity OTP path; D-12).
+# Latency-sensitive callers can tighten the budget below the 30s default.
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_send_template_default_timeout_when_none_passed():
+    """Omitting ``timeout_seconds`` keeps the module ``_TIMEOUT`` default."""
+    import whatsapp_delivery.template_client as tc
+
+    captured: dict[str, object] = {}
+    original_post = tc.httpx.post
+
+    def fake_post(url, **kw):
+        captured["timeout"] = kw.get("timeout")
+        return original_post(url, **kw)
+
+    respx.post(_MESSAGES_URL).mock(
+        return_value=Response(200, json={"messages": [{"id": "wamid.t1"}]})
+    )
+    # Monkeypatch httpx.post on the template_client module so we can observe
+    # the timeout that was passed to the transport layer.
+    tc.httpx.post = fake_post  # type: ignore[assignment]
+    try:
+        _make_client().send_template(
+            to="+919999999999", name="welcome_v1", language="en_US", variables=[],
+        )
+    finally:
+        tc.httpx.post = original_post  # type: ignore[assignment]
+    assert captured["timeout"] == tc._TIMEOUT
+
+
+@respx.mock
+def test_send_template_honors_timeout_seconds_override():
+    """``timeout_seconds=5`` is plumbed through to httpx.post."""
+    import whatsapp_delivery.template_client as tc
+
+    captured: dict[str, object] = {}
+    original_post = tc.httpx.post
+
+    def fake_post(url, **kw):
+        captured["timeout"] = kw.get("timeout")
+        return original_post(url, **kw)
+
+    respx.post(_MESSAGES_URL).mock(
+        return_value=Response(200, json={"messages": [{"id": "wamid.t2"}]})
+    )
+    tc.httpx.post = fake_post  # type: ignore[assignment]
+    try:
+        _make_client().send_template(
+            to="+919999999999",
+            name="welcome_v1",
+            language="en_US",
+            variables=[],
+            timeout_seconds=5.0,
+        )
+    finally:
+        tc.httpx.post = original_post  # type: ignore[assignment]
+    assert captured["timeout"] == 5.0
+
+
+@respx.mock
+def test_send_template_with_components_honors_timeout_seconds_override():
+    """The components-shaped path also threads ``timeout_seconds`` through."""
+    import whatsapp_delivery.template_client as tc
+
+    captured: dict[str, object] = {}
+    original_post = tc.httpx.post
+
+    def fake_post(url, **kw):
+        captured["timeout"] = kw.get("timeout")
+        return original_post(url, **kw)
+
+    respx.post(_MESSAGES_URL).mock(
+        return_value=Response(200, json={"messages": [{"id": "wamid.t3"}]})
+    )
+    tc.httpx.post = fake_post  # type: ignore[assignment]
+    try:
+        _make_client().send_template_with_components(
+            to="+919999999999",
+            name="auth_otp_v1",
+            language="en",
+            body_variables=["123456"],
+            button_url_variables=["123456"],
+            timeout_seconds=7.5,
+        )
+    finally:
+        tc.httpx.post = original_post  # type: ignore[assignment]
+    assert captured["timeout"] == 7.5
+
+
 @respx.mock
 def test_send_template_with_document_legacy_method_still_works():
     """The pre-existing send_template_with_document helper is preserved."""

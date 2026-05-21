@@ -43,17 +43,11 @@ from whatsapp_delivery.errors import (
 #   * tools/submit_templates_to_meta (operator filing tool): v15.0
 #   * tools/template_status_check (status-audit tool):       v15.0
 #
-# (And ``shared/identity/identity/delivery/whatsapp.py`` — a separate
-# package — uses v18.0 on its OTP send path. That's NOT unified here
-# because identity does not depend on whatsapp_delivery; importing this
-# constant from identity would create a backward dependency. The
-# operator can align identity to this version manually if/when they
-# re-touch that module — until then both versions work in parallel
-# because Meta retains old Graph API versions for the full deprecation
-# window.)
-#
-# All three call sites WITHIN whatsapp_delivery now import this constant
-# so a single edit here updates them in lock-step.
+# D-12 closure: ``shared/identity`` now depends on this package and routes
+# OTP sends through ``TemplateClient.send_template_with_components`` -- so
+# identity picks up this constant automatically instead of pinning its own
+# v18.0 string. All call sites (including the OTP path) update in lock-
+# step with one edit here.
 META_GRAPH_API_VERSION: str = "v20.0"
 
 _GRAPH_VERSION = META_GRAPH_API_VERSION

@@ -150,8 +150,22 @@ class TemplateClient:
     phone_number_id: str
     access_token: str
 
-    def send_template(self, *, to: str, name: str, language: str, variables: list[str]) -> str:
-        """Send a UTILITY template. Returns the wamid on success."""
+    def send_template(
+        self,
+        *,
+        to: str,
+        name: str,
+        language: str,
+        variables: list[str],
+        timeout_seconds: float | None = None,
+    ) -> str:
+        """Send a UTILITY template. Returns the wamid on success.
+
+        ``timeout_seconds`` overrides the module-level ``_TIMEOUT`` for this
+        single call -- useful for latency-sensitive callers (e.g. the identity
+        OTP path where the user is blocked in a login flow). When ``None`` the
+        existing 30s default applies.
+        """
         if _check_fallback_to_text():
             # Test / dev mode: fall back to free-text. Useful when templates haven't been
             # filed yet but we still want to exercise the notification pipeline.
@@ -180,7 +194,7 @@ class TemplateClient:
             },
         }
 
-        return self._post(body, what="send_template")
+        return self._post(body, what="send_template", timeout_seconds=timeout_seconds)
 
     def send_template_with_document(
         self, *,
@@ -242,11 +256,14 @@ class TemplateClient:
         body_variables: list[str],
         header_media_id: str | None = None,
         button_url_variables: list[str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         """Send a template with optional document header + URL-button variables.
 
         Spec §3.9: supports the full new_order shape (body + document header + URL
-        button) used by Nowlez templates such as ``nowlez_new_order_v1``.
+        button) used by Nowlez templates such as ``nowlez_new_order_v1``. Also
+        used by the identity package for OTP delivery (body + URL-button mirror
+        of the same OTP code, per Meta's AUTHENTICATION-category template shape).
 
         - ``header_media_id`` -- optional Meta media_id from a prior upload_media
           call. If provided, a ``type=header`` component is included with a
@@ -256,6 +273,10 @@ class TemplateClient:
           component with no parameters which Meta accepts for body-less templates).
         - ``button_url_variables`` -- variables for a single URL button at index 0
           (Meta's WhatsApp templates allow per-button URL suffixes). Optional.
+          For OTP auth templates this is the Copy-code button variable.
+        - ``timeout_seconds`` -- per-call override of the module ``_TIMEOUT``.
+          Latency-sensitive callers (identity's OTP send) pass a tighter
+          budget; ``None`` keeps the 30s default.
 
         Returns the wamid on success.
         """
@@ -305,9 +326,15 @@ class TemplateClient:
             },
         }
 
-        return self._post(body, what="send_template_with_components")
+        return self._post(body, what="send_template_with_components", timeout_seconds=timeout_seconds)
 
-    def _post(self, body: dict[str, Any], *, what: str) -> str:
+    def _post(
+        self,
+        body: dict[str, Any],
+        *,
+        what: str,
+        timeout_seconds: float | None = None,
+    ) -> str:
         # Re-use MetaClient's shared error-mapping path so 429 / retry-able
         # error codes (D-1) and bearer-token sanitization (D-3) stay in
         # lock-step between the two clients.
@@ -321,7 +348,7 @@ class TemplateClient:
                 "Content-Type": "application/json",
             },
             json=body,
-            timeout=_TIMEOUT,
+            timeout=timeout_seconds if timeout_seconds is not None else _TIMEOUT,
         )
         MetaClient._raise_for_status(resp, what=what)
         return resp.json()["messages"][0]["id"]
