@@ -1,4 +1,4 @@
-﻿"""Live tests that hit the Razorpay sandbox.
+"""Live tests that hit the Razorpay sandbox.
 
 These are skipped by default. Run explicitly via:
 
