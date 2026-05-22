@@ -344,8 +344,6 @@ def test_munshi_invoice_paid_e2e_against_sandbox(
         session.refresh(invoice_row)
         assert invoice_row.status == "paid"
         assert invoice_row.paid_at is not None
-        # paid_at should be a UTC-aware datetime within a few seconds of now.
-        # (SQLite may drop tzinfo on round-trip; either is acceptable here.)
 
         payment_event_rows = session.execute(
             select(PaymentEvent).where(
@@ -403,8 +401,8 @@ def test_munshi_invoice_paid_e2e_against_sandbox(
         if razorpay_invoice_id is not None:
             try:
                 _run(rzp_void_invoice(rzp_client, razorpay_invoice_id))
-            except Exception:  # noqa: BLE001 - cleanup must not mask test errors
-                pass
+            except Exception as exc:  # noqa: BLE001 - cleanup must not mask test errors
+                print(f"warning: void_invoice failed during cleanup: {exc!r}")
 
         # 9b. Local DB cleanup. Order matters: child rows before parents.
         session.execute(
