@@ -162,6 +162,66 @@ def mark_cnr_not_found(s: Session, *, user_id: uuid.UUID, cnr: str) -> Case:
     return row
 
 
+def toggle_refresh(s: Session, *, user_id: uuid.UUID, cnr: str) -> bool:
+    """Toggle ``Case.refresh_enabled`` and return the new value.
+
+    B.5b: Postgres replacement for the SQLite-side ``toggle_refresh`` hook.
+    Raises ``LookupError`` if no case exists for the given (user_id, cnr) —
+    callers (handlers/scheduler) already expect a hard failure here because
+    the legacy SQLite implementation raised on a missing row too.
+    """
+    _assert_valid_cnr(cnr)
+    row = get_by_cnr(s, user_id=user_id, cnr=cnr)
+    if row is None:
+        raise LookupError(
+            f"toggle_refresh: case not found for user_id={user_id} cnr={cnr!r}"
+        )
+    row.refresh_enabled = not row.refresh_enabled
+    row.updated_at = datetime.now(timezone.utc)
+    s.flush()
+    return row.refresh_enabled
+
+
+def mark_first_ndoh_email_sent(s: Session, *, user_id: uuid.UUID, cnr: str) -> None:
+    """Stamp ``Case.first_ndoh_email_sent_at`` to now (UTC).
+
+    B.5b: Postgres replacement for the SQLite ``mark_first_ndoh_email_sent``
+    hook. Idempotent — re-stamping is a no-op semantically because the
+    Nowlez E2 hook only checks ``IS NULL`` before sending; we overwrite the
+    timestamp rather than guard so the column always reflects the most
+    recent dispatch attempt for observability/debugging.
+
+    Raises ``LookupError`` if the case doesn't exist (mirrors toggle_refresh).
+    """
+    _assert_valid_cnr(cnr)
+    row = get_by_cnr(s, user_id=user_id, cnr=cnr)
+    if row is None:
+        raise LookupError(
+            f"mark_first_ndoh_email_sent: case not found for "
+            f"user_id={user_id} cnr={cnr!r}"
+        )
+    row.first_ndoh_email_sent_at = datetime.now(timezone.utc)
+    row.updated_at = datetime.now(timezone.utc)
+    s.flush()
+
+
+def was_first_ndoh_email_sent(s: Session, *, user_id: uuid.UUID, cnr: str) -> bool:
+    """Return whether the first-NDOH email has already been sent for this case.
+
+    B.5b: Postgres replacement for the SQLite ``was_first_ndoh_email_sent``
+    hook. Unlike ``toggle_refresh`` / ``mark_first_ndoh_email_sent`` this is
+    a read-side check used to *gate* the send, so a missing case row returns
+    ``False`` (no row → no prior email → caller is free to dispatch and then
+    upsert). Callers that need a strict not-found signal should call
+    ``get_by_cnr`` separately.
+    """
+    _assert_valid_cnr(cnr)
+    row = get_by_cnr(s, user_id=user_id, cnr=cnr)
+    if row is None:
+        return False
+    return row.first_ndoh_email_sent_at is not None
+
+
 def delete_case(s: Session, *, user_id: uuid.UUID, cnr: str) -> bool:
     """Delete the Case row plus its case_preferences sibling.
 

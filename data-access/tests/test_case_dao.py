@@ -152,3 +152,130 @@ def test_delete_case_handles_no_prefs_row(
     db_session.commit()
     assert deleted is True
     assert case_dao.get_by_cnr(db_session, user_id=test_user_id, cnr=cnr) is None
+
+
+# ---------------------------------------------------------------------------
+# B.5b — Nowlez hook migration DAO methods
+# (toggle_refresh / mark_first_ndoh_email_sent / was_first_ndoh_email_sent)
+# ---------------------------------------------------------------------------
+
+
+def _seed_case(db_session: Session, user_id: uuid.UUID, cnr: str = "MHCC010054732024"):
+    case_dao.upsert_case(
+        db_session, user_id=user_id, cnr=cnr, case_data=_case_dataclass(cnr),
+    )
+    db_session.commit()
+
+
+def test_toggle_refresh_flips_flag(db_session: Session, test_user_id: uuid.UUID):
+    cnr = "MHCC010054732024"
+    _seed_case(db_session, test_user_id, cnr)
+    # New cases default to refresh_enabled=True.
+    initial = case_dao.get_by_cnr(db_session, user_id=test_user_id, cnr=cnr)
+    assert initial.refresh_enabled is True
+
+    new_val = case_dao.toggle_refresh(db_session, user_id=test_user_id, cnr=cnr)
+    db_session.commit()
+    assert new_val is False
+    assert case_dao.get_by_cnr(
+        db_session, user_id=test_user_id, cnr=cnr,
+    ).refresh_enabled is False
+
+
+def test_toggle_refresh_returns_new_state(db_session: Session, test_user_id: uuid.UUID):
+    cnr = "MHCC010054732024"
+    _seed_case(db_session, test_user_id, cnr)
+    first = case_dao.toggle_refresh(db_session, user_id=test_user_id, cnr=cnr)
+    db_session.commit()
+    second = case_dao.toggle_refresh(db_session, user_id=test_user_id, cnr=cnr)
+    db_session.commit()
+    # First toggle flips True→False, second flips back to True.
+    assert first is False
+    assert second is True
+
+
+def test_toggle_refresh_raises_if_case_not_found(
+    db_session: Session, test_user_id: uuid.UUID,
+):
+    with pytest.raises(LookupError):
+        case_dao.toggle_refresh(
+            db_session, user_id=test_user_id, cnr="MHCC019999992024",
+        )
+
+
+def test_mark_first_ndoh_email_sent_sets_timestamp(
+    db_session: Session, test_user_id: uuid.UUID,
+):
+    cnr = "MHCC010054732024"
+    _seed_case(db_session, test_user_id, cnr)
+    assert case_dao.get_by_cnr(
+        db_session, user_id=test_user_id, cnr=cnr,
+    ).first_ndoh_email_sent_at is None
+
+    case_dao.mark_first_ndoh_email_sent(db_session, user_id=test_user_id, cnr=cnr)
+    db_session.commit()
+    row = case_dao.get_by_cnr(db_session, user_id=test_user_id, cnr=cnr)
+    assert row.first_ndoh_email_sent_at is not None
+
+
+def test_mark_first_ndoh_email_sent_is_idempotent(
+    db_session: Session, test_user_id: uuid.UUID,
+):
+    """Re-stamping should not raise and should overwrite the timestamp."""
+    cnr = "MHCC010054732024"
+    _seed_case(db_session, test_user_id, cnr)
+    case_dao.mark_first_ndoh_email_sent(db_session, user_id=test_user_id, cnr=cnr)
+    db_session.commit()
+    first_ts = case_dao.get_by_cnr(
+        db_session, user_id=test_user_id, cnr=cnr,
+    ).first_ndoh_email_sent_at
+
+    # Second call must succeed (idempotent) and not regress to NULL.
+    case_dao.mark_first_ndoh_email_sent(db_session, user_id=test_user_id, cnr=cnr)
+    db_session.commit()
+    second_ts = case_dao.get_by_cnr(
+        db_session, user_id=test_user_id, cnr=cnr,
+    ).first_ndoh_email_sent_at
+    assert second_ts is not None
+    # second_ts >= first_ts because we stamp on each call (overwrite semantics).
+    assert second_ts >= first_ts
+
+
+def test_mark_first_ndoh_email_sent_raises_if_case_not_found(
+    db_session: Session, test_user_id: uuid.UUID,
+):
+    with pytest.raises(LookupError):
+        case_dao.mark_first_ndoh_email_sent(
+            db_session, user_id=test_user_id, cnr="MHCC019999992024",
+        )
+
+
+def test_was_first_ndoh_email_sent_false_when_unset(
+    db_session: Session, test_user_id: uuid.UUID,
+):
+    cnr = "MHCC010054732024"
+    _seed_case(db_session, test_user_id, cnr)
+    assert case_dao.was_first_ndoh_email_sent(
+        db_session, user_id=test_user_id, cnr=cnr,
+    ) is False
+
+
+def test_was_first_ndoh_email_sent_true_after_mark(
+    db_session: Session, test_user_id: uuid.UUID,
+):
+    cnr = "MHCC010054732024"
+    _seed_case(db_session, test_user_id, cnr)
+    case_dao.mark_first_ndoh_email_sent(db_session, user_id=test_user_id, cnr=cnr)
+    db_session.commit()
+    assert case_dao.was_first_ndoh_email_sent(
+        db_session, user_id=test_user_id, cnr=cnr,
+    ) is True
+
+
+def test_was_first_ndoh_email_sent_false_when_case_missing(
+    db_session: Session, test_user_id: uuid.UUID,
+):
+    """No case row → returns False (used as gating check, not strict lookup)."""
+    assert case_dao.was_first_ndoh_email_sent(
+        db_session, user_id=test_user_id, cnr="MHCC019999992024",
+    ) is False

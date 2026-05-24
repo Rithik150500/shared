@@ -99,6 +99,14 @@ class Case(Base):
     last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_change_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # B.5b: timestamp of the first NDOH email dispatched for this case. NULL
+    # means "no first-NDOH email has been sent yet" — set by the Nowlez E2
+    # hook on first-send, never cleared. Replaces the SQLite-side flag the
+    # Nowlez bot used to gate one-shot E2 sends across restarts.
+    first_ndoh_email_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
     notes: Mapped[str | None] = mapped_column(Text)
     client_id: Mapped[str | None] = mapped_column(Text)
 
@@ -213,6 +221,15 @@ class CaseOrderNowlez(Base):
     )
     permanent_failure_reason: Mapped[str | None] = mapped_column(Text)
     uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # B.5b: timestamp of the E3 "order user-notified" WhatsApp message. NULL
+    # means "user has not yet been told about this order". The Nowlez hook
+    # picks unnotified orders via `WHERE user_notified_at IS NULL` so the
+    # default NULL on new rows correctly enqueues each order exactly once.
+    user_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(),
     )
