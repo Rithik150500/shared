@@ -2,6 +2,28 @@
 
 Idempotent. Safe to re-run. Reads from the temp ``_legacy_nowlez_client_cases``
 table that the sub-project D cutover left behind for sub-project A.
+
+Sub-project A PR 6 A.4 — placeholder cleanup
+--------------------------------------------
+During the PR 5.3 bake period, the Nowlez backend
+(``backend/preprocessing.py``) best-effort-writes each new case to
+Postgres alongside SQLite. When the phone bridge fails to resolve a real
+``users.id`` it falls back to ``uuid.uuid5(_PG_USER_FALLBACK_NS,
+client_id)`` (see ``backend/helpers.py::_resolve_pg_user_id`` at commit
+``fef6e60`` on branch ``feat/subproject-a-pr6-cutover``). Those
+placeholder rows must not survive the PR 6 cutover.
+
+The refetch is the right cleanup hook because (a) it touches every
+legacy case exactly once and (b) it has the real ``users.id`` already
+(D's cutover put it in ``_legacy_nowlez_client_cases.user_id``). Before
+each upsert we delete any pre-existing ``cases`` row keyed on
+``(uuid5(client_id), cnr)``. Idempotent: re-running after a successful
+cleanup is a no-op (DELETE matching nothing).
+
+The ``_PG_USER_FALLBACK_NS`` constant below MUST match the Nowlez
+backend byte-for-byte — drift would mean placeholders written during the
+bake do not get matched here. A test (``test_refetch_with_bridge.py
+::test_placeholder_namespace_matches_backend``) asserts this.
 """
 from __future__ import annotations
 
@@ -9,6 +31,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import uuid
 
 import sqlalchemy as sa
 
@@ -26,10 +49,49 @@ from ecourts_client import (
 logger = logging.getLogger(__name__)
 
 
+# Must match backend/helpers.py::_PG_USER_FALLBACK_NS in the Nowlez repo
+# (commit fef6e60 on branch feat/subproject-a-pr6-cutover). Used to
+# reconstruct the uuid5 placeholder PR 5.3 would have written for a given
+# SQLite client_id, so we can delete the placeholder row before upserting
+# the canonical (real_user_id, cnr) row.
+_PG_USER_FALLBACK_NS = uuid.UUID("5fa9c8c8-3a17-4b9e-9c4e-0c2cf5e1d9aa")
+
+
 _LEGACY_QUERY = sa.text(
     "SELECT id, user_id, cnr, client_id, refresh_enabled, notes "
     "FROM _legacy_nowlez_client_cases ORDER BY id"
 )
+
+
+def _cleanup_placeholder_row(session, *, client_id: str | None, cnr: str) -> None:
+    """Delete any PR 5.3-era placeholder row at ``(uuid5(client_id), cnr)``.
+
+    The Nowlez backend's bake-period dual-write fell back to a
+    deterministic ``uuid5`` when the phone bridge couldn't resolve a real
+    ``users.id``. We recompute that same uuid5 here and remove the row if
+    present, so the canonical refetch upsert (under the real ``user_id``
+    from ``_legacy_nowlez_client_cases``) doesn't leave a duplicate
+    behind.
+
+    Skips when ``client_id`` is NULL — those rows could not have produced
+    a uuid5 placeholder in the first place (no client_id → no namespaced
+    hash input). Cleanup is also a no-op for SQLite-only test sessions
+    that don't have a stale row to begin with; ``case_dao.delete_case``
+    returns False rather than raising.
+
+    Logs at INFO when a cleanup actually happened so operators can audit
+    bake-period placeholder accrual after the run.
+    """
+    if not client_id:
+        return
+    placeholder_uid = uuid.uuid5(_PG_USER_FALLBACK_NS, client_id)
+    deleted = case_dao.delete_case(session, user_id=placeholder_uid, cnr=cnr)
+    if deleted:
+        logger.info(
+            "cleaned up bake placeholder row: client_id=%s cnr=%s "
+            "placeholder_uid=%s",
+            client_id, cnr, placeholder_uid,
+        )
 
 
 async def migrate_one_case(row: dict) -> str:
@@ -37,6 +99,12 @@ async def migrate_one_case(row: dict) -> str:
     cnr = row["cnr"]
     with get_session() as s:
         if case_dao.exists(s, user_id=user_id, cnr=cnr):
+            # Even on the skip-fast path, attempt the placeholder cleanup
+            # so a partial prior run (canonical written, placeholder
+            # delete failed) eventually self-heals on re-run. No-op if
+            # the placeholder is already gone.
+            _cleanup_placeholder_row(s, client_id=row.get("client_id"), cnr=cnr)
+            s.commit()
             return "skipped"
 
     try:
@@ -45,6 +113,7 @@ async def migrate_one_case(row: dict) -> str:
         return "malformed"
     except CNRNotFound:
         with get_session() as s:
+            _cleanup_placeholder_row(s, client_id=row.get("client_id"), cnr=cnr)
             case_dao.mark_cnr_not_found(s, user_id=user_id, cnr=cnr)
             s.commit()
         return "cnr_not_found"
@@ -55,6 +124,12 @@ async def migrate_one_case(row: dict) -> str:
         return "error"
 
     with get_session() as s:
+        # PR 6 A.4: remove any uuid5 placeholder row PR 5.3's bake-period
+        # dual-write may have left behind, BEFORE the canonical upsert under
+        # the real user_id. Same session/transaction as the upsert so the
+        # two are atomic. See module docstring for full rationale.
+        _cleanup_placeholder_row(s, client_id=row.get("client_id"), cnr=cnr)
+
         new_case = case_dao.upsert_case(
             s,
             user_id=user_id,
