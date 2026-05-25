@@ -295,3 +295,85 @@ def test_sync_helpers_exported_from_resilience_package():
     assert callable(with_retry_sync)
     assert callable(with_semaphore_sync)
     assert callable(with_circuit_breaker_sync)
+
+
+from ecourts_client._resilience_apply import (
+    apply_sync_resilience,
+    _RESILIENCE_MARKER,
+    _WRAP_REGISTRY,
+    _DO_NOT_WRAP,
+)
+
+
+def test_apply_sync_resilience_idempotent():
+    """Calling apply_sync_resilience() twice doesn't double-wrap.
+    Detect by capturing the wrapped object's id after the first call
+    and asserting the second call doesn't change it."""
+    from ecourts_client.district import DistrictCourtClient
+    apply_sync_resilience()
+    first_wrapped_id = id(DistrictCourtClient.list_states)
+    apply_sync_resilience()
+    second_wrapped_id = id(DistrictCourtClient.list_states)
+    assert first_wrapped_id == second_wrapped_id
+    assert getattr(DistrictCourtClient.list_states, _RESILIENCE_MARKER, False) is True
+
+
+def test_apply_sync_resilience_covers_all_registry_entries():
+    """For every (class, method) in _WRAP_REGISTRY, the resolved method
+    must carry the resilience marker. Catches typos in the registry
+    (e.g. method renamed in client class but not updated here)."""
+    from ecourts_client.district import DistrictCourtClient
+    from ecourts_client.highcourt import HighCourtClient
+    classes = {"DistrictCourtClient": DistrictCourtClient, "HighCourtClient": HighCourtClient}
+
+    apply_sync_resilience()
+    missing = []
+    for class_name, method_name in _WRAP_REGISTRY:
+        cls = classes[class_name]
+        method = getattr(cls, method_name, None)
+        if method is None:
+            missing.append(f"{class_name}.{method_name} (method not found)")
+            continue
+        if not getattr(method, _RESILIENCE_MARKER, False):
+            missing.append(f"{class_name}.{method_name} (no resilience marker)")
+    assert not missing, f"Unwrapped entries in registry: {missing}"
+
+
+def test_fetch_case_and_fetch_pdf_NOT_wrapped_on_sync_layer():
+    """Regression guard. fetch_case and fetch_pdf must remain bare on the
+    sync DistrictCourtClient / HighCourtClient instances; resilience for
+    them is provided by client.py's top-level async wrappers. Adding sync
+    wrappers would produce stacked retries (3x3 multiplicative behavior
+    the resilience refactor was designed to avoid)."""
+    from ecourts_client.district import DistrictCourtClient
+    from ecourts_client.highcourt import HighCourtClient
+    apply_sync_resilience()
+
+    # Defensive: _DO_NOT_WRAP must list both methods on both classes.
+    expected = {
+        ("DistrictCourtClient", "fetch_case"),
+        ("DistrictCourtClient", "fetch_pdf"),
+        ("HighCourtClient", "fetch_case"),
+        ("HighCourtClient", "fetch_pdf"),
+    }
+    assert _DO_NOT_WRAP == expected
+
+    # Functional: none of them carry the marker.
+    for cls, method_name in [
+        (DistrictCourtClient, "fetch_case"),
+        (DistrictCourtClient, "fetch_pdf"),
+        (HighCourtClient, "fetch_case"),
+        (HighCourtClient, "fetch_pdf"),
+    ]:
+        method = getattr(cls, method_name)
+        assert not getattr(method, _RESILIENCE_MARKER, False), (
+            f"{cls.__name__}.{method_name} is wrapped with sync resilience but "
+            f"must remain bare -- it is already wrapped by client.py's async stack."
+        )
+
+
+def test_registry_and_do_not_wrap_are_disjoint():
+    """No (class, method) tuple appears in both lists. apply_sync_resilience
+    raises if this is violated, but assert here for clarity."""
+    overlap = set(_WRAP_REGISTRY) & _DO_NOT_WRAP
+    assert not overlap, f"Registry and _DO_NOT_WRAP overlap: {overlap}"
