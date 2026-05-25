@@ -50,6 +50,9 @@ from ecourts_client.resilience.metrics import setup_sentry_tag  # noqa: E402
 
 setup_sentry_tag()
 
+from ecourts_client._resilience_apply import apply_sync_resilience  # noqa: E402
+apply_sync_resilience()
+
 __version__ = "0.1.0"
 
 __all__ = [

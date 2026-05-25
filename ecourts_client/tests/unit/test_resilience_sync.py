@@ -377,3 +377,19 @@ def test_registry_and_do_not_wrap_are_disjoint():
     raises if this is violated, but assert here for clarity."""
     overlap = set(_WRAP_REGISTRY) & _DO_NOT_WRAP
     assert not overlap, f"Registry and _DO_NOT_WRAP overlap: {overlap}"
+
+
+def test_apply_at_import_time_wraps_methods():
+    """A fresh process that just imports `ecourts_client` (without ever
+    calling apply_sync_resilience explicitly) must have list_states
+    already wrapped. Simulate by re-importing in a subprocess."""
+    import subprocess, sys
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import ecourts_client; "
+         "from ecourts_client.district import DistrictCourtClient; "
+         "from ecourts_client._resilience_apply import _RESILIENCE_MARKER; "
+         "print(getattr(DistrictCourtClient.list_states, _RESILIENCE_MARKER, False))"],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == "True", f"unexpected stdout: {out.stdout!r}, stderr: {out.stderr!r}"
