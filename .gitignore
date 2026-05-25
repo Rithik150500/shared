@@ -41,3 +41,4 @@ Thumbs.db
 
 # E launch-prep — Phase 0 working notes, not committed
 case-billing/tests/live/_e2e-audit.txt
+.worktrees/
