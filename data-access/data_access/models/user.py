@@ -175,6 +175,15 @@ class UserNowlez(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Sub-project G: forensic-only column recording the SQLite 8-char id
+    # for each user that existed pre-G. NO FK references this column;
+    # production code uses the Postgres UUID exclusively. Used by support
+    # staff when resolving tickets that reference old short-UUIDs from
+    # email histories or audit logs. Droppable ~6 months post-G.
+    legacy_sqlite_id: Mapped[str | None] = mapped_column(
+        Text, nullable=True, unique=True, index=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
