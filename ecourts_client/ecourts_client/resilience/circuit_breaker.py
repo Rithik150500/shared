@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import threading
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TypeVar
@@ -49,56 +50,77 @@ class CircuitBreaker:
         self._half_open_allowed = False
         self._half_open_time = 0.0
         self._probe_failures = 0
+        self._lock = threading.Lock()
 
     @property
     def state(self) -> str:
-        now = time.monotonic()
-        if self._state == "open" and (now - self._last_failure_time) >= self._current_recovery_timeout:
-            self._state = "half_open"
-            self._half_open_allowed = True
-            self._half_open_time = now
-        elif self._state == "half_open" and not self._half_open_allowed:
-            if (now - self._half_open_time) >= self._base_recovery_timeout:
+        with self._lock:
+            now = time.monotonic()
+            if self._state == "open" and (now - self._last_failure_time) >= self._current_recovery_timeout:
+                self._state = "half_open"
                 self._half_open_allowed = True
                 self._half_open_time = now
-        return self._state
+            elif self._state == "half_open" and not self._half_open_allowed:
+                if (now - self._half_open_time) >= self._base_recovery_timeout:
+                    self._half_open_allowed = True
+                    self._half_open_time = now
+            return self._state
 
     def allow_request(self) -> bool:
-        s = self.state
-        if s == "closed":
-            return True
-        if s == "half_open" and self._half_open_allowed:
-            self._half_open_allowed = False
-            return True
-        return False
+        # Single critical section: do the state transition AND the
+        # half_open_allowed write atomically (nested re-acquire would
+        # require RLock).
+        with self._lock:
+            now = time.monotonic()
+            if self._state == "open" and (now - self._last_failure_time) >= self._current_recovery_timeout:
+                self._state = "half_open"
+                self._half_open_allowed = True
+                self._half_open_time = now
+            elif self._state == "half_open" and not self._half_open_allowed:
+                if (now - self._half_open_time) >= self._base_recovery_timeout:
+                    self._half_open_allowed = True
+                    self._half_open_time = now
+            s = self._state
+            if s == "closed":
+                return True
+            if s == "half_open" and self._half_open_allowed:
+                self._half_open_allowed = False
+                return True
+            return False
 
     def record_success(self) -> None:
-        if self._state == "half_open":
-            self._probe_failures = 0
-            self._current_recovery_timeout = self._base_recovery_timeout
-        self._failure_count = 0
-        self._state = "closed"
-        self._half_open_allowed = False
+        with self._lock:
+            if self._state == "half_open":
+                self._probe_failures = 0
+                self._current_recovery_timeout = self._base_recovery_timeout
+            self._failure_count = 0
+            self._state = "closed"
+            self._half_open_allowed = False
 
     def record_failure(self) -> None:
-        self._failure_count += 1
-        self._last_failure_time = time.monotonic()
-        if self._state == "half_open":
-            self._probe_failures += 1
-            self._current_recovery_timeout = min(
-                self._base_recovery_timeout * (2 ** self._probe_failures),
-                self._max_recovery_timeout,
-            )
-            self._state = "open"
-            self._fire_on_open()
-        elif self._failure_count >= self._failure_threshold:
-            self._state = "open"
+        fire = False
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.monotonic()
+            if self._state == "half_open":
+                self._probe_failures += 1
+                self._current_recovery_timeout = min(
+                    self._base_recovery_timeout * (2 ** self._probe_failures),
+                    self._max_recovery_timeout,
+                )
+                self._state = "open"
+                fire = True
+            elif self._failure_count >= self._failure_threshold:
+                self._state = "open"
+                fire = True
+        if fire:
             self._fire_on_open()
 
     def time_until_retry(self) -> float:
-        if self._state != "open":
-            return 0.0
-        return max(0.0, self._current_recovery_timeout - (time.monotonic() - self._last_failure_time))
+        with self._lock:
+            if self._state != "open":
+                return 0.0
+            return max(0.0, self._current_recovery_timeout - (time.monotonic() - self._last_failure_time))
 
     def _fire_on_open(self) -> None:
         logger.warning("Circuit '%s' open: failures=%d, retry_in=%.1fs",
