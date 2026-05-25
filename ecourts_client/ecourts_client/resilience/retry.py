@@ -45,3 +45,39 @@ def with_retry(
             raise last_exc
         return wrapper
     return decorator
+
+
+import time
+from typing import Callable as _Callable  # alias to avoid shadowing the Awaitable-typed Callable above
+
+
+def with_retry_sync(
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+) -> _Callable[[_Callable[..., T]], _Callable[..., T]]:
+    """Sync mirror of `with_retry`: retry on `_RETRIABLE` exceptions
+    (CourtSiteDown only) with exponential backoff. `time.sleep` between
+    attempts. Same semantics as the async version; can be applied to
+    plain sync functions/methods.
+    """
+    def decorator(fn: _Callable[..., T]) -> _Callable[..., T]:
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            last_exc: Exception | None = None
+            for attempt in range(max_attempts):
+                try:
+                    return fn(*args, **kwargs)
+                except _RETRIABLE as e:
+                    last_exc = e
+                    if attempt + 1 == max_attempts:
+                        break
+                    delay = min(base_delay * (2 ** attempt), max_delay)
+                    logger.info("retry_sync %d/%d after %s in %.2fs",
+                                attempt + 1, max_attempts, type(e).__name__, delay)
+                    time.sleep(delay)
+            assert last_exc is not None
+            raise last_exc
+        return wrapper
+    return decorator

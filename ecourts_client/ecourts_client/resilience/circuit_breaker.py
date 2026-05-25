@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import threading
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TypeVar
@@ -49,65 +50,91 @@ class CircuitBreaker:
         self._half_open_allowed = False
         self._half_open_time = 0.0
         self._probe_failures = 0
+        self._lock = threading.Lock()
 
     @property
     def state(self) -> str:
-        now = time.monotonic()
-        if self._state == "open" and (now - self._last_failure_time) >= self._current_recovery_timeout:
-            self._state = "half_open"
-            self._half_open_allowed = True
-            self._half_open_time = now
-        elif self._state == "half_open" and not self._half_open_allowed:
-            if (now - self._half_open_time) >= self._base_recovery_timeout:
+        with self._lock:
+            now = time.monotonic()
+            if self._state == "open" and (now - self._last_failure_time) >= self._current_recovery_timeout:
+                self._state = "half_open"
                 self._half_open_allowed = True
                 self._half_open_time = now
-        return self._state
+            elif self._state == "half_open" and not self._half_open_allowed:
+                if (now - self._half_open_time) >= self._base_recovery_timeout:
+                    self._half_open_allowed = True
+                    self._half_open_time = now
+            return self._state
 
     def allow_request(self) -> bool:
-        s = self.state
-        if s == "closed":
-            return True
-        if s == "half_open" and self._half_open_allowed:
-            self._half_open_allowed = False
-            return True
-        return False
+        # Single critical section: do the state transition AND the
+        # half_open_allowed write atomically (nested re-acquire would
+        # require RLock).
+        with self._lock:
+            now = time.monotonic()
+            if self._state == "open" and (now - self._last_failure_time) >= self._current_recovery_timeout:
+                self._state = "half_open"
+                self._half_open_allowed = True
+                self._half_open_time = now
+            elif self._state == "half_open" and not self._half_open_allowed:
+                if (now - self._half_open_time) >= self._base_recovery_timeout:
+                    self._half_open_allowed = True
+                    self._half_open_time = now
+            s = self._state
+            if s == "closed":
+                return True
+            if s == "half_open" and self._half_open_allowed:
+                self._half_open_allowed = False
+                return True
+            return False
 
     def record_success(self) -> None:
-        if self._state == "half_open":
-            self._probe_failures = 0
-            self._current_recovery_timeout = self._base_recovery_timeout
-        self._failure_count = 0
-        self._state = "closed"
-        self._half_open_allowed = False
+        with self._lock:
+            if self._state == "half_open":
+                self._probe_failures = 0
+                self._current_recovery_timeout = self._base_recovery_timeout
+            self._failure_count = 0
+            self._state = "closed"
+            self._half_open_allowed = False
 
     def record_failure(self) -> None:
-        self._failure_count += 1
-        self._last_failure_time = time.monotonic()
-        if self._state == "half_open":
-            self._probe_failures += 1
-            self._current_recovery_timeout = min(
-                self._base_recovery_timeout * (2 ** self._probe_failures),
-                self._max_recovery_timeout,
-            )
-            self._state = "open"
-            self._fire_on_open()
-        elif self._failure_count >= self._failure_threshold:
-            self._state = "open"
-            self._fire_on_open()
+        fire = False
+        snap_failure_count = 0
+        snap_recovery_timeout = 0.0
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.monotonic()
+            if self._state == "half_open":
+                self._probe_failures += 1
+                self._current_recovery_timeout = min(
+                    self._base_recovery_timeout * (2 ** self._probe_failures),
+                    self._max_recovery_timeout,
+                )
+                self._state = "open"
+                fire = True
+            elif self._failure_count >= self._failure_threshold:
+                self._state = "open"
+                fire = True
+            if fire:
+                snap_failure_count = self._failure_count
+                snap_recovery_timeout = self._current_recovery_timeout
+        if fire:
+            self._fire_on_open(snap_failure_count, snap_recovery_timeout)
 
     def time_until_retry(self) -> float:
-        if self._state != "open":
-            return 0.0
-        return max(0.0, self._current_recovery_timeout - (time.monotonic() - self._last_failure_time))
+        with self._lock:
+            if self._state != "open":
+                return 0.0
+            return max(0.0, self._current_recovery_timeout - (time.monotonic() - self._last_failure_time))
 
-    def _fire_on_open(self) -> None:
+    def _fire_on_open(self, failure_count: int, recovery_timeout: float) -> None:
         logger.warning("Circuit '%s' open: failures=%d, retry_in=%.1fs",
-                       self.name, self._failure_count, self._current_recovery_timeout)
+                       self.name, failure_count, recovery_timeout)
         if not self._on_open:
             return
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._on_open(self._failure_count, self._current_recovery_timeout))
+            loop.create_task(self._on_open(failure_count, recovery_timeout))
         except RuntimeError:
             pass
 
@@ -115,16 +142,19 @@ class CircuitBreaker:
 class _CircuitRegistry:
     """Single named breaker per (name) across the entire process."""
     _registry: dict[str, CircuitBreaker] = {}
+    _lock = threading.Lock()
 
     @classmethod
     def get(cls, name: str, **kwargs) -> CircuitBreaker:
-        if name not in cls._registry:
-            cls._registry[name] = CircuitBreaker(name=name, **kwargs)
-        return cls._registry[name]
+        with cls._lock:
+            if name not in cls._registry:
+                cls._registry[name] = CircuitBreaker(name=name, **kwargs)
+            return cls._registry[name]
 
     @classmethod
     def reset(cls) -> None:
-        cls._registry.clear()
+        with cls._lock:
+            cls._registry.clear()
 
 
 def with_circuit_breaker(
@@ -141,6 +171,32 @@ def with_circuit_breaker(
                 raise CircuitOpen(name=name, retry_after_seconds=cb.time_until_retry())
             try:
                 result = await fn(*args, **kwargs)
+                cb.record_success()
+                return result
+            except Exception:
+                cb.record_failure()
+                raise
+        return wrapper
+    return decorator
+
+
+def with_circuit_breaker_sync(
+    *, name: str, failure_threshold: int = 5, recovery_timeout: float = 60.0,
+):
+    """Sync mirror of `with_circuit_breaker`. Uses the SAME named registry
+    as the async wrapper, so sync and async callers see one shared breaker
+    per name. Thread-safe by virtue of CircuitBreaker._lock added in Task 1.
+    """
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            cb = _CircuitRegistry.get(
+                name, failure_threshold=failure_threshold, recovery_timeout=recovery_timeout,
+            )
+            if not cb.allow_request():
+                raise CircuitOpen(name=name, retry_after_seconds=cb.time_until_retry())
+            try:
+                result = fn(*args, **kwargs)
                 cb.record_success()
                 return result
             except Exception:
