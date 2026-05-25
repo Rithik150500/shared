@@ -206,3 +206,40 @@ def test_retry_sync_backoff_timing(monkeypatch):
         fn()
     # 2 sleeps (between the 3 attempts), backoff 1.0 then 2.0
     assert sleep_calls == [1.0, 2.0]
+
+
+from ecourts_client.resilience.semaphore import with_semaphore_sync
+
+
+def test_semaphore_sync_caps_concurrency():
+    """8 threads but max_concurrency=3 -> at no point should >3 be inside."""
+    inflight = 0
+    peak = [0]
+    lock = threading.Lock()
+    barrier = threading.Barrier(8)
+
+    @with_semaphore_sync(name="sync_cap_test", max_concurrency=3)
+    def critical():
+        nonlocal inflight
+        with lock:
+            inflight += 1
+            peak[0] = max(peak[0], inflight)
+        time.sleep(0.05)
+        with lock:
+            inflight -= 1
+
+    def task():
+        # Barrier OUTSIDE the semaphore so all 8 threads race for permits
+        # at the same instant. If barrier were inside the decorated function,
+        # only 3 threads (max_concurrency) could ever reach barrier.wait()
+        # while the remaining 5 are blocked on the semaphore -- deadlock.
+        barrier.wait()
+        critical()
+
+    threads = [threading.Thread(target=task) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert peak[0] == 3, f"peak concurrency was {peak[0]}, expected 3"

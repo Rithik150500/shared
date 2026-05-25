@@ -75,3 +75,24 @@ def with_semaphore(
                 _SemaphoreRegistry.dec_waiting(name)
         return wrapper
     return decorator
+
+
+def with_semaphore_sync(
+    *, name: str, max_concurrency: int = 10,
+):
+    """Sync mirror of `with_semaphore`. Shares the SAME named
+    BoundedSemaphore instance as the async wrapper via `_SemaphoreRegistry`,
+    so a sync caller and an async caller compete for the same N permits.
+    """
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            sem = _SemaphoreRegistry.get(name, max_concurrency=max_concurrency)
+            _SemaphoreRegistry.inc_waiting(name)
+            try:
+                with sem:
+                    return fn(*args, **kwargs)
+            finally:
+                _SemaphoreRegistry.dec_waiting(name)
+        return wrapper
+    return decorator
