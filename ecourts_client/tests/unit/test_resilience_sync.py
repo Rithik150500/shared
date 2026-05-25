@@ -284,3 +284,14 @@ def test_circuit_breaker_shared_state_async_then_sync():
 
     with pytest.raises(CircuitOpen):
         sync_fn()
+
+
+def test_sync_helpers_exported_from_resilience_package():
+    from ecourts_client.resilience import (
+        with_retry_sync,
+        with_semaphore_sync,
+        with_circuit_breaker_sync,
+    )
+    assert callable(with_retry_sync)
+    assert callable(with_semaphore_sync)
+    assert callable(with_circuit_breaker_sync)
