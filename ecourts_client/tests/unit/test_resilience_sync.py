@@ -129,3 +129,80 @@ def test_async_semaphore_still_caps_concurrency_with_threading_primitive():
 
     asyncio.run(main())
     assert peak[0] == 3, f"peak concurrency was {peak[0]}, expected 3"
+
+
+from ecourts_client.errors import CNRNotFound, RateLimited
+from ecourts_client.resilience.retry import with_retry_sync
+
+
+def test_retry_sync_retries_on_courtsitedown_then_succeeds():
+    attempts = [0]
+
+    @with_retry_sync(max_attempts=3, base_delay=0.001)
+    def fn():
+        attempts[0] += 1
+        if attempts[0] < 3:
+            raise CourtSiteDown("transient")
+        return "ok"
+
+    assert fn() == "ok"
+    assert attempts[0] == 3
+
+
+def test_retry_sync_exhausts_and_raises_last():
+    attempts = [0]
+
+    @with_retry_sync(max_attempts=3, base_delay=0.001)
+    def fn():
+        attempts[0] += 1
+        raise CourtSiteDown(f"attempt {attempts[0]}")
+
+    with pytest.raises(CourtSiteDown, match="attempt 3"):
+        fn()
+    assert attempts[0] == 3
+
+
+def test_retry_sync_does_not_retry_on_cnrnotfound():
+    attempts = [0]
+
+    @with_retry_sync(max_attempts=3, base_delay=0.001)
+    def fn():
+        attempts[0] += 1
+        raise CNRNotFound("DLND010001231234")
+
+    with pytest.raises(CNRNotFound):
+        fn()
+    assert attempts[0] == 1
+
+
+def test_retry_sync_does_not_retry_on_rate_limited():
+    attempts = [0]
+
+    @with_retry_sync(max_attempts=3, base_delay=0.001)
+    def fn():
+        attempts[0] += 1
+        raise RateLimited("429")
+
+    with pytest.raises(RateLimited):
+        fn()
+    assert attempts[0] == 1
+
+
+def test_retry_sync_backoff_timing(monkeypatch):
+    sleep_calls = []
+    monkeypatch.setattr(
+        "ecourts_client.resilience.retry.time.sleep",
+        lambda secs: sleep_calls.append(secs),
+    )
+
+    attempts = [0]
+
+    @with_retry_sync(max_attempts=3, base_delay=1.0, max_delay=30.0)
+    def fn():
+        attempts[0] += 1
+        raise CourtSiteDown("x")
+
+    with pytest.raises(CourtSiteDown):
+        fn()
+    # 2 sleeps (between the 3 attempts), backoff 1.0 then 2.0
+    assert sleep_calls == [1.0, 2.0]
