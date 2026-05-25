@@ -97,3 +97,35 @@ def test_circuit_registry_get_is_thread_safe():
     assert len(unique_ids) == 1, (
         f"expected 1 shared instance, got {len(unique_ids)}: {unique_ids}"
     )
+
+
+import asyncio
+
+from ecourts_client.resilience.semaphore import (
+    _SemaphoreRegistry,
+    with_semaphore,
+)
+
+
+def test_async_semaphore_still_caps_concurrency_with_threading_primitive():
+    """The async with_semaphore wrapper must still honor max_concurrency
+    after we switch the underlying primitive to threading.BoundedSemaphore."""
+    inflight = 0
+    peak = [0]
+    lock = threading.Lock()
+
+    @with_semaphore(name="async_cap_test", max_concurrency=3)
+    async def task():
+        nonlocal inflight
+        with lock:
+            inflight += 1
+            peak[0] = max(peak[0], inflight)
+        await asyncio.sleep(0.05)
+        with lock:
+            inflight -= 1
+
+    async def main():
+        await asyncio.gather(*[task() for _ in range(10)])
+
+    asyncio.run(main())
+    assert peak[0] == 3, f"peak concurrency was {peak[0]}, expected 3"

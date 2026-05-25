@@ -42,4 +42,10 @@ async def test_semaphore_registry_singleton():
 
     assert (await a()) == "a"
     assert (await b()) == "b"
-    assert _SemaphoreRegistry.get("t").locked() is False
+    # After both calls return, all permits should be available again.
+    # threading.BoundedSemaphore has no .locked() method; use the
+    # non-blocking acquire/release pattern as the behavior-equivalent check.
+    sem = _SemaphoreRegistry.get("t")
+    acquired = sem.acquire(blocking=False)
+    assert acquired is True, "semaphore was still held after both calls returned"
+    sem.release()
