@@ -46,3 +46,54 @@ def test_circuit_breaker_thread_safety_record_failure():
         t.join()
 
     assert cb._failure_count == 50
+
+
+def test_fire_on_open_uses_snapshot_not_live_state():
+    """Snapshot fields are passed to the callback so post-open mutations
+    cannot change what the callback sees. Use an async callback that
+    captures both args; trigger open from the threshold path; record
+    success immediately after (which mutates state); assert the captured
+    callback args reflect the pre-mutation snapshot."""
+    captured = []
+    async def on_open(failure_count, recovery_timeout):
+        captured.append((failure_count, recovery_timeout))
+
+    import asyncio
+    async def main():
+        cb = CircuitBreaker(
+            name="test_snapshot", failure_threshold=2,
+            recovery_timeout=10.0, on_open=on_open,
+        )
+        cb.record_failure()
+        cb.record_failure()  # trips open, fires on_open with (2, 10.0)
+        # IMMEDIATELY mutate state — this would have raced the old code
+        cb.record_success()  # resets failure_count to 0
+        # Give the scheduled callback time to run
+        await asyncio.sleep(0.05)
+        assert captured == [(2, 10.0)], (
+            f"callback received {captured}, expected [(2, 10.0)] — "
+            f"if it shows (0, ...), the snapshot is leaking live state"
+        )
+    asyncio.run(main())
+
+
+def test_circuit_registry_get_is_thread_safe():
+    """Many threads racing to create the same-named breaker must all
+    receive the SAME instance — not 2 different ones. This proves
+    _CircuitRegistry.get() is atomic under contention."""
+    received_instances = []
+    barrier = threading.Barrier(20)
+
+    def fetch():
+        barrier.wait()
+        cb = _CircuitRegistry.get("race_test")
+        received_instances.append(id(cb))
+
+    threads = [threading.Thread(target=fetch) for _ in range(20)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
+    unique_ids = set(received_instances)
+    assert len(unique_ids) == 1, (
+        f"expected 1 shared instance, got {len(unique_ids)}: {unique_ids}"
+    )

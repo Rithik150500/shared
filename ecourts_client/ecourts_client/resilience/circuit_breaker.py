@@ -99,6 +99,8 @@ class CircuitBreaker:
 
     def record_failure(self) -> None:
         fire = False
+        snap_failure_count = 0
+        snap_recovery_timeout = 0.0
         with self._lock:
             self._failure_count += 1
             self._last_failure_time = time.monotonic()
@@ -113,8 +115,11 @@ class CircuitBreaker:
             elif self._failure_count >= self._failure_threshold:
                 self._state = "open"
                 fire = True
+            if fire:
+                snap_failure_count = self._failure_count
+                snap_recovery_timeout = self._current_recovery_timeout
         if fire:
-            self._fire_on_open()
+            self._fire_on_open(snap_failure_count, snap_recovery_timeout)
 
     def time_until_retry(self) -> float:
         with self._lock:
@@ -122,14 +127,14 @@ class CircuitBreaker:
                 return 0.0
             return max(0.0, self._current_recovery_timeout - (time.monotonic() - self._last_failure_time))
 
-    def _fire_on_open(self) -> None:
+    def _fire_on_open(self, failure_count: int, recovery_timeout: float) -> None:
         logger.warning("Circuit '%s' open: failures=%d, retry_in=%.1fs",
-                       self.name, self._failure_count, self._current_recovery_timeout)
+                       self.name, failure_count, recovery_timeout)
         if not self._on_open:
             return
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._on_open(self._failure_count, self._current_recovery_timeout))
+            loop.create_task(self._on_open(failure_count, recovery_timeout))
         except RuntimeError:
             pass
 
@@ -137,16 +142,19 @@ class CircuitBreaker:
 class _CircuitRegistry:
     """Single named breaker per (name) across the entire process."""
     _registry: dict[str, CircuitBreaker] = {}
+    _lock = threading.Lock()
 
     @classmethod
     def get(cls, name: str, **kwargs) -> CircuitBreaker:
-        if name not in cls._registry:
-            cls._registry[name] = CircuitBreaker(name=name, **kwargs)
-        return cls._registry[name]
+        with cls._lock:
+            if name not in cls._registry:
+                cls._registry[name] = CircuitBreaker(name=name, **kwargs)
+            return cls._registry[name]
 
     @classmethod
     def reset(cls) -> None:
-        cls._registry.clear()
+        with cls._lock:
+            cls._registry.clear()
 
 
 def with_circuit_breaker(
