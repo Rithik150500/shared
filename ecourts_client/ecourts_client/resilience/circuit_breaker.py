@@ -178,3 +178,29 @@ def with_circuit_breaker(
                 raise
         return wrapper
     return decorator
+
+
+def with_circuit_breaker_sync(
+    *, name: str, failure_threshold: int = 5, recovery_timeout: float = 60.0,
+):
+    """Sync mirror of `with_circuit_breaker`. Uses the SAME named registry
+    as the async wrapper, so sync and async callers see one shared breaker
+    per name. Thread-safe by virtue of CircuitBreaker._lock added in Task 1.
+    """
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            cb = _CircuitRegistry.get(
+                name, failure_threshold=failure_threshold, recovery_timeout=recovery_timeout,
+            )
+            if not cb.allow_request():
+                raise CircuitOpen(name=name, retry_after_seconds=cb.time_until_retry())
+            try:
+                result = fn(*args, **kwargs)
+                cb.record_success()
+                return result
+            except Exception:
+                cb.record_failure()
+                raise
+        return wrapper
+    return decorator

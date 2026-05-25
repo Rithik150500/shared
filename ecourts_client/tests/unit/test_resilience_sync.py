@@ -243,3 +243,44 @@ def test_semaphore_sync_caps_concurrency():
         t.join()
 
     assert peak[0] == 3, f"peak concurrency was {peak[0]}, expected 3"
+
+
+from ecourts_client.errors import CircuitOpen
+from ecourts_client.resilience.circuit_breaker import with_circuit_breaker_sync, with_circuit_breaker
+
+
+def test_circuit_breaker_shared_state_sync_then_async():
+    """Sync wrapper trips the breaker after threshold; the very next ASYNC
+    call (different wrapper, same breaker name) sees CircuitOpen."""
+    @with_circuit_breaker_sync(name="shared_test", failure_threshold=3, recovery_timeout=10.0)
+    def sync_fn(): raise CourtSiteDown("sync fail")
+
+    @with_circuit_breaker(name="shared_test", failure_threshold=3, recovery_timeout=10.0)
+    async def async_fn(): return "ok"
+
+    # Trip the breaker via sync
+    for _ in range(3):
+        with pytest.raises(CourtSiteDown):
+            sync_fn()
+
+    # Now async wrapper must see the open breaker
+    with pytest.raises(CircuitOpen):
+        asyncio.run(async_fn())
+
+
+def test_circuit_breaker_shared_state_async_then_sync():
+    """Reverse direction -- proves sharing is genuinely symmetric."""
+    @with_circuit_breaker(name="shared_test_2", failure_threshold=3, recovery_timeout=10.0)
+    async def async_fn(): raise CourtSiteDown("async fail")
+
+    @with_circuit_breaker_sync(name="shared_test_2", failure_threshold=3, recovery_timeout=10.0)
+    def sync_fn(): return "ok"
+
+    async def trip():
+        for _ in range(3):
+            with pytest.raises(CourtSiteDown):
+                await async_fn()
+    asyncio.run(trip())
+
+    with pytest.raises(CircuitOpen):
+        sync_fn()
