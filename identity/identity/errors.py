@@ -61,6 +61,11 @@ class PasswordTooWeak(IdentityError):
     """The proposed password does not meet strength requirements."""
 
 
+# --- Account linking ---
+class PhoneInUse(IdentityError):
+    """The phone number is already linked to a different account."""
+
+
 # --- Delivery ---
 class DeliveryFailed(IdentityError):
     """The chosen delivery channel (WhatsApp/SMS) failed."""

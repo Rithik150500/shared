@@ -61,3 +61,43 @@ def test_touch_last_login_updates_timestamp(postgresql_session):
     user_dao.touch_last_login(postgresql_session, u.id)
     postgresql_session.refresh(u)
     assert u.last_login_at is not None
+
+
+# --- sub-project D: email->phone grace helpers (SQLite-backed; no Postgres) ---
+
+
+def test_get_by_email_roundtrip(db_session):
+    u = User(email="grace@example.com", phone=None, password_hash="bcrypt")
+    db_session.add(u)
+    db_session.flush()
+    assert str(user_dao.get_by_email(db_session, "grace@example.com").id) == str(u.id)
+    assert user_dao.get_by_email(db_session, "nobody@example.com") is None
+
+
+def test_set_phone_attaches_to_existing_user(db_session):
+    u = User(email="grace@example.com", phone=None)
+    db_session.add(u)
+    db_session.flush()
+    returned = user_dao.set_phone(db_session, u.id, "+919800000010")
+    assert returned.id == u.id
+    assert user_dao.get_by_id(db_session, u.id).phone == "+919800000010"
+
+
+def test_set_phone_rejects_phone_taken_by_another(db_session):
+    other = User(phone="+919800000011")
+    db_session.add(other)
+    db_session.flush()
+    me = User(email="grace@example.com", phone=None)
+    db_session.add(me)
+    db_session.flush()
+    with pytest.raises(ValueError, match="in use"):
+        user_dao.set_phone(db_session, me.id, "+919800000011")
+    assert user_dao.get_by_id(db_session, me.id).phone is None
+
+
+def test_set_phone_allows_user_to_keep_their_own_phone(db_session):
+    u = User(email="grace@example.com", phone="+919800000012")
+    db_session.add(u)
+    db_session.flush()
+    user_dao.set_phone(db_session, u.id, "+919800000012")  # not "in use by another"
+    assert user_dao.get_by_id(db_session, u.id).phone == "+919800000012"

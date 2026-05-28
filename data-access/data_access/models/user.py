@@ -184,6 +184,13 @@ class UserNowlez(Base):
         Text, nullable=True, unique=True, index=True
     )
 
+    # Sub-project G: email marketing opt-out, migrated from the legacy SQLite
+    # users.unsubscribed_at. Compliance-relevant (consent) — must survive the
+    # cutover. Checked per-user (by PK), so no separate index is needed.
+    email_unsubscribed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

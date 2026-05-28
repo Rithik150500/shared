@@ -24,8 +24,36 @@ def get_by_phone(session: Session, phone: str) -> User | None:
     return session.execute(select(User).where(User.phone == phone)).scalar_one_or_none()
 
 
+def get_by_email(session: Session, email: str) -> User | None:
+    return session.execute(select(User).where(User.email == email)).scalar_one_or_none()
+
+
 def get_by_id(session: Session, user_id: uuid.UUID) -> User | None:
     return session.get(User, user_id)
+
+
+def set_phone(session: Session, user_id: uuid.UUID, phone: str) -> User:
+    """Attach (or replace) a user's phone number.
+
+    Used by the sub-project D email->phone grace flow, where a migrated
+    email-only user (phone=NULL) links a phone to their existing account.
+    Raises ValueError if the phone already belongs to a *different* user
+    (users.phone is UNIQUE), or if the user does not exist.
+    """
+    existing = session.execute(
+        select(User).where(User.phone == phone)
+    ).scalar_one_or_none()
+    # str()-normalize: the SQLite test variant returns ids as str, Postgres as
+    # UUID; compare canonically so "user keeps their own phone" isn't misread
+    # as a collision.
+    if existing is not None and str(existing.id) != str(user_id):
+        raise ValueError("phone already in use by another account")
+    user = session.get(User, user_id)
+    if user is None:
+        raise ValueError(f"User {user_id} not found")
+    user.phone = phone
+    session.flush()
+    return user
 
 
 def ensure_munshi_extension(session: Session, user_id: uuid.UUID) -> UserMunshi:
