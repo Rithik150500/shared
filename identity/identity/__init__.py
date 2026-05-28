@@ -1,6 +1,7 @@
 """Shared identity package — phone-canonical auth for Nowlez × Munshi."""
 from . import errors
 from .api import (
+    attach_phone_with_otp,
     decode_access_token,
     login_with_password,
     refresh_access_token,
@@ -14,6 +15,7 @@ __version__ = "0.1.0"
 __all__ = [
     "start_phone_login",
     "verify_otp_and_login",
+    "attach_phone_with_otp",
     "login_with_password",
     "refresh_access_token",
     "revoke_session",

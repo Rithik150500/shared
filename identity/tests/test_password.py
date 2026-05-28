@@ -52,3 +52,18 @@ def test_validate_rejects_common_password_case_insensitive():
 def test_validate_accepts_strong_password():
     # Should not raise
     validate_password_strength("X9!correctHorse")
+
+
+def test_verify_password_returns_false_on_bcrypt_hash():
+    """Migrated email users carry a *bcrypt* password_hash in Postgres
+    (copied verbatim from SQLite by g_users_backfill). argon2 verify must
+    treat a non-argon2 hash as a clean mismatch (False) rather than raising —
+    otherwise /api/auth/login-password would 500 for a migrated user. Locks
+    the sub-project D cutover invariant."""
+    import bcrypt
+
+    from identity.password.hasher import verify_password
+
+    bcrypt_hash = bcrypt.hashpw(b"hunter2", bcrypt.gensalt()).decode()
+    assert verify_password("hunter2", bcrypt_hash) is False
+    assert verify_password("wrong", bcrypt_hash) is False

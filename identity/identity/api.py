@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from data_access.daos import audit_dao, otp_dao, session_dao, user_dao
 
 from .delivery.router import deliver_otp
-from .errors import InvalidCredentials, PasswordNotSet
+from .errors import InvalidCredentials, PasswordNotSet, PhoneInUse
 from .otp.issuer import generate_otp_code, hash_otp_code
 from .otp.rate_limiter import check_otp_rate_limit
 from .otp.verifier import verify_otp as _verify_otp
@@ -123,6 +123,64 @@ def verify_otp_and_login(
     }
 
 
+def attach_phone_with_otp(
+    session: Session,
+    *,
+    user_id: uuid.UUID | str,
+    otp_id: uuid.UUID | str,
+    code: str,
+    user_agent: str | None = None,
+    ip_address: str | None = None,
+) -> dict:
+    """Verify a phone OTP and ATTACH the phone to an existing user.
+
+    Unlike :func:`verify_otp_and_login` (which get-or-creates a user by phone),
+    this links the verified phone to an *already-known* ``user_id`` without
+    spawning a new account. It backs the sub-project D email->phone migration
+    grace flow: a migrated email-only user (phone=NULL) claims a phone and moves
+    onto phone-canonical auth, keeping all their existing data.
+
+    Raises the usual OTP errors (OtpInvalid/OtpExpired/OtpAlreadyUsed/
+    OtpAttemptsExhausted) on a bad code, and :class:`PhoneInUse` if the verified
+    phone already belongs to a different account.
+
+    Returns {"access_token", "refresh_token", "user": {"id", "phone", "locale"}}.
+    """
+    if isinstance(user_id, str):
+        user_id = uuid.UUID(user_id)
+    if isinstance(otp_id, str):
+        otp_id = uuid.UUID(otp_id)
+
+    _verify_otp(session, otp_id=otp_id, code=code)
+    o = otp_dao.get_by_id(session, otp_id)
+    assert o is not None  # _verify_otp would have raised otherwise
+
+    existing = user_dao.get_by_phone(session, o.phone)
+    if existing is not None and str(existing.id) != str(user_id):
+        raise PhoneInUse("this phone number is already linked to another account")
+
+    user = user_dao.set_phone(session, user_id, o.phone)
+    user_dao.touch_last_login(session, user_id)
+    refresh_raw, _ = issue_refresh_token(
+        session, user_id=user_id, user_agent=user_agent, ip_address=ip_address
+    )
+    access = encode_access_token(user_id)
+
+    audit_dao.log_event(
+        session,
+        event_type="phone.linked",
+        user_id=user_id,
+        source="nowlez",
+        metadata={"channel": o.channel},
+        ip_address=ip_address,
+    )
+    return {
+        "access_token": access,
+        "refresh_token": refresh_raw,
+        "user": {"id": str(user.id), "phone": user.phone, "locale": user.locale},
+    }
+
+
 def login_with_password(
     session: Session,
     *,
@@ -206,6 +264,7 @@ def set_password(
 __all__ = [
     "start_phone_login",
     "verify_otp_and_login",
+    "attach_phone_with_otp",
     "login_with_password",
     "refresh_access_token",
     "revoke_session",
