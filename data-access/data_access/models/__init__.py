@@ -12,6 +12,7 @@ from .case import Case, CaseOrder, CaseOrderNowlez
 from .case_preferences import CasePreferences
 from .client import Client
 from .content import ChatHistory, UploadedFile
+from .housekeeping import Feedback, Waitlist
 from .notification import Notification, PushSubscription, UserDripState
 from .team import PendingTeamInvite, Team, TeamMember
 from .upsell import MunshiUpsellEvent
@@ -38,6 +39,8 @@ __all__ = [
     "Notification",
     "PushSubscription",
     "UserDripState",
+    "Feedback",
+    "Waitlist",
     "Subscription",
     "PaymentEvent",
     "CouponCode",

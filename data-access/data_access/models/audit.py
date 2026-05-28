@@ -54,6 +54,9 @@ class AuditLog(Base):
     )
     ip_address: Mapped[str | None] = mapped_column(INETType, nullable=True)
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Sub-project G: forensic id of the migrated SQLite audit_logs row (the
+    # consolidated backfill's idempotency key). NULL for natively-created events.
+    legacy_sqlite_id: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
