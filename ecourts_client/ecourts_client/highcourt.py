@@ -166,22 +166,30 @@ class HighCourtClient:
         self,
         *,
         state_code: str,
-        district_code: str,
-        court_code_arr: str,
+        bench_code: str,
         party_name: str,
         year: int,
         pending_disposed: str = "Pending",
     ) -> list[CaseStub]:
+        """Party-name search on a High Court bench.
+
+        Unlike the District Court (which sends the establishment CSV in
+        ``court_code_arr`` plus language flags -- main.js:displayCasesTable),
+        the HC app selects a bench that sets BOTH ``dist_code`` and
+        ``court_code`` to the bench code and sends NO language flags
+        (search_by_party_name_hc.js + main_hc.js:displayCasesTable). Sending
+        the DC shape makes showDataWebService.php return ``{status:"N",
+        msg:"error"}``. ``bench_code`` is the dist_code returned by
+        ``list_hc_benches`` for the picked High Court.
+        """
         if pending_disposed not in {"Pending", "Disposed", "Both"}:
             raise ValueError(f"pending_disposed must be Pending|Disposed|Both, got {pending_disposed!r}")
         resp = self._session.call(
             "showDataWebService.php",
             {
                 "state_code": str(state_code),
-                "dist_code": str(district_code),
-                "court_code_arr": str(court_code_arr),
-                "language_flag": "english",
-                "bilingual_flag": "0",
+                "dist_code": str(bench_code),
+                "court_code": str(bench_code),
                 "pet_name": party_name,
                 "pendingDisposed": pending_disposed,
                 "year": str(year),
@@ -193,20 +201,20 @@ class HighCourtClient:
         self,
         *,
         state_code: str,
-        district_code: str,
-        court_code_arr: str,
+        bench_code: str,
         case_type: str,
         case_number: str,
         year: int,
     ) -> list[CaseStub]:
+        """Case-number search on a High Court bench. See ``search_by_party_name``
+        for why the HC envelope differs from District Court (court_code
+        singular = dist_code = bench, no language flags)."""
         resp = self._session.call(
             "caseNumberSearch.php",
             {
                 "state_code": str(state_code),
-                "dist_code": str(district_code),
-                "court_code_arr": str(court_code_arr),
-                "language_flag": "english",
-                "bilingual_flag": "0",
+                "dist_code": str(bench_code),
+                "court_code": str(bench_code),
                 "case_number": str(case_number),
                 "case_type": str(case_type),
                 "year": str(year),

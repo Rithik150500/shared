@@ -1,10 +1,21 @@
 """Parsers for search-mode endpoints.
 
-Both `showDataWebService.php` (party search) and `caseNumberSearch.php` return the same
-shape: a dict with numeric-string keys (`"0"`, `"1"`, ...) for each establishment, plus
-`no_of_establishments`. Each establishment value is `{court_code, establishment_name, caseNos: [...]}`.
+`showDataWebService.php` (party search) and `caseNumberSearch.php` return one
+of two shapes depending on the court tier:
 
-We flatten across establishments into a single list of CaseStubs.
+* **District Court** -- a dict with numeric-string keys (`"0"`, `"1"`, ...),
+  one per establishment, plus `no_of_establishments`. The DC app
+  (main.js:displayCasesTable) sends the whole establishment CSV in
+  `court_code_arr` and the server returns all buckets at once.
+* **High Court** -- a FLAT single-establishment object
+  `{court_code, establishment_name, caseNos: [...]}` at the top level (no
+  numeric keys, no `no_of_establishments`). The HC app
+  (main_hc.js:displayCasesTable) loops one call per bench and reads
+  `data.caseNos` directly. Verified live against Bombay HC.
+
+Each establishment value is `{court_code, establishment_name, caseNos: [...]}`.
+We flatten across establishments into a single list of CaseStubs, handling
+both shapes.
 """
 from __future__ import annotations
 
@@ -14,15 +25,24 @@ from ecourts_client.errors import SchemaChanged
 from ecourts_client.models import CaseStub
 
 
+def _establishment_buckets(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the establishment buckets regardless of DC/HC response shape.
+
+    HC returns a single establishment flat at the top level (detected by a
+    top-level ``caseNos`` key); DC returns numeric-keyed sub-dicts.
+    """
+    if "caseNos" in response:
+        return [response]
+    return [v for k, v in response.items() if k.isdigit() and isinstance(v, dict)]
+
+
 def _flatten_search_response(response: dict[str, Any]) -> list[CaseStub]:
-    """Walk the numeric-keyed establishment buckets and return a flat list of CaseStubs."""
+    """Walk the establishment buckets (DC or HC shape) and return a flat list of CaseStubs."""
     if not isinstance(response, dict):
         raise SchemaChanged(field="search.response", reason=f"expected dict, got {type(response).__name__}")
 
     out: list[CaseStub] = []
-    for key, bucket in response.items():
-        if not key.isdigit() or not isinstance(bucket, dict):
-            continue
+    for bucket in _establishment_buckets(response):
         court = (bucket.get("establishment_name") or "").strip() or "(unknown court)"
         for row in bucket.get("caseNos") or []:
             cino = (row.get("cino") or "").strip()

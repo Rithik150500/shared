@@ -80,14 +80,17 @@ class DistrictRef:
 class CourtComplexRef:
     """A court complex within a district.
 
-    The mobile API exposes two parallel codes per complex which are NOT
-    interchangeable across endpoints:
-    - ``code`` is ``complex_code`` (e.g. ``"1080060-2"``) — used by SEARCH
-      endpoints in the ``court_code_arr`` field.
-    - ``est_code`` is ``njdg_est_code`` (e.g. ``"2"``) — used by LISTING
-      endpoints (caseNumberWebService.php, policeStationWebService.php) in
-      the ``court_code`` field. Passing ``code`` to a listing endpoint
-      returns ``{status:"N", msg:"error"}`` with no field-level detail.
+    The mobile API exposes two parallel codes per complex:
+    - ``code`` is ``complex_code`` (e.g. ``"1080060-2"`` for states that
+      inline the establishment, or a bare ``"1140041"`` for states that
+      don't) — an identifier for the complex row itself.
+    - ``est_code`` is ``njdg_est_code`` (e.g. ``"2"`` or a CSV ``"1,3,4"``
+      for a multi-establishment complex) — this is the value the app stores
+      as ``SESSION_COURT_CODE`` and the ONLY one the data endpoints accept:
+      SEARCH endpoints take the full est CSV in ``court_code_arr``; LISTING
+      endpoints (caseNumberWebService.php, policeStationWebService.php) take
+      a single est in ``court_code``. Passing ``code`` to either returns
+      ``{status:"N", msg:"error"}`` / 0 establishments with no field detail.
     """
     code: str
     name: str
