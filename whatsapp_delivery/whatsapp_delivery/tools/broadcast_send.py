@@ -123,7 +123,12 @@ def select_recipients(
         # Skip blank / None phone numbers
         if not wa_digits or not str(wa_digits).strip():
             continue
-        wa_digits = str(wa_digits).strip()
+        # Normalize to digits-only so suppression/done matching is format-agnostic.
+        # The stop-handler stores wa_digits as pure E.164 digits (no leading +),
+        # so "91 99999-99999" and "+919999999999" must both match "919999999999".
+        wa_digits = "".join(ch for ch in str(wa_digits) if ch.isdigit())
+        if not wa_digits:
+            continue
         # Tier filter: "Tier label" must start with the requested tier prefix
         tier_label = str(row.get("Tier label", "") or "")
         if not tier_label.startswith(tier):
@@ -255,6 +260,14 @@ def run(args: Any, *, rows: list[dict] | None = None) -> int:  # noqa: C901 (com
         return 0
 
     # --- Live send path ---
+    # Defense-in-depth: run() checks --yes independently of main() so that
+    # calling run(SimpleNamespace(dry_run=False, yes=False)) from code or tests
+    # never accidentally fires live sends.  main() also flips dry_run on --yes
+    # but that cannot protect direct run() callers.
+    if not getattr(args, "yes", False):
+        log.error("refusing to send live without --yes")
+        return 2
+
     phone_number_id = getattr(args, "phone_number_id", None)
     access_token = getattr(args, "access_token", None)
     if not phone_number_id or not access_token:

@@ -1080,3 +1080,167 @@ class TestAutoPauseGuard:
 
         assert result == 3
         send_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# I1 — --yes gate in run() (defense-in-depth)
+# ---------------------------------------------------------------------------
+
+
+class TestYesGate:
+    """run() must refuse to send live without --yes, even if dry_run=False."""
+
+    def _patch_get_session(self, monkeypatch, factory):
+        monkeypatch.setattr(
+            "whatsapp_delivery.tools.broadcast_send.get_session", factory
+        )
+
+    def test_run_live_without_yes_returns_2_and_no_sends(
+        self, monkeypatch, sqlite_session_factory
+    ):
+        """run(dry_run=False, yes=False) must return 2 and perform zero sends/uploads."""
+        from whatsapp_delivery.tools.broadcast_send import run
+
+        rows = [_row("91001"), _row("91002")]
+        # Explicitly: dry_run=False but yes=False — the forbidden live path.
+        args = _make_args(dry_run=False, yes=False, video_media_id="MEDIA_ID")
+
+        self._patch_get_session(monkeypatch, sqlite_session_factory)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        send_mock = MagicMock(return_value="wamid.should_not_happen")
+        upload_mock = MagicMock(return_value="MEDIA_ID_SHOULD_NOT_HAPPEN")
+
+        with patch("whatsapp_delivery.tools.broadcast_send.TemplateClient") as MockTC, \
+             patch("whatsapp_delivery.tools.broadcast_send.MetaClient") as MockMC:
+            MockTC.return_value.send_template_with_components = send_mock
+            MockMC.return_value.upload_media = upload_mock
+            result = run(args, rows=rows)
+
+        assert result == 2, f"Expected exit code 2, got {result}"
+        send_mock.assert_not_called()
+        upload_mock.assert_not_called()
+
+    def test_run_live_with_yes_true_proceeds(
+        self, monkeypatch, sqlite_session_factory
+    ):
+        """run(dry_run=False, yes=True) must pass the gate and proceed to send."""
+        from whatsapp_delivery.tools.broadcast_send import run
+
+        rows = [_row("91001")]
+        args = _make_args(dry_run=False, yes=True, video_media_id="MEDIA_ID")
+
+        self._patch_get_session(monkeypatch, sqlite_session_factory)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        send_mock = MagicMock(return_value="wamid.ok")
+
+        with patch("whatsapp_delivery.tools.broadcast_send.TemplateClient") as MockTC:
+            MockTC.return_value.send_template_with_components = send_mock
+            result = run(args, rows=rows)
+
+        assert result == 0
+        send_mock.assert_called_once()
+
+    def test_run_dry_run_true_without_yes_still_ok(
+        self, monkeypatch, sqlite_session_factory
+    ):
+        """Dry-run with yes=False must still return 0 (gate only blocks live path)."""
+        from whatsapp_delivery.tools.broadcast_send import run
+
+        rows = [_row("91001")]
+        args = _make_args(dry_run=True, yes=False)
+
+        self._patch_get_session(monkeypatch, sqlite_session_factory)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        with patch("whatsapp_delivery.tools.broadcast_send.TemplateClient") as MockTC:
+            MockTC.return_value.send_template_with_components = MagicMock()
+            result = run(args, rows=rows)
+
+        assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# I2 — WA_Digits normalization (digits-only)
+# ---------------------------------------------------------------------------
+
+
+class TestWaDigitsNormalization:
+    """select_recipients must normalize WA_Digits to digits-only before matching."""
+
+    def test_plus_prefix_stripped_and_excluded_when_suppressed(self):
+        """'+91 99999-99999' must normalize to '919999999999' and match suppressed set."""
+        rows = [
+            {"WA_Digits": "+91 99999-99999", "Name (clean)": "Alice", "Tier label": "T1 Foo"},
+            _row("91001"),
+        ]
+        result = select_recipients(
+            rows,
+            tier="T1",
+            suppressed={"919999999999"},
+            already_done=set(),
+            limit=100,
+        )
+        # '+91 99999-99999' normalizes to '919999999999' which is suppressed → excluded
+        digits = [r.wa_digits for r in result]
+        assert "919999999999" not in digits
+        assert "91001" in digits
+
+    def test_normalized_digits_stored_on_recipient(self):
+        """Recipient.wa_digits must hold the normalized (digits-only) form."""
+        rows = [
+            {"WA_Digits": "+91 98765-43210", "Name (clean)": "Bob", "Tier label": "T1 Foo"},
+        ]
+        result = select_recipients(
+            rows,
+            tier="T1",
+            suppressed=set(),
+            already_done=set(),
+            limit=100,
+        )
+        assert len(result) == 1
+        assert result[0].wa_digits == "919876543210"
+
+    def test_already_done_normalized_comparison(self):
+        """already_done set using normalized form must exclude the row."""
+        rows = [
+            {"WA_Digits": "+91 99999 99999", "Name (clean)": "Charlie", "Tier label": "T1 Foo"},
+        ]
+        result = select_recipients(
+            rows,
+            tier="T1",
+            suppressed=set(),
+            already_done={"919999999999"},
+            limit=100,
+        )
+        assert result == []
+
+    def test_pure_digits_unchanged(self):
+        """A plain digits-only WA_Digits must pass through unchanged."""
+        rows = [_row("919876543210")]
+        result = select_recipients(
+            rows,
+            tier="T1",
+            suppressed=set(),
+            already_done=set(),
+            limit=100,
+        )
+        assert result[0].wa_digits == "919876543210"
+
+    def test_spaces_and_hyphens_stripped(self):
+        """Various formats with spaces/hyphens normalize to digits-only."""
+        formats = [
+            "+91-98765-43210",
+            "91 98765 43210",
+            "(91) 98765-43210",
+        ]
+        for fmt in formats:
+            rows = [{"WA_Digits": fmt, "Name (clean)": "X", "Tier label": "T1 Foo"}]
+            result = select_recipients(
+                rows, tier="T1", suppressed=set(), already_done=set(), limit=100
+            )
+            assert len(result) == 1, f"Expected 1 result for format {fmt!r}"
+            assert result[0].wa_digits == "919876543210", (
+                f"Expected '919876543210', got {result[0].wa_digits!r} for {fmt!r}"
+            )
