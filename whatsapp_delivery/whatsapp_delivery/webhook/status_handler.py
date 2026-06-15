@@ -15,6 +15,7 @@ Spec reference: §4.7 (delivery-status pipeline).
 """
 from __future__ import annotations
 
+import logging
 from typing import Iterable
 
 from sqlalchemy.orm import Session
@@ -22,6 +23,8 @@ from sqlalchemy.orm import Session
 from data_access.daos.whatsapp_dao import update_delivery_status
 
 from whatsapp_delivery.webhook.parser import DeliveryStatus
+
+log = logging.getLogger(__name__)
 
 
 def apply_status_update(session: Session, status: DeliveryStatus) -> int:
@@ -46,6 +49,34 @@ def apply_status_update(session: Session, status: DeliveryStatus) -> int:
     )
     if status.status == "failed":
         _report_failure(status)
+
+    # Route to the broadcast ledger (no-op if wamid belongs to a non-broadcast
+    # message or if the broadcast tables don't exist in this environment).
+    try:
+        from data_access.daos import broadcast_dao
+        n = broadcast_dao.apply_broadcast_status(
+            session,
+            wamid=status.meta_message_id,
+            status=status.status,
+            error_code=status.error_code,
+            failure_reason=status.failure_reason,
+        )
+        if n and status.error_code == 131026:   # undeliverable / not on WhatsApp
+            row = broadcast_dao.get_by_wamid(session, status.meta_message_id)
+            if row:
+                broadcast_dao.suppress(
+                    session,
+                    wa_digits=row.wa_digits,
+                    reason="undeliverable",
+                    source="status_131026",
+                )
+    except Exception:
+        log.warning(
+            "broadcast ledger update failed for wamid=%s — degrading gracefully",
+            status.meta_message_id,
+            exc_info=True,
+        )
+
     return rowcount
 
 

@@ -51,6 +51,7 @@ class DeliveryStatus:
     status: str        # 'sent' | 'delivered' | 'read' | 'failed'
     timestamp: int
     failure_reason: str | None = None
+    error_code: int | None = None  # Meta numeric error code (e.g. 131026)
 
 
 def parse_incoming(payload: dict[str, Any]) -> list[IncomingMessage]:
@@ -79,12 +80,14 @@ def parse_status_updates(payload: dict[str, Any]) -> list[DeliveryStatus]:
         for change in entry.get("changes", []):
             for s in change.get("value", {}).get("statuses", []):
                 err = (s.get("errors") or [{}])[0]
+                raw_code = err.get("code")
                 out.append(DeliveryStatus(
                     meta_message_id=s["id"],
                     recipient_id=s["recipient_id"],
                     status=s["status"],
                     timestamp=int(s["timestamp"]),
                     failure_reason=err.get("title") or err.get("message"),
+                    error_code=int(raw_code) if raw_code is not None else None,
                 ))
     return out
 
