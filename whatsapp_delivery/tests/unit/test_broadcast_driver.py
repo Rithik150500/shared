@@ -247,6 +247,10 @@ def _make_args(
     xlsx: str = "fake.xlsx",
     phone_number_id: str = "TEST_PHONE_ID",
     access_token: str = "TEST_TOKEN",
+    # Auto-pause guard params (defaults keep existing tests unaffected)
+    max_fail_rate: float = 0.99,
+    max_undeliverable: float = 0.99,
+    min_sample: int = 999_999,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         tier=tier,
@@ -264,6 +268,9 @@ def _make_args(
         xlsx=xlsx,
         phone_number_id=phone_number_id,
         access_token=access_token,
+        max_fail_rate=max_fail_rate,
+        max_undeliverable=max_undeliverable,
+        min_sample=min_sample,
     )
 
 
@@ -843,3 +850,233 @@ class TestCLI:
             ]
         )
         assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Auto-pause guard tests (Task 8)
+# ---------------------------------------------------------------------------
+
+
+def _seed_ledger(
+    factory,
+    *,
+    campaign: str,
+    tier: str = "T1",
+    n_failed: int = 0,
+    n_sent: int = 0,
+    n_delivered: int = 0,
+    n_read: int = 0,
+    fail_error_code: int | None = None,
+) -> None:
+    """Seed the in-memory ledger with a synthetic outcome history for guard tests.
+
+    All digits are generated deterministically as 5-digit strings starting from
+    ``10000`` so they never collide with rows created by the send loop.
+    """
+    counter = 10000
+    with factory() as s:
+        for _ in range(n_sent):
+            wa = str(counter); counter += 1
+            broadcast_dao.claim_send(
+                s, campaign=campaign, wa_digits=wa, tier=tier,
+                template_name="munshi_welcome_video_v1", language="en",
+            )
+            broadcast_dao.mark_sent(s, campaign=campaign, wa_digits=wa, wamid=f"wamid.s{wa}")
+        for _ in range(n_delivered):
+            wa = str(counter); counter += 1
+            broadcast_dao.claim_send(
+                s, campaign=campaign, wa_digits=wa, tier=tier,
+                template_name="munshi_welcome_video_v1", language="en",
+            )
+            broadcast_dao.mark_sent(s, campaign=campaign, wa_digits=wa, wamid=f"wamid.d{wa}")
+            # Promote to delivered via apply_broadcast_status
+            broadcast_dao.apply_broadcast_status(
+                s, wamid=f"wamid.d{wa}", status="delivered",
+            )
+        for _ in range(n_read):
+            wa = str(counter); counter += 1
+            broadcast_dao.claim_send(
+                s, campaign=campaign, wa_digits=wa, tier=tier,
+                template_name="munshi_welcome_video_v1", language="en",
+            )
+            broadcast_dao.mark_sent(s, campaign=campaign, wa_digits=wa, wamid=f"wamid.r{wa}")
+            broadcast_dao.apply_broadcast_status(
+                s, wamid=f"wamid.r{wa}", status="read",
+            )
+        for _ in range(n_failed):
+            wa = str(counter); counter += 1
+            broadcast_dao.claim_send(
+                s, campaign=campaign, wa_digits=wa, tier=tier,
+                template_name="munshi_welcome_video_v1", language="en",
+            )
+            broadcast_dao.mark_failed_local(
+                s, campaign=campaign, wa_digits=wa,
+                error_code=fail_error_code, reason="test failure",
+            )
+
+
+class TestAutoPauseGuard:
+    """Tests for the auto-pause quality guard added at the top of run()."""
+
+    def _patch_get_session(self, monkeypatch, factory):
+        monkeypatch.setattr(
+            "whatsapp_delivery.tools.broadcast_send.get_session", factory
+        )
+
+    def _make_guard_args(
+        self,
+        *,
+        campaign: str = "guard_campaign",
+        min_sample: int = 10,
+        max_fail_rate: float = 0.10,
+        max_undeliverable: float = 0.40,
+        tier: str = "T1",
+    ) -> SimpleNamespace:
+        return _make_args(
+            campaign=campaign,
+            tier=tier,
+            min_sample=min_sample,
+            max_fail_rate=max_fail_rate,
+            max_undeliverable=max_undeliverable,
+        )
+
+    def test_guard_trips_on_high_fail_rate_returns_3(
+        self, monkeypatch, sqlite_session_factory
+    ):
+        """Guard trips → run() returns 3 and performs ZERO sends or uploads."""
+        from whatsapp_delivery.tools.broadcast_send import run
+
+        campaign = "guard_fail_rate"
+        # 50 sent, 20 failed → fail_rate = 20/70 ≈ 0.286 > 0.10
+        _seed_ledger(sqlite_session_factory, campaign=campaign, n_sent=50, n_failed=20)
+
+        args = self._make_guard_args(campaign=campaign, min_sample=10)
+        rows = [_row(f"9900{i}") for i in range(5)]
+
+        send_mock = MagicMock(return_value="wamid.x")
+        upload_mock = MagicMock(return_value="MEDIA_ID")
+
+        self._patch_get_session(monkeypatch, sqlite_session_factory)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        with patch("whatsapp_delivery.tools.broadcast_send.TemplateClient") as MockTC, \
+             patch("whatsapp_delivery.tools.broadcast_send.MetaClient") as MockMC:
+            MockTC.return_value.send_template_with_components = send_mock
+            MockMC.return_value.upload_media = upload_mock
+            result = run(args, rows=rows)
+
+        assert result == 3
+        send_mock.assert_not_called()
+        upload_mock.assert_not_called()
+
+    def test_guard_inactive_below_min_sample(
+        self, monkeypatch, sqlite_session_factory
+    ):
+        """Below min_sample attempted rows the guard does NOT trip even with a high fail-rate."""
+        from whatsapp_delivery.tools.broadcast_send import run
+
+        campaign = "guard_below_sample"
+        # 5 sent, 5 failed → fail_rate = 0.5, but only 10 attempted < min_sample=50
+        _seed_ledger(sqlite_session_factory, campaign=campaign, n_sent=5, n_failed=5)
+
+        args = self._make_guard_args(campaign=campaign, min_sample=50, max_fail_rate=0.10)
+        rows = [_row(f"9800{i}") for i in range(2)]
+
+        send_mock = MagicMock(return_value="wamid.y")
+        self._patch_get_session(monkeypatch, sqlite_session_factory)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        with patch("whatsapp_delivery.tools.broadcast_send.TemplateClient") as MockTC:
+            MockTC.return_value.send_template_with_components = send_mock
+            result = run(args, rows=rows)
+
+        # Guard did not trip → normal send proceeds (returns 0)
+        assert result == 0
+        assert send_mock.call_count == 2
+
+    def test_guard_passes_when_healthy(
+        self, monkeypatch, sqlite_session_factory
+    ):
+        """Enough attempted rows but low fail / undeliverable rates → run proceeds normally."""
+        from whatsapp_delivery.tools.broadcast_send import run
+
+        campaign = "guard_healthy"
+        # 90 sent, 4 failed → fail_rate = 4/94 ≈ 0.043 < 0.10
+        _seed_ledger(sqlite_session_factory, campaign=campaign, n_sent=90, n_failed=4)
+
+        args = self._make_guard_args(campaign=campaign, min_sample=10, max_fail_rate=0.10)
+        rows = [_row(f"9700{i}") for i in range(2)]
+
+        send_mock = MagicMock(return_value="wamid.z")
+        self._patch_get_session(monkeypatch, sqlite_session_factory)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        with patch("whatsapp_delivery.tools.broadcast_send.TemplateClient") as MockTC:
+            MockTC.return_value.send_template_with_components = send_mock
+            result = run(args, rows=rows)
+
+        assert result == 0
+        assert send_mock.call_count == 2
+
+    def test_guard_trips_on_high_undeliverable_rate(
+        self, monkeypatch, sqlite_session_factory
+    ):
+        """High undeliverable rate (error_code 131026) also trips the guard."""
+        from whatsapp_delivery.tools.broadcast_send import run
+
+        campaign = "guard_undel"
+        # 40 sent, 25 failed with error_code 131026 → undel_rate = 25/65 ≈ 0.385 < 0.40
+        # Use 30 failed with 131026 → undel_rate = 30/70 ≈ 0.429 > 0.40
+        _seed_ledger(
+            sqlite_session_factory,
+            campaign=campaign,
+            n_sent=40,
+            n_failed=30,
+            fail_error_code=131026,
+        )
+
+        args = self._make_guard_args(campaign=campaign, min_sample=10, max_undeliverable=0.40)
+        rows = [_row(f"9600{i}") for i in range(2)]
+
+        send_mock = MagicMock(return_value="wamid.u")
+        upload_mock = MagicMock(return_value="MEDIA_ID_U")
+
+        self._patch_get_session(monkeypatch, sqlite_session_factory)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        with patch("whatsapp_delivery.tools.broadcast_send.TemplateClient") as MockTC, \
+             patch("whatsapp_delivery.tools.broadcast_send.MetaClient") as MockMC:
+            MockTC.return_value.send_template_with_components = send_mock
+            MockMC.return_value.upload_media = upload_mock
+            result = run(args, rows=rows)
+
+        assert result == 3
+        send_mock.assert_not_called()
+        upload_mock.assert_not_called()
+
+    def test_guard_trips_before_dry_run_returns_3_not_0(
+        self, monkeypatch, sqlite_session_factory
+    ):
+        """A tripped guard must return 3 even in dry-run mode (no sends anyway, but exit code is 3)."""
+        from whatsapp_delivery.tools.broadcast_send import run
+
+        campaign = "guard_dryrun"
+        # 50 sent, 20 failed → fail_rate > 0.10
+        _seed_ledger(sqlite_session_factory, campaign=campaign, n_sent=50, n_failed=20)
+
+        args = self._make_guard_args(campaign=campaign, min_sample=10)
+        # Override to dry-run
+        args.dry_run = True
+        args.yes = False
+        rows = [_row("99001")]
+
+        send_mock = MagicMock(return_value="wamid.dr")
+        self._patch_get_session(monkeypatch, sqlite_session_factory)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        with patch("whatsapp_delivery.tools.broadcast_send.TemplateClient") as MockTC:
+            MockTC.return_value.send_template_with_components = send_mock
+            result = run(args, rows=rows)
+
+        assert result == 3
+        send_mock.assert_not_called()

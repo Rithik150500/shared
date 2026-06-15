@@ -42,6 +42,7 @@ from whatsapp_delivery.config import WhatsAppConfig
 from whatsapp_delivery.errors import MetaInvalidMessage, MetaTransientError
 from whatsapp_delivery.meta_client import MetaClient
 from whatsapp_delivery.template_client import TemplateClient
+from whatsapp_delivery.tools.broadcast_report import summarize
 
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,11 @@ _DEFAULT_PER_RUN_CAP = 100
 _DEFAULT_DAILY_CAP = 200
 _DEFAULT_SPACING_SECONDS = 2.0
 _DEFAULT_RETRY_BACKOFF = 5.0
+
+# Auto-pause guard defaults
+_DEFAULT_MAX_FAIL_RATE = 0.1
+_DEFAULT_MAX_UNDELIVERABLE = 0.4
+_DEFAULT_MIN_SAMPLE = 50
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +185,9 @@ def run(args: Any, *, rows: list[dict] | None = None) -> int:  # noqa: C901 (com
     daily_cap: int = int(args.daily_cap)
     video_media_id: str | None = getattr(args, "video_media_id", None)
     video_file: str | None = getattr(args, "video_file", None)
+    max_fail_rate: float = float(getattr(args, "max_fail_rate", _DEFAULT_MAX_FAIL_RATE))
+    max_undeliverable: float = float(getattr(args, "max_undeliverable", _DEFAULT_MAX_UNDELIVERABLE))
+    min_sample: int = int(getattr(args, "min_sample", _DEFAULT_MIN_SAMPLE))
 
     # Load rows from xlsx unless injected by test
     if rows is None:
@@ -189,6 +198,24 @@ def run(args: Any, *, rows: list[dict] | None = None) -> int:  # noqa: C901 (com
         suppressed = _dao.load_suppressed_set(s)
         already_done = _dao.already_done_set(s, campaign)
         sent_24h = _dao.sent_count_since(s, campaign, hours=24)
+
+        # --- Auto-pause guard (evaluated before any send or upload) ---
+        # Reads the campaign's recent outcome from the ledger. If quality signals
+        # are bad, refuses to start regardless of --dry-run or --yes.
+        stats = summarize(s, campaign, tier=tier)
+        if stats["attempted"] >= min_sample:
+            fail_rate = stats["failed"] / stats["attempted"]
+            undel_rate = stats["undeliverable"] / stats["attempted"]
+            if fail_rate > max_fail_rate or undel_rate > max_undeliverable:
+                log.error(
+                    "auto-pause: campaign=%s fail_rate=%.2f undel_rate=%.2f "
+                    "attempted=%d — refusing to send",
+                    campaign,
+                    fail_rate,
+                    undel_rate,
+                    stats["attempted"],
+                )
+                return 3
 
     recipients = select_recipients(
         rows,
@@ -450,6 +477,36 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Disable dry-run and execute live sends.",
+    )
+    p.add_argument(
+        "--max-fail-rate",
+        dest="max_fail_rate",
+        type=float,
+        default=_DEFAULT_MAX_FAIL_RATE,
+        help=(
+            "Auto-pause guard: refuse to send if failed/attempted exceeds this "
+            "fraction (requires --min-sample rows attempted). Default: 0.1."
+        ),
+    )
+    p.add_argument(
+        "--max-undeliverable",
+        dest="max_undeliverable",
+        type=float,
+        default=_DEFAULT_MAX_UNDELIVERABLE,
+        help=(
+            "Auto-pause guard: refuse to send if undeliverable/attempted exceeds "
+            "this fraction (requires --min-sample rows attempted). Default: 0.4."
+        ),
+    )
+    p.add_argument(
+        "--min-sample",
+        dest="min_sample",
+        type=int,
+        default=_DEFAULT_MIN_SAMPLE,
+        help=(
+            "Minimum number of attempted rows before the auto-pause guard "
+            "activates. Guard is inactive for brand-new campaigns. Default: 50."
+        ),
     )
     return p
 
