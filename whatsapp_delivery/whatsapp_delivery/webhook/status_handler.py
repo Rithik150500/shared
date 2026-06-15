@@ -52,6 +52,13 @@ def apply_status_update(session: Session, status: DeliveryStatus) -> int:
 
     # Route to the broadcast ledger (no-op if wamid belongs to a non-broadcast
     # message or if the broadcast tables don't exist in this environment).
+    #
+    # IMPORTANT: we call session.commit() at the end of this block.
+    # The existing update_delivery_status() above self-commits. The production
+    # caller (0705/bot_scaffold/app.py) uses a raw sessionmaker whose __exit__
+    # does NOT commit, so without an explicit commit here the flush()-only
+    # writes from apply_broadcast_status() and suppress() are silently rolled
+    # back when the caller's context manager exits.
     try:
         from data_access.daos import broadcast_dao
         n = broadcast_dao.apply_broadcast_status(
@@ -70,6 +77,7 @@ def apply_status_update(session: Session, status: DeliveryStatus) -> int:
                     reason="undeliverable",
                     source="status_131026",
                 )
+        session.commit()
     except Exception:
         log.warning(
             "broadcast ledger update failed for wamid=%s — degrading gracefully",
