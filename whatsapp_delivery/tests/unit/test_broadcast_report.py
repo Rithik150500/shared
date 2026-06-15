@@ -283,3 +283,45 @@ def test_summarize_echoes_tier_none(mixed_session):
 def test_summarize_echoes_tier_when_filtered(db_session):
     s = summarize(db_session, _CAMPAIGN, tier="T1")
     assert s["tier"] == "T1"
+
+
+# ---------------------------------------------------------------------------
+# M3 — other_failed must count locally-failed rows with NULL error_code
+# ---------------------------------------------------------------------------
+
+
+def test_other_failed_counts_null_error_code(db_session):
+    """M3 regression: a failed row with error_code=None must appear in other_failed.
+
+    SQL NULL != N evaluates to NULL (not TRUE), so without an explicit
+    OR error_code IS NULL the row was silently excluded from other_failed.
+    """
+    # Seed one failed row with error_code=None (local failure, no Meta code)
+    _seed(db_session, wa_digits="92001", final_status="failed", error_code=None)
+    # Also seed a row with 131026 so we confirm it does NOT count in other_failed
+    _seed(db_session, wa_digits="92002", final_status="failed", error_code=131026)
+
+    s = summarize(db_session, _CAMPAIGN)
+    assert s["failed"] == 2
+    assert s["undeliverable"] == 1        # 131026
+    assert s["other_failed"] == 1, (
+        f"other_failed should be 1 (NULL error_code row), got {s['other_failed']}. "
+        "SQL NULL != 131026 is NULL not TRUE — must use OR error_code IS NULL."
+    )
+    assert s["block_proxy"] == s["other_failed"]
+
+
+def test_other_failed_mixed_null_and_known_code(db_session):
+    """NULL-code failures and other-code failures both count in other_failed."""
+    _seed(db_session, wa_digits="93001", final_status="failed", error_code=None)
+    _seed(db_session, wa_digits="93002", final_status="failed", error_code=None)
+    _seed(db_session, wa_digits="93003", final_status="failed", error_code=131000)
+    _seed(db_session, wa_digits="93004", final_status="failed", error_code=131026)
+    _seed(db_session, wa_digits="93005", final_status="failed", error_code=131049)
+
+    s = summarize(db_session, _CAMPAIGN)
+    # 2 NULL + 1 × 131000 = 3 other_failed
+    # 1 × 131026 = undeliverable, 1 × 131049 = marketing_capped
+    assert s["undeliverable"] == 1
+    assert s["marketing_capped"] == 1
+    assert s["other_failed"] == 3

@@ -66,8 +66,8 @@ class WaBroadcastLog(Base):
     call, and the inbound webhook flips ``status`` + timestamps as Meta
     delivers receipts.
 
-    ``error_code`` holds Meta's numeric error code (e.g. 131026 = re-
-    engagement window) for analytics / retry decisions.
+    ``error_code`` holds Meta's numeric error code (e.g. 131026 = message
+    undeliverable / recipient not on WhatsApp) for analytics / retry decisions.
 
     UNIQUE on ``(campaign, wa_digits)`` — ``claim_send()`` is the
     exactly-once gate via INSERT ON CONFLICT DO NOTHING.

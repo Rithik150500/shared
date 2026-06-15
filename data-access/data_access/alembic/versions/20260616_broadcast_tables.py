@@ -20,8 +20,8 @@ wa_broadcast_log
   Durable exactly-once sent-ledger. UNIQUE on ``(campaign, wa_digits)``
   so the ``claim_send()`` DAO gate via INSERT ON CONFLICT DO NOTHING
   is serializable across concurrent workers and is safe to retry/resume.
-  Also captures Meta's numeric ``error_code`` (e.g. 131026 = re-engagement
-  window) for analytics and retry decisions.
+  Also captures Meta's numeric ``error_code`` (e.g. 131026 = message
+  undeliverable / recipient not on WhatsApp) for analytics and retry decisions.
 
 ``wa_digits`` = E.164 phone number WITHOUT the leading ``+``
 (e.g. ``919643460175``).
@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 
 revision = "20260616_broadcast_tables"
@@ -48,14 +49,26 @@ down_revision = "20260607_g_legacy_sqlite_id"
 branch_labels = None
 depends_on = None
 
+# UUID column type: native UUID on Postgres (matches the ORM's UUIDType),
+# String(36) on SQLite (unit-test path). Mirrors the pattern used by
+# 20260515_subproject_b_whatsapp.py and the UUIDType alias in models/whatsapp.py.
+def _uuid_col(dialect_name: str) -> sa.types.TypeEngine:
+    if dialect_name == "postgresql":
+        return postgresql.UUID(as_uuid=True)
+    return sa.String(36)
+
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    dialect = bind.dialect.name
+    _uuid = _uuid_col(dialect)
+
     # -----------------------------------------------------------------------
     # wa_suppression — phone-keyed deny list
     # -----------------------------------------------------------------------
     op.create_table(
         "wa_suppression",
-        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("id", _uuid, primary_key=True),
         sa.Column("wa_digits", sa.Text(), nullable=False),
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column("source", sa.Text(), nullable=True),
@@ -73,7 +86,7 @@ def upgrade() -> None:
     # -----------------------------------------------------------------------
     op.create_table(
         "wa_broadcast_log",
-        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("id", _uuid, primary_key=True),
         sa.Column("campaign", sa.Text(), nullable=False),
         sa.Column("wa_digits", sa.Text(), nullable=False),
         sa.Column("tier", sa.Text(), nullable=True),

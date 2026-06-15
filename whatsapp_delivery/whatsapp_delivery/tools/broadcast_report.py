@@ -125,14 +125,23 @@ def summarize(
     undeliverable = _failed_with_code(_CODE_UNDELIVERABLE)
     marketing_capped = _failed_with_code(_CODE_MARKETING_CAP)
 
-    # other_failed = failed rows that are neither undeliverable nor marketing-capped
+    # other_failed = failed rows that are neither undeliverable nor marketing-capped.
+    # Must also include rows where error_code IS NULL (locally-failed rows with no
+    # Meta code): SQL NULL != anything evaluates to NULL (not TRUE), so without the
+    # OR IS NULL predicate those rows are silently excluded from the count.
+    from sqlalchemy import or_
     other_failed = session.execute(
         select(func.count()).where(
             and_(
                 *base_filter,
                 WaBroadcastLog.status == "failed",
-                WaBroadcastLog.error_code != _CODE_UNDELIVERABLE,
-                WaBroadcastLog.error_code != _CODE_MARKETING_CAP,
+                or_(
+                    WaBroadcastLog.error_code == None,  # noqa: E711 — SQLAlchemy IS NULL
+                    and_(
+                        WaBroadcastLog.error_code != _CODE_UNDELIVERABLE,
+                        WaBroadcastLog.error_code != _CODE_MARKETING_CAP,
+                    ),
+                ),
             )
         )
     ).scalar_one()
