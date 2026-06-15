@@ -8,6 +8,7 @@ from .billing import (
     Referral,
     Subscription,
 )
+from .broadcast import WaBroadcastLog, WaSuppression
 from .case import Case, CaseOrder, CaseOrderNowlez
 from .case_preferences import CasePreferences
 from .upsell import MunshiUpsellEvent
@@ -34,4 +35,6 @@ __all__ = [
     "MunshiUpsellEvent",
     "MessageLog",
     "WhatsAppDeliveryLog",
+    "WaSuppression",
+    "WaBroadcastLog",
 ]
