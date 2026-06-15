@@ -259,6 +259,42 @@ def test_send_template_with_components_full_new_order_shape():
 
 
 @respx.mock
+def test_send_template_with_components_video_header():
+    """Body + video header -- header component carries type=video, not document."""
+    route = respx.post(_MESSAGES_URL).mock(
+        return_value=Response(200, json={"messages": [{"id": "wamid.vid"}]})
+    )
+    wamid = _make_client().send_template_with_components(
+        to="+919999999999",
+        name="munshi_welcome_video_v1",
+        language="en",
+        body_variables=["Rahul"],
+        header_video_id="MEDIA123",
+    )
+    assert wamid == "wamid.vid"
+    components = _captured_body(route)["template"]["components"]
+    assert components[0] == {
+        "type": "header",
+        "parameters": [{"type": "video", "video": {"id": "MEDIA123"}}],
+    }
+    assert components[1]["type"] == "body"
+    assert components[1]["parameters"] == [{"type": "text", "text": "Rahul"}]
+
+
+def test_send_template_with_components_rejects_both_headers():
+    """Passing both header_media_id and header_video_id must raise ValueError."""
+    with pytest.raises(ValueError, match="header_media_id / header_video_id"):
+        _make_client().send_template_with_components(
+            to="+919999999999",
+            name="n",
+            language="en",
+            body_variables=[],
+            header_media_id="DOC",
+            header_video_id="VID",
+        )
+
+
+@respx.mock
 def test_send_template_with_components_5xx_raises_transient():
     respx.post(_MESSAGES_URL).mock(return_value=Response(503, text="boom"))
     with pytest.raises(MetaTransientError):
