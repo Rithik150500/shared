@@ -255,10 +255,11 @@ class TemplateClient:
         language: str,
         body_variables: list[str],
         header_media_id: str | None = None,
+        header_video_id: str | None = None,
         button_url_variables: list[str] | None = None,
         timeout_seconds: float | None = None,
     ) -> str:
-        """Send a template with optional document header + URL-button variables.
+        """Send a template with optional document/video header + URL-button variables.
 
         Spec §3.9: supports the full new_order shape (body + document header + URL
         button) used by Nowlez templates such as ``nowlez_new_order_v1``. Also
@@ -268,6 +269,9 @@ class TemplateClient:
         - ``header_media_id`` -- optional Meta media_id from a prior upload_media
           call. If provided, a ``type=header`` component is included with a
           ``document`` parameter.
+        - ``header_video_id`` -- optional Meta media_id for a VIDEO header. Mutually
+          exclusive with ``header_media_id``. Use for templates such as
+          ``munshi_welcome_video_v1`` which carry a video header component.
         - ``body_variables`` -- positional substitutions for the ``{{N}}`` body
           placeholders. Always emitted (even if empty, you'll get an empty body
           component with no parameters which Meta accepts for body-less templates).
@@ -280,12 +284,17 @@ class TemplateClient:
 
         Returns the wamid on success.
         """
+        if header_media_id and header_video_id:
+            raise ValueError("pass only one of header_media_id / header_video_id")
+
         if _check_fallback_to_text():
             from whatsapp_delivery.meta_client import MetaClient
             inline = " ".join(_sanitize_var(v) for v in body_variables)
             extras: list[str] = []
             if header_media_id:
                 extras.append(f"PDF: {header_media_id}")
+            if header_video_id:
+                extras.append(f"video: {header_video_id}")
             if button_url_variables:
                 extras.append("link: " + "/".join(_sanitize_var(v) for v in button_url_variables))
             suffix = f" ({'; '.join(extras)})" if extras else ""
@@ -300,6 +309,11 @@ class TemplateClient:
             components.append({
                 "type": "header",
                 "parameters": [{"type": "document", "document": {"id": header_media_id}}],
+            })
+        elif header_video_id:
+            components.append({
+                "type": "header",
+                "parameters": [{"type": "video", "video": {"id": header_video_id}}],
             })
 
         components.append({
