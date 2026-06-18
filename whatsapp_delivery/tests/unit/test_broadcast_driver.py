@@ -801,28 +801,19 @@ class TestSendLoop:
 class TestCLI:
     def test_main_dry_run_no_yes_succeeds(self, monkeypatch, tmp_path):
         """main() in dry-run mode must not crash (no xlsx reads, no network)."""
-        import pandas as pd
+        from openpyxl import Workbook
 
         from whatsapp_delivery.tools.broadcast_send import main
 
         # Write a minimal xlsx so _load_rows can read it
         xlsx_path = tmp_path / "broadcast.xlsx"
-        df = pd.DataFrame(
-            [
-                {
-                    "WA_Digits": "91001",
-                    "Name (clean)": "Alice",
-                    "Tier label": "T1 Premium",
-                },
-                {
-                    "WA_Digits": "91002",
-                    "Name (clean)": "Bob",
-                    "Tier label": "T2 Standard",
-                },
-            ]
-        )
-        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="Broadcast List", index=False)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Broadcast List"
+        ws.append(["WA_Digits", "Name (clean)", "Tier label"])
+        ws.append(["91001", "Alice", "T1 Premium"])
+        ws.append(["91002", "Bob", "T2 Standard"])
+        wb.save(xlsx_path)
 
         monkeypatch.setenv("META_PHONE_NUMBER_ID", "TEST_PHONE_ID")
         monkeypatch.setenv("META_ACCESS_TOKEN", "TEST_TOKEN")
@@ -863,6 +854,107 @@ class TestCLI:
             ]
         )
         assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# _load_rows — openpyxl-based loader unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestLoadRows:
+    """Tests for _load_rows: reads 'Broadcast List' sheet via openpyxl.
+
+    Verifies:
+    - blank name cell → "" (NOT "nan")
+    - integer phone → clean digit string (no ".0" suffix)
+    - dict keys match the header row exactly
+    """
+
+    def _write_xlsx(self, path, rows: list[list]) -> None:
+        """Write a workbook with a 'Broadcast List' sheet from header + data rows."""
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Broadcast List"
+        for r in rows:
+            ws.append(r)
+        wb.save(path)
+
+    def test_blank_name_cell_returns_empty_string(self, tmp_path):
+        """A blank Name (clean) cell must come back as '' (not 'nan' or 'None')."""
+        from whatsapp_delivery.tools.broadcast_send import _load_rows
+
+        xlsx_path = tmp_path / "test.xlsx"
+        self._write_xlsx(xlsx_path, [
+            ["WA_Digits", "Name (clean)", "Tier label"],
+            [916001141186, None, "T1 Premium"],  # blank name
+            ["916002000000", "Alice", "T2 Standard"],
+        ])
+
+        rows = _load_rows(str(xlsx_path))
+
+        assert len(rows) == 2
+        assert rows[0]["Name (clean)"] == "", (
+            f"Blank cell must be '' but got {rows[0]['Name (clean)']!r}"
+        )
+
+    def test_integer_phone_no_dot_zero(self, tmp_path):
+        """An integer-valued phone cell (e.g. 916001141186) must stringify to '916001141186'."""
+        from whatsapp_delivery.tools.broadcast_send import _load_rows
+
+        xlsx_path = tmp_path / "test.xlsx"
+        self._write_xlsx(xlsx_path, [
+            ["WA_Digits", "Name (clean)", "Tier label"],
+            [916001141186, "Rahul", "T1 Premium"],
+        ])
+
+        rows = _load_rows(str(xlsx_path))
+
+        assert len(rows) == 1
+        phone = rows[0]["WA_Digits"]
+        assert phone == "916001141186", (
+            f"Expected '916001141186' but got {phone!r} — openpyxl int must not gain '.0'"
+        )
+        assert "." not in phone, "Phone string must not contain a decimal point"
+
+    def test_dict_keys_match_headers(self, tmp_path):
+        """Keys of each returned dict must exactly match the header row."""
+        from whatsapp_delivery.tools.broadcast_send import _load_rows
+
+        xlsx_path = tmp_path / "test.xlsx"
+        headers = ["WA_Digits", "Name (clean)", "Tier label"]
+        self._write_xlsx(xlsx_path, [
+            headers,
+            ["91001", "Bob", "T1 Premium"],
+        ])
+
+        rows = _load_rows(str(xlsx_path))
+
+        assert len(rows) == 1
+        assert set(rows[0].keys()) == set(headers)
+
+    def test_blank_name_and_integer_phone_together(self, tmp_path):
+        """Combined: integer phone + blank name + normal row — all three columns correct."""
+        from whatsapp_delivery.tools.broadcast_send import _load_rows
+
+        xlsx_path = tmp_path / "test.xlsx"
+        self._write_xlsx(xlsx_path, [
+            ["WA_Digits", "Name (clean)", "Tier label"],
+            [916001141186, None, "T1 Alpha"],   # integer phone + blank name
+            ["916002000000", "Alice", "T2 Beta"],  # string phone + string name
+        ])
+
+        rows = _load_rows(str(xlsx_path))
+
+        assert len(rows) == 2
+        # Row 0: integer phone → clean string, blank name → ""
+        assert rows[0]["WA_Digits"] == "916001141186"
+        assert rows[0]["Name (clean)"] == ""
+        assert rows[0]["Tier label"] == "T1 Alpha"
+        # Row 1: string values pass through unchanged
+        assert rows[1]["WA_Digits"] == "916002000000"
+        assert rows[1]["Name (clean)"] == "Alice"
 
 
 # ---------------------------------------------------------------------------

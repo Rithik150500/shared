@@ -153,19 +153,34 @@ def select_recipients(
 def _load_rows(xlsx_path: str) -> list[dict]:
     """Load the broadcast list from an xlsx file.
 
-    Reads sheet ``"Broadcast List"`` and returns ``list[dict]`` via
-    ``DataFrame.to_dict("records")``. Kept thin so the send loop can be
-    tested with synthetic row lists without touching the filesystem.
+    Reads sheet ``"Broadcast List"`` using openpyxl (pure-Python, no pandas
+    dependency) and returns ``list[dict]`` with the header row as keys.
+    Every cell is coerced to ``str``; blank/None cells become ``""``.
+    openpyxl reads integer-valued numeric cells as ``int`` (so a phone like
+    ``916001141186`` comes back as the int ``916001141186``, which ``str()``
+    turns into ``"916001141186"`` with no ``.0`` suffix — same result as
+    pandas ``dtype=str``).  Kept thin so the send loop can be tested with
+    synthetic row lists without touching the filesystem.
     """
-    import pandas as pd  # lazy import — not needed in pure-function tests
+    from openpyxl import load_workbook  # lazy import — openpyxl; not needed in pure-function tests
 
-    # dtype=str + keep_default_na=False: read every cell as a string and keep
-    # blank cells as "" rather than float NaN, so phone digits never pick up a
-    # ".0" float suffix and blank names don't become the literal "nan".
-    df = pd.read_excel(
-        xlsx_path, sheet_name="Broadcast List", dtype=str, keep_default_na=False,
-    )
-    return df.to_dict("records")
+    wb = load_workbook(xlsx_path, read_only=True, data_only=True)
+    try:
+        ws = wb["Broadcast List"]
+        it = ws.iter_rows(values_only=True)
+        header = ["" if c is None else str(c) for c in next(it)]
+        rows = []
+        for raw in it:
+            row = {}
+            for i, h in enumerate(header):
+                if not h:
+                    continue
+                v = raw[i] if i < len(raw) else None
+                row[h] = "" if v is None else str(v)
+            rows.append(row)
+        return rows
+    finally:
+        wb.close()
 
 
 # ---------------------------------------------------------------------------
