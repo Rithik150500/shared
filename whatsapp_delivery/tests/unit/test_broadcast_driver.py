@@ -1074,6 +1074,39 @@ class TestAutoPauseGuard:
         send_mock.assert_not_called()
         upload_mock.assert_not_called()
 
+    def test_guard_excludes_marketing_cap_131049_from_fail_rate(
+        self, monkeypatch, sqlite_session_factory
+    ):
+        """131049 (marketing-cap) is transient/retryable, excluded from the
+        fail-rate — a campaign whose only failures are marketing-capped is NOT
+        paused. Without the exclusion this would be 11/50 = 0.22 > 0.10 → trip.
+        """
+        from whatsapp_delivery.tools.broadcast_send import run
+
+        campaign = "guard_marketing_cap"
+        # 39 sent + 11 failed(131049) → attempted=50; non-transient fails = 0
+        _seed_ledger(
+            sqlite_session_factory,
+            campaign=campaign,
+            n_sent=39,
+            n_failed=11,
+            fail_error_code=131049,
+        )
+
+        args = self._make_guard_args(campaign=campaign, min_sample=10, max_fail_rate=0.10)
+        rows = [_row(f"9500{i}") for i in range(2)]
+
+        send_mock = MagicMock(return_value="wamid.mc")
+        self._patch_get_session(monkeypatch, sqlite_session_factory)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        with patch("whatsapp_delivery.tools.broadcast_send.TemplateClient") as MockTC:
+            MockTC.return_value.send_template_with_components = send_mock
+            result = run(args, rows=rows)
+
+        assert result == 0
+        assert send_mock.call_count == 2
+
     def test_guard_inactive_below_min_sample(
         self, monkeypatch, sqlite_session_factory
     ):

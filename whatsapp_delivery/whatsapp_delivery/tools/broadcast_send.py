@@ -230,14 +230,21 @@ def run(args: Any, *, rows: list[dict] | None = None) -> int:  # noqa: C901 (com
         # are bad, refuses to start regardless of --dry-run or --yes.
         stats = summarize(s, campaign, tier=tier)
         if stats["attempted"] >= min_sample:
-            fail_rate = stats["failed"] / stats["attempted"]
+            # 131049 (marketing-cap) is a transient per-user cap — the recipient
+            # hit Meta's cross-business daily marketing limit and is retryable
+            # next day. It is NOT a quality signal, so exclude it from the
+            # fail-rate; genuine quality failures (blocks/spam/undeliverable)
+            # still count. Undeliverable also has its own undel_rate gate.
+            non_transient_failed = stats["failed"] - stats["marketing_capped"]
+            fail_rate = non_transient_failed / stats["attempted"]
             undel_rate = stats["undeliverable"] / stats["attempted"]
             if fail_rate > max_fail_rate or undel_rate > max_undeliverable:
                 log.error(
-                    "auto-pause: campaign=%s fail_rate=%.2f undel_rate=%.2f "
-                    "attempted=%d — refusing to send",
+                    "auto-pause: campaign=%s fail_rate=%.2f (excl %d marketing-cap) "
+                    "undel_rate=%.2f attempted=%d — refusing to send",
                     campaign,
                     fail_rate,
+                    stats["marketing_capped"],
                     undel_rate,
                     stats["attempted"],
                 )
