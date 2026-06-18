@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -150,3 +150,9 @@ def update_nowlez_preferences(
     )
     session.commit()
     return result.rowcount
+
+
+def count_messages_since(session: Session, since: datetime) -> int:
+    return session.execute(
+        select(func.count()).select_from(MessageLog).where(MessageLog.received_at >= since)
+    ).scalar_one()

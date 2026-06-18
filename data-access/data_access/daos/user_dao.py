@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from datetime import datetime
+
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import User, UserMunshi, UserNowlez
@@ -82,3 +84,29 @@ def has_munshi_extension(session: Session, user_id: uuid.UUID) -> bool:
 def has_nowlez_extension(session: Session, user_id: uuid.UUID) -> bool:
     """True iff the user has a row in users_nowlez (i.e. is a Nowlez user)."""
     return session.get(UserNowlez, user_id) is not None
+
+
+def count_munshi_users(session: Session) -> int:
+    return session.execute(select(func.count()).select_from(UserMunshi)).scalar_one()
+
+
+def count_munshi_onboarded(session: Session) -> int:
+    return session.execute(
+        select(func.count()).select_from(UserMunshi).where(UserMunshi.onboarded_at.is_not(None))
+    ).scalar_one()
+
+
+def count_munshi_active_since(session: Session, since: datetime) -> int:
+    return session.execute(
+        select(func.count()).select_from(UserMunshi).where(UserMunshi.last_message_at >= since)
+    ).scalar_one()
+
+
+def list_munshi_users(
+    session: Session, *, limit: int = 50, offset: int = 0, search: str | None = None
+) -> list[tuple[User, UserMunshi]]:
+    stmt = select(User, UserMunshi).join(UserMunshi, UserMunshi.user_id == User.id)
+    if search:
+        stmt = stmt.where(User.phone.ilike(f"%{search}%"))
+    stmt = stmt.order_by(UserMunshi.created_at.desc()).limit(limit).offset(offset)
+    return [(row[0], row[1]) for row in session.execute(stmt).all()]
