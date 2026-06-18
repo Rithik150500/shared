@@ -139,11 +139,12 @@ def select_recipients(
         # Skip already in ledger
         if wa_digits in already_done:
             continue
-        # Resolve name
+        # Resolve name. Guard against pandas reading a blank cell as NaN
+        # (a *truthy* float whose str() is the literal "nan"), so generic-greeting
+        # rows fall back to the friendly default instead of "Hi nan,".
         raw_name = row.get("Name (clean)")
-        if raw_name and str(raw_name).strip():
-            name = str(raw_name).strip()
-        else:
+        name = "" if raw_name is None else str(raw_name).strip()
+        if not name or name.lower() == "nan":
             name = name_fallback
         results.append(Recipient(wa_digits=wa_digits, name=name))
     return results
@@ -158,7 +159,12 @@ def _load_rows(xlsx_path: str) -> list[dict]:
     """
     import pandas as pd  # lazy import — not needed in pure-function tests
 
-    df = pd.read_excel(xlsx_path, sheet_name="Broadcast List")
+    # dtype=str + keep_default_na=False: read every cell as a string and keep
+    # blank cells as "" rather than float NaN, so phone digits never pick up a
+    # ".0" float suffix and blank names don't become the literal "nan".
+    df = pd.read_excel(
+        xlsx_path, sheet_name="Broadcast List", dtype=str, keep_default_na=False,
+    )
     return df.to_dict("records")
 
 

@@ -180,6 +180,19 @@ class TestSelectRecipients:
         )
         assert result[0].name == "there"
 
+    def test_pandas_nan_name_falls_back(self):
+        # pandas reads a blank cell as float('nan'), which is TRUTHY and whose
+        # str() is the literal "nan" — must NOT become "Hi nan,".
+        rows = [
+            {"WA_Digits": "91001", "Name (clean)": float("nan"), "Tier label": "T2 X"},
+            {"WA_Digits": "91002", "Name (clean)": "nan", "Tier label": "T2 X"},
+            {"WA_Digits": "91003", "Name (clean)": "NaN", "Tier label": "T2 X"},
+        ]
+        result = select_recipients(
+            rows, tier="T2", suppressed=set(), already_done=set(), limit=100
+        )
+        assert [r.name for r in result] == ["there", "there", "there"]
+
     def test_clean_name_used_when_present(self):
         rows = [_row("91001", name="Rahul Kumar")]
         result = select_recipients(
