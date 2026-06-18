@@ -97,6 +97,7 @@ def count_munshi_onboarded(session: Session) -> int:
 
 
 def count_munshi_active_since(session: Session, since: datetime) -> int:
+    """Count Munshi users whose last_message_at >= since (rows with NULL last_message_at are excluded)."""
     return session.execute(
         select(func.count()).select_from(UserMunshi).where(UserMunshi.last_message_at >= since)
     ).scalar_one()
@@ -109,4 +110,4 @@ def list_munshi_users(
     if search:
         stmt = stmt.where(User.phone.ilike(f"%{search}%"))
     stmt = stmt.order_by(UserMunshi.created_at.desc()).limit(limit).offset(offset)
-    return [(row[0], row[1]) for row in session.execute(stmt).all()]
+    return list(session.execute(stmt).tuples().all())
