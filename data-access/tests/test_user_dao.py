@@ -33,6 +33,20 @@ def test_ensure_munshi_extension_idempotent(postgresql_session):
     assert rows == 1
 
 
+def test_ensure_munshi_extension_sets_billing_anniversary(postgresql_session):
+    """billing_anniversary_date is NOT NULL on prod (sub-project E); the created
+    extension must populate it (anchored to today's IST signup date), or a brand
+    new user's INSERT violates the constraint and onboarding 500s."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    u, _ = user_dao.get_or_create_by_phone(postgresql_session, phone="+919876543299", locale="en")
+    ext = user_dao.ensure_munshi_extension(postgresql_session, u.id)
+    assert ext.billing_anniversary_date is not None
+    today_ist = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Kolkata")).date()
+    assert ext.billing_anniversary_date == today_ist
+
+
 def test_ensure_nowlez_extension_requires_name(postgresql_session):
     u, _ = user_dao.get_or_create_by_phone(postgresql_session, phone="+919876543210", locale="en")
     user_dao.ensure_nowlez_extension(postgresql_session, u.id, name="Adrika Singh")

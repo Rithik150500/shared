@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from datetime import datetime
 
@@ -8,6 +10,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import User, UserMunshi, UserNowlez
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 def get_or_create_by_phone(
@@ -37,7 +41,15 @@ def ensure_munshi_extension(session: Session, user_id: uuid.UUID) -> UserMunshi:
     user = session.get(User, user_id)
     if user is None or user.phone is None:
         raise ValueError("ensure_munshi_extension requires user with non-null phone")
-    ext = UserMunshi(user_id=user_id)
+    # billing_anniversary_date is NOT NULL on Postgres (sub-project E billing).
+    # Anchor a new user's billing anniversary to their signup date (IST), matching
+    # the migration backfill (created_at::date) and case_billing's creation path.
+    # Without this, the INSERT violates the NOT NULL constraint in prod and every
+    # brand-new user (e.g. a broadcast recipient) fails to onboard.
+    ext = UserMunshi(
+        user_id=user_id,
+        billing_anniversary_date=datetime.now(timezone.utc).astimezone(_IST).date(),
+    )
     session.add(ext)
     session.flush()
     return ext
