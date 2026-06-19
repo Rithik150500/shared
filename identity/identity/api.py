@@ -16,7 +16,7 @@ from .delivery.router import deliver_otp
 from .errors import InvalidCredentials, PasswordNotSet
 from .otp.issuer import generate_otp_code, hash_otp_code
 from .otp.rate_limiter import check_otp_rate_limit
-from .otp.verifier import verify_otp as _verify_otp
+from .otp.verifier import verify_otp as _verify_otp, verify_otp_atomic as _verify_otp_atomic
 from .password.hasher import BOGUS_HASH, hash_password, needs_rehash, verify_password
 from .password.validator import validate_password_strength
 from .session.jwt import decode_access_token, encode_access_token
@@ -71,6 +71,52 @@ def start_phone_login(
     return {"otp_id": str(o.id), "channel": channel}
 
 
+def _mint_login_response(
+    session: Session,
+    *,
+    user,
+    brand: str,
+    name: str | None = None,
+    user_agent: str | None = None,
+    ip_address: str | None = None,
+    was_created: bool = False,
+    event_type: str | None = None,
+    audit_metadata: dict | None = None,
+) -> dict:
+    """Single session-mint path shared by every login method (spec §3.2).
+
+    Ensures the brand extension, touches last_login, issues refresh + access,
+    writes an audit event, and returns the invariant token dict. brand in
+    {'munshi','nowlez'}.
+    """
+    if brand == "munshi":
+        user_dao.ensure_munshi_extension(session, user.id)
+    elif brand == "nowlez":
+        user_dao.ensure_nowlez_extension(session, user.id, name=name or "")
+
+    user_dao.touch_last_login(session, user.id)
+    refresh_raw, _ = issue_refresh_token(
+        session, user_id=user.id, user_agent=user_agent, ip_address=ip_address
+    )
+    access = encode_access_token(user.id)
+
+    if event_type is None:
+        event_type = "user.created" if was_created else "user.login.otp"
+    audit_dao.log_event(
+        session,
+        event_type=event_type,
+        user_id=user.id,
+        source=brand,
+        metadata=audit_metadata or {},
+        ip_address=ip_address,
+    )
+    return {
+        "access_token": access,
+        "refresh_token": refresh_raw,
+        "user": {"id": str(user.id), "phone": user.phone, "locale": user.locale},
+    }
+
+
 def verify_otp_and_login(
     session: Session,
     *,
@@ -90,37 +136,20 @@ def verify_otp_and_login(
     """
     if isinstance(otp_id, str):
         otp_id = uuid.UUID(otp_id)
-    _verify_otp(session, otp_id=otp_id, code=code)
-
     o = otp_dao.get_by_id(session, otp_id)
-    assert o is not None  # _verify_otp would have raised otherwise
+    _verify_otp_atomic(session, otp_id=otp_id, code=code)
 
     user, was_created = user_dao.get_or_create_by_phone(session, phone=o.phone)
-    if brand == "munshi":
-        user_dao.ensure_munshi_extension(session, user.id)
-    elif brand == "nowlez":
-        user_dao.ensure_nowlez_extension(session, user.id, name=name or "")
-    # other brands: ignore (caller's responsibility)
-
-    user_dao.touch_last_login(session, user.id)
-    refresh_raw, _ = issue_refresh_token(
-        session, user_id=user.id, user_agent=user_agent, ip_address=ip_address
-    )
-    access = encode_access_token(user.id)
-
-    audit_dao.log_event(
+    return _mint_login_response(
         session,
-        event_type="user.created" if was_created else "user.login.otp",
-        user_id=user.id,
-        source=brand,
-        metadata={"channel": o.channel},
+        user=user,
+        brand=brand,
+        name=name,
+        user_agent=user_agent,
         ip_address=ip_address,
+        was_created=was_created,
+        audit_metadata={"channel": o.channel},
     )
-    return {
-        "access_token": access,
-        "refresh_token": refresh_raw,
-        "user": {"id": str(user.id), "phone": user.phone, "locale": user.locale},
-    }
 
 
 def login_with_password(
