@@ -195,3 +195,57 @@ def test_consume_by_id_expired_confirmed_returns_none(db_session):
         login_request_dao.consume_by_id(db_session, login_id=lr.id, poll_bind_hash="pbh")
         is None
     )
+
+
+def test_mark_expired_sets_status(db_session):
+    lr = login_request_dao.create_web2bot(
+        db_session, token_hash="hx1", brand="nowlez", poll_bind_hash="p", ttl_seconds=300
+    )
+    login_request_dao.mark_expired(db_session, lr.id)
+    assert login_request_dao.get_by_id(db_session, lr.id).status == "expired"
+
+
+def test_count_by_ip_within_counts_recent(db_session):
+    for i in range(3):
+        login_request_dao.create_web2bot(
+            db_session,
+            token_hash=f"hip{i}",
+            brand="nowlez",
+            poll_bind_hash="p",
+            ttl_seconds=300,
+            ip_address="203.0.113.9",
+        )
+    assert login_request_dao.count_by_ip_within(db_session, ip_address="203.0.113.9", minutes=60) == 3
+    assert login_request_dao.count_by_ip_within(db_session, ip_address="203.0.113.99", minutes=60) == 0
+
+
+def test_cleanup_expired_deletes_old_consumed_and_expired(db_session):
+    import uuid as _uuid
+    from datetime import datetime, timedelta, timezone
+
+    from data_access.models import LoginRequest
+
+    old = datetime.now(timezone.utc) - timedelta(hours=48)
+    stale = LoginRequest(
+        token_hash="hcl1",
+        direction="web2bot",
+        status="consumed",
+        brand="nowlez",
+        expires_at=old,
+        created_at=old,
+        consumed_at=old,
+    )
+    db_session.add(stale)
+    db_session.flush()
+    n = login_request_dao.cleanup_expired(db_session, older_than_hours=24)
+    assert n >= 1
+    assert login_request_dao.get_by_id(db_session, stale.id) is None
+
+
+def test_cleanup_expired_keeps_recent(db_session):
+    lr = login_request_dao.create_web2bot(
+        db_session, token_hash="hcl2", brand="nowlez", poll_bind_hash="p", ttl_seconds=300
+    )
+    login_request_dao.cleanup_expired(db_session, older_than_hours=24)
+    # A fresh, still-valid pending row must survive.
+    assert login_request_dao.get_by_id(db_session, lr.id) is not None

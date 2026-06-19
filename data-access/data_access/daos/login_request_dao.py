@@ -174,3 +174,39 @@ def consume_by_token(
         select(LoginRequest).where(LoginRequest.token_hash == token_hash)
     ).scalar_one_or_none()
     return row.user_id if row is not None else None
+
+
+def mark_expired(session: Session, login_id: uuid.UUID) -> None:
+    session.execute(
+        update(LoginRequest)
+        .where(LoginRequest.id == login_id)
+        .values(status="expired")
+    )
+    session.flush()
+
+
+def count_by_ip_within(session: Session, *, ip_address: str, minutes: int) -> int:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    return session.execute(
+        select(func.count())
+        .select_from(LoginRequest)
+        .where(
+            LoginRequest.ip_address == ip_address,
+            LoginRequest.created_at > cutoff,
+        )
+    ).scalar_one()
+
+
+def cleanup_expired(session: Session, older_than_hours: int = 24) -> int:
+    """Hard-delete consumed/expired login_requests older than older_than_hours
+    (the >1h grace lives in the caller's choice of older_than_hours so in-flight
+    polls still resolve). Returns rowcount."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+    result = session.execute(
+        delete(LoginRequest).where(
+            LoginRequest.status.in_(("consumed", "expired")),
+            LoginRequest.created_at < cutoff,
+        )
+    )
+    session.flush()
+    return result.rowcount or 0
