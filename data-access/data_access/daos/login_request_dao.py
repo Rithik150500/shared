@@ -116,3 +116,61 @@ def confirm(
     )
     session.flush()
     return result.rowcount
+
+
+def consume_by_id(
+    session: Session,
+    *,
+    login_id: uuid.UUID,
+    poll_bind_hash: str,
+) -> uuid.UUID | None:
+    """Atomic confirmed->consumed for the web2bot status-poll path. Gated on a
+    matching poll_bind_hash. Commits immediately (mirror claim_message) so a
+    later mint failure cannot un-consume the nonce. Returns the user_id on the
+    winning call, None on zero rows (unknown / expired / already-consumed /
+    wrong bind / not-confirmed)."""
+    result = session.execute(
+        update(LoginRequest)
+        .where(
+            LoginRequest.id == login_id,
+            LoginRequest.status == "confirmed",
+            LoginRequest.expires_at > func.now(),
+            LoginRequest.poll_bind_hash == poll_bind_hash,
+        )
+        .values(status="consumed", consumed_at=func.now())
+    )
+    session.commit()
+    session.expire_all()
+    if result.rowcount == 0:
+        return None
+    row = session.execute(
+        select(LoginRequest).where(LoginRequest.id == login_id)
+    ).scalar_one_or_none()
+    return row.user_id if row is not None else None
+
+
+def consume_by_token(
+    session: Session,
+    *,
+    token_hash: str,
+) -> uuid.UUID | None:
+    """Atomic confirmed->consumed for the bot2web landing path (raw nonce from
+    the #fragment, hashed by the caller). Commits immediately. Returns user_id
+    on the winning call, None on zero rows."""
+    result = session.execute(
+        update(LoginRequest)
+        .where(
+            LoginRequest.token_hash == token_hash,
+            LoginRequest.status == "confirmed",
+            LoginRequest.expires_at > func.now(),
+        )
+        .values(status="consumed", consumed_at=func.now())
+    )
+    session.commit()
+    session.expire_all()
+    if result.rowcount == 0:
+        return None
+    row = session.execute(
+        select(LoginRequest).where(LoginRequest.token_hash == token_hash)
+    ).scalar_one_or_none()
+    return row.user_id if row is not None else None

@@ -114,3 +114,57 @@ def test_confirm_rejects_expired(db_session):
 def test_confirm_unknown_token_returns_zero(db_session):
     u = _make_user(db_session, phone="+919876500013")
     assert login_request_dao.confirm(db_session, token_hash="nope", user_id=u.id, phone=u.phone) == 0
+
+
+def test_consume_by_id_happy_returns_user_id(db_session):
+    u = _make_user(db_session, phone="+919876500020")
+    lr = login_request_dao.create_web2bot(
+        db_session, token_hash="hk1", brand="nowlez", poll_bind_hash="pbh-ok", ttl_seconds=300
+    )
+    login_request_dao.confirm(db_session, token_hash="hk1", user_id=u.id, phone=u.phone)
+    got = login_request_dao.consume_by_id(db_session, login_id=lr.id, poll_bind_hash="pbh-ok")
+    assert str(got) == str(u.id)
+    row = login_request_dao.get_by_id(db_session, lr.id)
+    assert row.status == "consumed"
+    assert row.consumed_at is not None
+
+
+def test_consume_by_id_replay_returns_none(db_session):
+    u = _make_user(db_session, phone="+919876500021")
+    lr = login_request_dao.create_web2bot(
+        db_session, token_hash="hk2", brand="nowlez", poll_bind_hash="pbh-ok", ttl_seconds=300
+    )
+    login_request_dao.confirm(db_session, token_hash="hk2", user_id=u.id, phone=u.phone)
+    assert str(login_request_dao.consume_by_id(db_session, login_id=lr.id, poll_bind_hash="pbh-ok")) == str(u.id)
+    # Replay: already consumed -> None.
+    assert login_request_dao.consume_by_id(db_session, login_id=lr.id, poll_bind_hash="pbh-ok") is None
+
+
+def test_consume_by_id_wrong_poll_bind_returns_none(db_session):
+    u = _make_user(db_session, phone="+919876500022")
+    lr = login_request_dao.create_web2bot(
+        db_session, token_hash="hk3", brand="nowlez", poll_bind_hash="pbh-real", ttl_seconds=300
+    )
+    login_request_dao.confirm(db_session, token_hash="hk3", user_id=u.id, phone=u.phone)
+    assert login_request_dao.consume_by_id(db_session, login_id=lr.id, poll_bind_hash="pbh-WRONG") is None
+    # Still confirmed (not consumed) because the bind didn't match.
+    assert login_request_dao.get_by_id(db_session, lr.id).status == "confirmed"
+
+
+def test_consume_by_id_not_confirmed_returns_none(db_session):
+    lr = login_request_dao.create_web2bot(
+        db_session, token_hash="hk4", brand="nowlez", poll_bind_hash="pbh", ttl_seconds=300
+    )
+    # Still pending (never confirmed) -> cannot consume.
+    assert login_request_dao.consume_by_id(db_session, login_id=lr.id, poll_bind_hash="pbh") is None
+
+
+def test_consume_by_token_happy_then_replay(db_session):
+    u = _make_user(db_session, phone="+919876500023")
+    login_request_dao.create_bot2web(
+        db_session, token_hash="ht1", brand="munshi", user_id=u.id, phone=u.phone, ttl_seconds=120
+    )
+    # bot2web rows are flipped to confirmed by the handler after a successful send.
+    login_request_dao.confirm(db_session, token_hash="ht1", user_id=u.id, phone=u.phone)
+    assert str(login_request_dao.consume_by_token(db_session, token_hash="ht1")) == str(u.id)
+    assert login_request_dao.consume_by_token(db_session, token_hash="ht1") is None
