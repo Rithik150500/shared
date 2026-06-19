@@ -6,12 +6,16 @@ change without breaking consumers.
 """
 from __future__ import annotations
 
+import logging
 import secrets
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy.orm import Session
 
 from data_access.daos import audit_dao, email_otp_dao, login_request_dao, otp_dao, session_dao, user_dao
+from data_access.daos.user_dao import MergeUnsafeError
 from .config import settings
 
 from .delivery.router import deliver_email_otp, deliver_otp
@@ -540,6 +544,42 @@ def verify_email_otp_and_login(
     raise AccountLinkStepUpRequired("verify by phone to link this email")
 
 
+def link_email_to_phone_account(
+    session: Session,
+    *,
+    phone_user_id: uuid.UUID,
+    email_user_id: uuid.UUID,
+) -> bool:
+    """D4 auto-merge, invoked ONLY when one flow proved control of BOTH
+    identifiers. Survivor = older created_at. Refuses (and audits
+    account.merge_conflict) if the two rows own DISTINCT phones — that needs
+    human resolution. Returns True on merge, False on refusal/no-op."""
+    a = user_dao.get_by_id(session, phone_user_id)
+    b = user_dao.get_by_id(session, email_user_id)
+    if a is None or b is None or a.id == b.id:
+        return False
+    if a.phone is not None and b.phone is not None and a.phone != b.phone:
+        audit_dao.log_event(
+            session, event_type="account.merge_conflict", source="identity",
+            user_id=a.id, metadata={"other_user_id": str(b.id)},
+        )
+        return False
+    survivor, absorbed = (a, b) if a.created_at <= b.created_at else (b, a)
+    try:
+        user_dao.merge_users(session, survivor_id=survivor.id, absorbed_id=absorbed.id)
+    except MergeUnsafeError as exc:
+        audit_dao.log_event(
+            session, event_type="account.merge_conflict", source="identity",
+            user_id=survivor.id, metadata={"other_user_id": str(absorbed.id), "reason": str(exc)},
+        )
+        return False
+    audit_dao.log_event(
+        session, event_type="account.merged", source="identity", user_id=survivor.id,
+        metadata={"survivor": str(survivor.id), "absorbed": str(absorbed.id)},
+    )
+    return True
+
+
 __all__ = [
     "start_phone_login",
     "verify_otp_and_login",
@@ -554,4 +594,5 @@ __all__ = [
     "consume_wa_login",
     "start_email_otp",
     "verify_email_otp_and_login",
+    "link_email_to_phone_account",
 ]

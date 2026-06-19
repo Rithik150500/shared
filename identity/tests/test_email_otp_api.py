@@ -170,3 +170,63 @@ def test_d4_mismatched_second_signal_raises_not_mints(db_session):
             db_session, otp_id=o.id, code="424242", brand="nowlez",
             second_signal_user_id=attacker.id,  # mismatched: different user's id
         )
+
+
+# ---------------------------------------------------------------------------
+# P2.14 — link_email_to_phone_account: D4 merge + conflict refusal
+# ---------------------------------------------------------------------------
+
+def test_link_merges_when_both_identifiers_proven(db_session):
+    from data_access.models import AuditLog
+    # phone-only account (older), email-only account (newer) = same human
+    survivor, _ = user_dao.get_or_create_by_phone(db_session, phone="+919800000010")
+    user_dao.ensure_nowlez_extension(db_session, survivor.id, name="Survivor")
+    db_session.flush()
+    absorbed, _ = user_dao.get_or_create_by_email(db_session, email="both@example.com")
+    user_dao.ensure_nowlez_extension(db_session, absorbed.id, name="Absorbed")
+    db_session.flush()
+    out = identity_api.link_email_to_phone_account(
+        db_session, phone_user_id=survivor.id, email_user_id=absorbed.id
+    )
+    assert out is True
+    assert user_dao.get_by_id(db_session, absorbed.id) is None
+    assert "account.merged" in [a.event_type for a in db_session.query(AuditLog).all()]
+
+
+def test_link_refuses_merge_when_both_own_distinct_phones(db_session):
+    from data_access.models import AuditLog
+    a, _ = user_dao.get_or_create_by_phone(db_session, phone="+919800000020")
+    b, _ = user_dao.get_or_create_by_phone(db_session, phone="+919800000021")
+    db_session.flush()
+    out = identity_api.link_email_to_phone_account(
+        db_session, phone_user_id=a.id, email_user_id=b.id
+    )
+    assert out is False
+    # both rows survive; conflict audited
+    assert user_dao.get_by_id(db_session, a.id) is not None
+    assert user_dao.get_by_id(db_session, b.id) is not None
+    assert "account.merge_conflict" in [x.event_type for x in db_session.query(AuditLog).all()]
+
+
+def test_link_catches_merge_unsafe_error_and_returns_false(db_session):
+    """MergeUnsafeError (absorbed owns munshi/cases) must NOT propagate —
+    link_email_to_phone_account catches it, audits account.merge_conflict, returns False."""
+    from data_access.models import AuditLog, UserMunshi
+    # Older phone account (will be survivor by created_at)
+    survivor, _ = user_dao.get_or_create_by_phone(db_session, phone="+919800000030")
+    user_dao.ensure_nowlez_extension(db_session, survivor.id, name="Survivor2")
+    db_session.flush()
+    # Absorbed: email-only row that has a UserMunshi record → merge_users raises MergeUnsafeError.
+    # Insert UserMunshi directly so we skip ensure_munshi_extension's phone-guard.
+    absorbed, _ = user_dao.get_or_create_by_email(db_session, email="unsafe@example.com")
+    user_dao.ensure_nowlez_extension(db_session, absorbed.id, name="Absorbed2")
+    db_session.add(UserMunshi(user_id=absorbed.id))
+    db_session.flush()
+    out = identity_api.link_email_to_phone_account(
+        db_session, phone_user_id=survivor.id, email_user_id=absorbed.id
+    )
+    assert out is False
+    events = [a.event_type for a in db_session.query(AuditLog).all()]
+    assert "account.merge_conflict" in events
+    # absorbed row MUST still exist (no cascade destroy)
+    assert user_dao.get_by_id(db_session, absorbed.id) is not None
