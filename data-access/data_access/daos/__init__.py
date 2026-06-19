@@ -3,6 +3,7 @@ from . import (
     broadcast_dao,
     case_dao,
     case_preferences_dao,
+    login_request_dao,
     order_dao,
     otp_dao,
     session_dao,
@@ -18,6 +19,7 @@ __all__ = [
     "broadcast_dao",
     "case_dao",
     "case_preferences_dao",
+    "login_request_dao",
     "order_dao",
     "whatsapp_dao",
 ]
