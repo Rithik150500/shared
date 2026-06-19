@@ -168,7 +168,9 @@ class LoginRequest(Base):
             "brand IN ('munshi', 'nowlez')",
             name="login_requests_brand_check",
         ),
-        Index("login_requests_token_hash_idx", "token_hash"),
+        # token_hash equality lookups are served by the implicit unique index
+        # created by the column's unique=True constraint — a separate index here
+        # would be redundant (double write-amplification on Postgres).
         # Partial index covers confirmed-but-stale rows too (must be swept),
         # not pending-only. Postgres rejects volatile NOW() in index predicates,
         # so the predicate filters on status only.
