@@ -1,5 +1,6 @@
 from . import (
     audit_dao,
+    billing_dao,
     broadcast_dao,
     case_dao,
     case_preferences_dao,
@@ -15,6 +16,7 @@ __all__ = [
     "session_dao",
     "otp_dao",
     "audit_dao",
+    "billing_dao",
     "broadcast_dao",
     "case_dao",
     "case_preferences_dao",

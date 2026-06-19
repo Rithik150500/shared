@@ -156,3 +156,21 @@ def count_messages_since(session: Session, since: datetime) -> int:
     return session.execute(
         select(func.count()).select_from(MessageLog).where(MessageLog.received_at >= since)
     ).scalar_one()
+
+
+def list_deliveries_for_user(session: Session, *, user_id: uuid.UUID, limit: int = 50):
+    """Outbound template sends for a user, newest first (whatsapp_delivery_log)."""
+    stmt = (select(WhatsAppDeliveryLog)
+            .where(WhatsAppDeliveryLog.user_id == user_id)
+            .order_by(WhatsAppDeliveryLog.enqueued_at.desc())
+            .limit(limit))
+    return list(session.execute(stmt).scalars().all())
+
+
+def list_inbound_for_user(session: Session, *, user_id: uuid.UUID, limit: int = 50):
+    """Inbound message receipts (metadata only) for a user, newest first (message_log)."""
+    stmt = (select(MessageLog)
+            .where(MessageLog.user_id == user_id)
+            .order_by(MessageLog.received_at.desc())
+            .limit(limit))
+    return list(session.execute(stmt).scalars().all())
