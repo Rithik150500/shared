@@ -6,11 +6,13 @@ change without breaking consumers.
 """
 from __future__ import annotations
 
+import secrets
 import uuid
 
 from sqlalchemy.orm import Session
 
-from data_access.daos import audit_dao, otp_dao, session_dao, user_dao
+from data_access.daos import audit_dao, login_request_dao, otp_dao, session_dao, user_dao
+from .config import settings
 
 from .delivery.router import deliver_otp
 from .errors import InvalidCredentials, PasswordNotSet
@@ -232,6 +234,97 @@ def set_password(
     )
 
 
+def start_wa_login(
+    session: Session,
+    *,
+    brand: str = "nowlez",
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> dict:
+    """web2bot start. Returns raw nonce + poll_secret (web wrapper sets the
+    poll cookie and builds wa_me_url; identity returns raw values only)."""
+    nonce = secrets.token_urlsafe(settings.WA_LOGIN_NONCE_LENGTH)
+    poll_secret = secrets.token_urlsafe(settings.WA_LOGIN_NONCE_LENGTH)
+    lr = login_request_dao.create_web2bot(
+        session,
+        token_hash=session_dao._hash(nonce),
+        brand=brand,
+        poll_bind_hash=session_dao._hash(poll_secret),
+        ttl_seconds=settings.WA_LOGIN_NONCE_TTL_WEB2BOT_SECONDS,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    audit_dao.log_event(
+        session,
+        event_type="wa_login.started",
+        source="identity" if brand == "nowlez" else brand,
+        metadata={"direction": "web2bot"},
+        ip_address=ip_address,
+    )
+    return {
+        "login_id": str(lr.id),
+        "nonce": nonce,
+        "poll_secret": poll_secret,
+        "expires_at": lr.expires_at.isoformat() if lr.expires_at is not None else "",
+    }
+
+
+def confirm_wa_login(session: Session, *, nonce: str, user, brand: str = "munshi") -> bool:
+    """Bot login_bridge calls this with the proven (already-committed) sender
+    user. Atomic pending->confirmed; branch ONLY on rowcount. Never get_or_create
+    (a web-initiated login must not silently provision a Nowlez account)."""
+    if user is None:
+        # No resolvable user for the proven phone -> diagnostic, fail closed.
+        lr = login_request_dao.get_active_by_token(
+            session, token_hash=session_dao._hash(nonce), statuses=("pending",)
+        )
+        if lr is not None:
+            login_request_dao.mark_expired(session, lr.id)
+        audit_dao.log_event(
+            session, event_type="wa_login.confirm_no_user", source=brand,
+            metadata={"direction": "web2bot"},
+        )
+        return False
+    rc = login_request_dao.confirm(
+        session, token_hash=session_dao._hash(nonce), user_id=user.id, phone=user.phone
+    )
+    if rc == 1:
+        audit_dao.log_event(
+            session, event_type="wa_login.confirmed", source=brand, user_id=user.id,
+            metadata={"direction": "web2bot"},
+        )
+        return True
+    return False
+
+
+def start_wa_login_from_bot(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    brand: str = "munshi",
+    ttl: int | None = None,
+) -> str:
+    """bot2web. Creates a PENDING row (NOT pre-confirmed) and returns the raw
+    nonce; the handler flips pending->confirmed ONLY on a successful wamid so a
+    live undelivered bearer secret never exists."""
+    user = user_dao.get_by_id(session, user_id)
+    phone = user.phone if user is not None else None
+    nonce = secrets.token_urlsafe(settings.WA_LOGIN_NONCE_LENGTH)
+    login_request_dao.create_bot2web(
+        session,
+        token_hash=session_dao._hash(nonce),
+        brand=brand,
+        user_id=user_id,
+        phone=phone,
+        ttl_seconds=ttl or settings.WA_LOGIN_NONCE_TTL_BOT2WEB_SECONDS,
+    )
+    audit_dao.log_event(
+        session, event_type="wa_login.started", source=brand, user_id=user_id,
+        metadata={"direction": "bot2web"},
+    )
+    return nonce
+
+
 __all__ = [
     "start_phone_login",
     "verify_otp_and_login",
@@ -240,4 +333,7 @@ __all__ = [
     "revoke_session",
     "set_password",
     "decode_access_token",
+    "start_wa_login",
+    "confirm_wa_login",
+    "start_wa_login_from_bot",
 ]
