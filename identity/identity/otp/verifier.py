@@ -51,9 +51,9 @@ def verify_otp_atomic(session: Session, *, otp_id: uuid.UUID, code: str) -> None
     """Atomic single-use phone-OTP verify (spec §10).
 
     argon2 verify FIRST; on mismatch decrement_attempts (do NOT burn the code);
-    on match, the atomic otp_dao.mark_used conditional UPDATE is the single
-    source of truth — rowcount==0 means another request already used it / it
-    expired -> OtpAlreadyUsed.
+    on match, the atomic otp_dao.mark_used_atomic conditional UPDATE is the
+    single source of truth — rowcount==0 means another request already used it /
+    it expired -> OtpAlreadyUsed.
     """
     o = otp_dao.get_by_id(session, otp_id)
     if o is None:
@@ -73,11 +73,10 @@ def verify_otp_atomic(session: Session, *, otp_id: uuid.UUID, code: str) -> None
     except a2err.InvalidHash:
         raise OtpInvalid("OTP record corrupted")
 
-    # otp_dao.mark_used in data_access is read-then-write; the atomic guarantee
-    # for phone OTP comes from this conditional re-check + the upcoming
-    # email_otp_dao-style atomic UPDATE migration of otp_dao (Phase 1/4). Here
-    # we re-read under the same session to fail closed on a concurrent burn.
-    fresh = otp_dao.get_by_id(session, otp_id)
-    if fresh is None or fresh.used_at is not None:
+    # Single-use guarantee: a SINGLE atomic conditional UPDATE
+    # (used_at IS NULL AND not expired) is the source of truth — rowcount==0
+    # means another concurrent request already consumed it (or it expired).
+    # No read-then-write TOCTOU window. Mirrors the login_request/email_otp
+    # atomic consume primitives (spec §10).
+    if otp_dao.mark_used_atomic(session, otp_id) == 0:
         raise OtpAlreadyUsed("OTP has already been used")
-    otp_dao.mark_used(session, otp_id)

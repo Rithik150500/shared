@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from ..models import OtpCode
@@ -73,6 +73,29 @@ def mark_used(session: Session, otp_id: uuid.UUID) -> None:
         return
     o.used_at = datetime.now(timezone.utc)
     session.flush()
+
+
+def mark_used_atomic(session: Session, otp_id: uuid.UUID) -> int:
+    """ATOMIC single-use mark (spec §10). Returns rowcount (1 = this call marked
+    it used; 0 = already-used / expired). Unlike ``mark_used`` (read-then-write,
+    retained for the legacy verify path) this is a single conditional UPDATE so
+    two concurrent verifies cannot both consume the same phone OTP. Mirrors
+    ``email_otp_dao.mark_used`` / ``login_request_dao.consume_*``."""
+    result = session.execute(
+        update(OtpCode)
+        .where(
+            OtpCode.id == otp_id,
+            OtpCode.used_at.is_(None),
+            OtpCode.expires_at > func.now(),
+        )
+        .values(used_at=func.now())
+    )
+    session.flush()
+    # Expire the cached ORM instance so a subsequent get_by_id re-reads from DB.
+    cached = session.identity_map.get((OtpCode, (otp_id,), None))
+    if cached is not None:
+        session.expire(cached)
+    return result.rowcount
 
 
 def decrement_attempts(session: Session, otp_id: uuid.UUID) -> int:
