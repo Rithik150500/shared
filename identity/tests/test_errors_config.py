@@ -58,3 +58,30 @@ def test_settings_jwt_secret_env_override(monkeypatch):
     import identity.config as cfg
     reload(cfg)
     assert cfg.settings.JWT_SECRET_KEY == "test-secret-override"
+
+
+def test_new_identity_settings_defaults():
+    from identity.config import IdentitySettings
+    s = IdentitySettings()
+    assert s.WA_LOGIN_NONCE_TTL_WEB2BOT_SECONDS == 300
+    assert s.WA_LOGIN_NONCE_TTL_BOT2WEB_SECONDS == 120
+    assert s.WA_LOGIN_NONCE_LENGTH == 24
+    assert s.MUNSHI_WA_DIGITS == "919643460175"
+    assert s.WEB_DASHBOARD_BASE_URL == ""
+    assert s.EMAIL_OTP_FROM == ""
+    assert s.RESEND_API_KEY == ""
+    assert s.EMAIL_SEND_TIMEOUT_SECONDS == 10
+    assert s.OTP_PER_EMAIL_PER_HOUR == 5
+
+
+def test_new_error_types_exist_and_subclass():
+    from identity.errors import (
+        AccountLinkStepUpRequired,
+        DeliveryFailed,
+        EmailDeliveryFailed,
+        IdentityError,
+    )
+    assert issubclass(AccountLinkStepUpRequired, IdentityError)
+    assert issubclass(EmailDeliveryFailed, DeliveryFailed)
+    e = EmailDeliveryFailed("resend 500")
+    assert e.channel == "email"
