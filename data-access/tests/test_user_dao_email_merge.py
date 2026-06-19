@@ -40,3 +40,18 @@ def test_get_or_create_by_phone_no_duplicate_rows(db_session):
         user_dao.get_or_create_by_phone(db_session, phone="+919876522222")
     count = db_session.query(User).filter_by(phone="+919876522222").count()
     assert count == 1
+
+
+def test_set_and_is_email_verified_roundtrip(db_session):
+    user, _ = user_dao.get_or_create_by_email(db_session, email="verify@example.com")
+    user_dao.ensure_nowlez_extension(db_session, user.id, name="Verify User")
+    # Freshly-created extension defaults email_verified=False.
+    assert user_dao.is_email_verified(db_session, user.id) is False
+    user_dao.set_email_verified(db_session, user.id)
+    assert user_dao.is_email_verified(db_session, user.id) is True
+
+
+def test_is_email_verified_no_nowlez_extension_is_false(db_session):
+    user, _ = user_dao.get_or_create_by_email(db_session, email="noext@example.com")
+    # No users_nowlez row -> treat as unverified (None coerces to False).
+    assert user_dao.is_email_verified(db_session, user.id) is False

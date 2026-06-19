@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -156,3 +156,24 @@ def get_or_create_by_email(
 
 def get_by_email(session: Session, email: str) -> User | None:
     return session.execute(select(User).where(User.email == email)).scalar_one_or_none()
+
+
+def set_email_verified(session: Session, user_id: uuid.UUID) -> None:
+    """Mark this account's email as verified (D4 signal). No-op if no
+    users_nowlez extension exists yet — the caller ensures the extension first
+    on the mint path."""
+    session.execute(
+        update(UserNowlez)
+        .where(UserNowlez.user_id == user_id)
+        .values(email_verified=True)
+    )
+    session.flush()
+
+
+def is_email_verified(session: Session, user_id: uuid.UUID) -> bool:
+    """True iff users_nowlez.email_verified is set for this user. A missing
+    extension row reads as False (unverified)."""
+    val = session.execute(
+        select(UserNowlez.email_verified).where(UserNowlez.user_id == user_id)
+    ).scalar_one_or_none()
+    return bool(val)
