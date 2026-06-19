@@ -84,3 +84,51 @@ def decrement_attempts(session: Session, otp_id: uuid.UUID) -> int:
     o.attempts_remaining = max(0, o.attempts_remaining - 1)
     session.flush()
     return o.attempts_remaining
+
+
+def mark_used(session: Session, otp_id: uuid.UUID) -> int:
+    """ATOMIC single-use mark. Returns rowcount (1 = this call marked it used;
+    0 = already-used / expired / attempts exhausted / unknown). The verify path
+    branches ONLY on this rowcount."""
+    result = session.execute(
+        update(EmailOtpCode)
+        .where(
+            EmailOtpCode.id == otp_id,
+            EmailOtpCode.used_at.is_(None),
+            EmailOtpCode.expires_at > func.now(),
+            EmailOtpCode.attempts_remaining > 0,
+        )
+        .values(used_at=func.now())
+    )
+    session.flush()
+    # Expire the cached ORM instance so subsequent get_by_id re-reads from DB.
+    cached = session.identity_map.get((EmailOtpCode, (otp_id,), None))
+    if cached is not None:
+        session.expire(cached)
+    return result.rowcount
+
+
+def count_within(session: Session, email: str, minutes: int) -> int:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    return session.execute(
+        select(func.count())
+        .select_from(EmailOtpCode)
+        .where(EmailOtpCode.email == email, EmailOtpCode.created_at > cutoff)
+    ).scalar_one()
+
+
+def count_by_ip_within(session: Session, ip_address: str, minutes: int) -> int:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    return session.execute(
+        select(func.count())
+        .select_from(EmailOtpCode)
+        .where(EmailOtpCode.ip_address == ip_address, EmailOtpCode.created_at > cutoff)
+    ).scalar_one()
+
+
+def cleanup_expired(session: Session, older_than_hours: int = 24) -> int:
+    """Hard-delete email OTPs expired more than older_than_hours ago. Returns rowcount."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+    result = session.execute(delete(EmailOtpCode).where(EmailOtpCode.expires_at < cutoff))
+    session.flush()
+    return result.rowcount or 0
