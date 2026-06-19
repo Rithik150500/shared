@@ -158,3 +158,69 @@ def test_pg_double_upgrade_idempotent(pg_engine):
     except Exception as ex:  # noqa: BLE001
         pytest.skip(f"alembic upgrade failed in test env: {ex}")
     assert "login_requests" in set(inspect(pg_engine).get_table_names())
+
+
+# ---------------------------------------------------------------------------
+# P1.18 — Postgres two-concurrent-consume serializability test
+# Skip if no Postgres is reachable.
+# ---------------------------------------------------------------------------
+
+
+def test_pg_two_concurrent_consumes_exactly_one_wins(fresh_pg_at_head):
+    """Two sessions race to consume the same confirmed nonce. Postgres
+    row-locking on the conditional UPDATE must let EXACTLY ONE flip
+    confirmed->consumed (rowcount 1); the other sees rowcount 0."""
+    from sqlalchemy.orm import sessionmaker
+
+    from data_access.daos import login_request_dao
+    from data_access.models import User
+
+    engine = fresh_pg_at_head
+    Session = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+    # Seed a user + a confirmed web2bot nonce.
+    setup = Session()
+    u = User(phone="+919876599999", locale="en")
+    setup.add(u)
+    setup.flush()
+    lr = login_request_dao.create_web2bot(
+        setup, token_hash="race-h", brand="nowlez", poll_bind_hash="race-pbh", ttl_seconds=300
+    )
+    login_request_dao.confirm(setup, token_hash="race-h", user_id=u.id, phone=u.phone)
+    setup.commit()
+    login_id = lr.id
+    setup.close()
+
+    s1 = Session()
+    s2 = Session()
+    try:
+        r1 = s1.execute(
+            __import__("sqlalchemy").update(login_request_dao.LoginRequest)
+            .where(
+                login_request_dao.LoginRequest.id == login_id,
+                login_request_dao.LoginRequest.status == "confirmed",
+                login_request_dao.LoginRequest.expires_at > __import__("sqlalchemy").func.now(),
+                login_request_dao.LoginRequest.poll_bind_hash == "race-pbh",
+            )
+            .values(status="consumed", consumed_at=__import__("sqlalchemy").func.now())
+        )
+        r2 = s2.execute(
+            __import__("sqlalchemy").update(login_request_dao.LoginRequest)
+            .where(
+                login_request_dao.LoginRequest.id == login_id,
+                login_request_dao.LoginRequest.status == "confirmed",
+                login_request_dao.LoginRequest.expires_at > __import__("sqlalchemy").func.now(),
+                login_request_dao.LoginRequest.poll_bind_hash == "race-pbh",
+            )
+            .values(status="consumed", consumed_at=__import__("sqlalchemy").func.now())
+        )
+        # Commit s1 first; s2's UPDATE was waiting on the row lock and now sees
+        # status='consumed' -> 0 rows.
+        s1.commit()
+        s2.commit()
+        assert {r1.rowcount, r2.rowcount} == {1, 0}, (
+            f"exactly one consume must win; got {r1.rowcount} and {r2.rowcount}"
+        )
+    finally:
+        s1.close()
+        s2.close()
