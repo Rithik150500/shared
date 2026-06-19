@@ -77,3 +77,28 @@ def test_users_nowlez_has_email_verified_column():
     col = UserNowlez.__table__.c["email_verified"]
     assert col.nullable is False
     assert col.default.arg is False
+
+
+def test_models_package_exports_new_tables():
+    from data_access import models as m
+
+    assert "LoginRequest" in m.__all__
+    assert "EmailOtpCode" in m.__all__
+    assert m.LoginRequest.__tablename__ == "login_requests"
+    assert m.EmailOtpCode.__tablename__ == "email_otp_codes"
+
+
+def test_create_all_on_sqlite_includes_new_tables():
+    # Guards the "no literal gen_random_uuid() in the model" rule: a literal
+    # would make CREATE TABLE fail on SQLite here.
+    from sqlalchemy import create_engine, inspect
+
+    from data_access.base import Base
+    import data_access.models  # noqa: F401 — register all models
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    tables = set(inspect(engine).get_table_names())
+    assert "login_requests" in tables
+    assert "email_otp_codes" in tables
+    engine.dispose()
