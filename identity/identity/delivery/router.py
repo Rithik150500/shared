@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from ..errors import DeliveryFailed
+from .email import send_otp_email
 from .sms import send_otp_sms
 from .whatsapp import send_otp_whatsapp
 
@@ -38,3 +39,11 @@ def deliver_otp(phone: str, code: str) -> tuple[str, str]:
         except DeliveryFailed:
             logger.error("Both WhatsApp and SMS delivery failed for OTP send")
             raise
+
+
+def deliver_email_otp(email: str, code: str) -> tuple[str, str]:
+    """Deliver an OTP via email (Resend). No fallback — email is its own channel.
+
+    Returns (channel='email', provider_id). Raises EmailDeliveryFailed on failure.
+    """
+    return send_otp_email(email, code)
