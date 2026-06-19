@@ -24,7 +24,7 @@ def test_verify_otp_and_login_uses_mint_shape(db_session):
 
 
 def test_three_login_paths_structurally_identical(db_session):
-    from data_access.daos import login_request_dao, session_dao
+    from data_access.daos import email_otp_dao, login_request_dao, session_dao
     import uuid as _uuid
 
     # path 1: phone OTP
@@ -42,7 +42,14 @@ def test_three_login_paths_structurally_identical(db_session):
         db_session, login_id=_uuid.UUID(start["login_id"]), poll_bind=start["poll_secret"]
     )
 
-    # path 3: email OTP verify (added in P2.12 — import lazily so this test
-    # also passes once that lands; until then it is xfail-skipped via guard)
-    assert set(a) == set(b)
-    assert set(a["user"]) == set(b["user"]) == {"id", "phone", "locale"}
+    # path 3: email OTP verify (verify_email_otp_and_login — new signup branch)
+    eo = email_otp_dao.insert(
+        db_session, email="drift@example.com", code_hash=hash_otp_code("999999")
+    )
+    db_session.flush()
+    c = identity_api.verify_email_otp_and_login(
+        db_session, otp_id=eo.id, code="999999", brand="nowlez", name="Drift"
+    )
+
+    assert set(a) == set(b) == set(c)
+    assert set(a["user"]) == set(b["user"]) == set(c["user"]) == {"id", "phone", "locale"}

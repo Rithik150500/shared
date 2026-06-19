@@ -435,6 +435,111 @@ def start_email_otp(session: Session, *, email: str, ip_address: str | None = No
     return {"otp_id": str(o.id), "channel": "email"}
 
 
+def _verify_email_otp_atomic(session: Session, *, otp_id: uuid.UUID, code: str) -> str:
+    """Atomic email-OTP verify. argon2 first; mismatch -> decrement (no burn);
+    match -> atomic email_otp_dao.mark_used (rowcount==0 -> already-used/expired).
+    Returns the canonical email on success."""
+    from argon2 import PasswordHasher
+    from argon2 import exceptions as a2err
+    o = email_otp_dao.get_by_id(session, otp_id)
+    if o is None:
+        raise OtpInvalid("OTP not found")
+    if o.used_at is not None:
+        raise OtpAlreadyUsed("OTP has already been used")
+    if o.attempts_remaining <= 0:
+        raise OtpAttemptsExhausted("OTP attempts exhausted; request a new code")
+    hasher = PasswordHasher(
+        time_cost=settings.ARGON2_TIME_COST,
+        memory_cost=settings.ARGON2_MEMORY_COST_KB,
+        parallelism=settings.ARGON2_PARALLELISM,
+    )
+    try:
+        hasher.verify(o.code_hash, code)
+    except a2err.VerifyMismatchError:
+        email_otp_dao.decrement_attempts(session, otp_id)
+        raise OtpInvalid("Invalid OTP code")
+    except a2err.InvalidHash:
+        raise OtpInvalid("OTP record corrupted")
+    if email_otp_dao.mark_used(session, otp_id) == 0:
+        raise OtpAlreadyUsed("OTP has already been used")
+    return o.email
+
+
+def verify_email_otp_and_login(
+    session: Session,
+    *,
+    otp_id: uuid.UUID | str,
+    code: str,
+    brand: str,
+    name: str | None = None,
+    user_agent: str | None = None,
+    ip_address: str | None = None,
+    second_signal_user_id: uuid.UUID | None = None,
+) -> dict:
+    """Email-OTP verify + §8.1 safeguarded account resolution + mint.
+
+    second_signal_user_id: a user id the SAME flow has already proven control of
+    (phone-OTP / one-tap in this browser). When it matches the resolved account
+    it satisfies the D4 'second matching signal' gate and the email is linked.
+    """
+    if isinstance(otp_id, str):
+        otp_id = uuid.UUID(otp_id)
+    email = _verify_email_otp_atomic(session, otp_id=otp_id, code=code)
+
+    existing = user_dao.get_by_email(session, email)
+    if existing is None:
+        # Clean new signup: create email-only user, mark verified, mint.
+        user, was_created = user_dao.get_or_create_by_email(session, email=email)
+        if brand == "nowlez":
+            user_dao.ensure_nowlez_extension(session, user.id, name=name or "")
+        user_dao.set_email_verified(session, user.id)
+        return _mint_login_response(
+            session, user=user, brand=brand, name=name,
+            user_agent=user_agent, ip_address=ip_address,
+            event_type="user.created", audit_metadata={"channel": "email"},
+        )
+
+    # Existing account for this email.
+    if user_dao.is_email_verified(session, existing.id):
+        return _mint_login_response(
+            session, user=existing, brand=brand, name=name,
+            user_agent=user_agent, ip_address=ip_address,
+            event_type="user.login.email", audit_metadata={"channel": "email"},
+        )
+
+    # Unverified email on an existing account.
+    has_second_factor = existing.phone is not None or existing.password_hash is not None
+    if not has_second_factor:
+        # Pure email-only legacy row: email control is the only anchor -> mint.
+        if brand == "nowlez":
+            user_dao.ensure_nowlez_extension(session, existing.id, name=name or "")
+        user_dao.set_email_verified(session, existing.id)
+        return _mint_login_response(
+            session, user=existing, brand=brand, name=name,
+            user_agent=user_agent, ip_address=ip_address,
+            event_type="user.login.email", audit_metadata={"channel": "email"},
+        )
+
+    # Second-signal gate: only link if a same-flow proven identifier matches.
+    if second_signal_user_id is not None and second_signal_user_id == existing.id:
+        user_dao.set_email_verified(session, existing.id)
+        audit_dao.log_event(
+            session, event_type="account.email_login_new_device", source=brand,
+            user_id=existing.id, metadata={"channel": "email"}, ip_address=ip_address,
+        )
+        return _mint_login_response(
+            session, user=existing, brand=brand, name=name,
+            user_agent=user_agent, ip_address=ip_address,
+            event_type="user.login.email", audit_metadata={"channel": "email"},
+        )
+
+    audit_dao.log_event(
+        session, event_type="email_otp.verify_failed", source=brand,
+        user_id=existing.id, metadata={"reason": "step_up_required"}, ip_address=ip_address,
+    )
+    raise AccountLinkStepUpRequired("verify by phone to link this email")
+
+
 __all__ = [
     "start_phone_login",
     "verify_otp_and_login",
@@ -448,4 +553,5 @@ __all__ = [
     "start_wa_login_from_bot",
     "consume_wa_login",
     "start_email_otp",
+    "verify_email_otp_and_login",
 ]
