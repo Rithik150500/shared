@@ -118,3 +118,55 @@ def test_verify_email_replay_rejected(db_session):
     identity_api.verify_email_otp_and_login(db_session, otp_id=o.id, code="424242", brand="nowlez")
     with pytest.raises(OtpAlreadyUsed):
         identity_api.verify_email_otp_and_login(db_session, otp_id=o.id, code="424242", brand="nowlez")
+
+
+# ---------------------------------------------------------------------------
+# D4 §8.1 branch 4: second_signal_user_id gate (adversarial)
+# ---------------------------------------------------------------------------
+
+def test_d4_matching_second_signal_mints(db_session):
+    """Branch 4: unverified email on phone+password account, same-flow
+    second_signal_user_id matches that account's id -> must mint (link)."""
+    u, _ = user_dao.get_or_create_by_phone(db_session, phone="+919000000001")
+    u.email = "d4match@example.com"
+    u.password_hash = "$argon2id$v=19$set"
+    user_dao.ensure_nowlez_extension(db_session, u.id, name="D4")
+    db_session.flush()
+    o = _make_verified_email_otp(db_session, "d4match@example.com")
+    db_session.flush()
+    out = identity_api.verify_email_otp_and_login(
+        db_session, otp_id=o.id, code="424242", brand="nowlez",
+        second_signal_user_id=u.id,
+    )
+    assert set(out) == {"access_token", "refresh_token", "user"}
+    assert out["user"]["id"] == str(u.id)
+    assert user_dao.is_email_verified(db_session, u.id) is True
+
+
+def test_d4_mismatched_second_signal_raises_not_mints(db_session):
+    """Branch 5 guard: second_signal_user_id that does NOT match the resolved
+    account must raise AccountLinkStepUpRequired, never mint. An attacker who
+    controls a different phone account cannot leverage it to link a third
+    account's email."""
+    from identity.errors import AccountLinkStepUpRequired
+    import uuid as _uuid
+
+    # The account whose email is being targeted (has phone -> second factor)
+    victim, _ = user_dao.get_or_create_by_phone(db_session, phone="+919000000002")
+    victim.email = "d4victim@example.com"
+    victim.password_hash = "$argon2id$v=19$set"
+    user_dao.ensure_nowlez_extension(db_session, victim.id, name="V")
+    db_session.flush()
+
+    # A different account the attacker happens to control
+    attacker, _ = user_dao.get_or_create_by_phone(db_session, phone="+919000000003")
+    user_dao.ensure_nowlez_extension(db_session, attacker.id, name="A")
+    db_session.flush()
+
+    o = _make_verified_email_otp(db_session, "d4victim@example.com")
+    db_session.flush()
+    with pytest.raises(AccountLinkStepUpRequired):
+        identity_api.verify_email_otp_and_login(
+            db_session, otp_id=o.id, code="424242", brand="nowlez",
+            second_signal_user_id=attacker.id,  # mismatched: different user's id
+        )
