@@ -39,6 +39,8 @@ class IdentitySettings(BaseSettings):
     META_ACCESS_TOKEN: str = ""
     META_PHONE_NUMBER_ID: str = ""
     META_AUTH_TEMPLATE_NAME: str = "auth_otp_v1"
+    # Optional approved WhatsApp UTILITY template for security alerts; empty = skip WA alert.
+    META_SECURITY_TEMPLATE_NAME: str = ""
 
     # Delivery — SMS (MSG91)
     MSG91_AUTH_KEY: str = ""

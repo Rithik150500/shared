@@ -18,6 +18,7 @@ from data_access.daos import audit_dao, email_otp_dao, login_request_dao, otp_da
 from data_access.daos.user_dao import MergeUnsafeError
 from .config import settings
 
+from .delivery.email import send_security_email  # noqa: F401
 from .delivery.router import deliver_email_otp, deliver_otp
 from .errors import (
     AccountLinkStepUpRequired,
@@ -526,11 +527,14 @@ def verify_email_otp_and_login(
 
     # Second-signal gate: only link if a same-flow proven identifier matches.
     if second_signal_user_id is not None and second_signal_user_id == existing.id:
+        if brand == "nowlez":
+            user_dao.ensure_nowlez_extension(session, existing.id, name=name or "")
         user_dao.set_email_verified(session, existing.id)
         audit_dao.log_event(
             session, event_type="account.email_login_new_device", source=brand,
             user_id=existing.id, metadata={"channel": "email"}, ip_address=ip_address,
         )
+        _notify_account_security(session, existing, event="email_login_new_device", ip_address=ip_address)
         return _mint_login_response(
             session, user=existing, brand=brand, name=name,
             user_agent=user_agent, ip_address=ip_address,
@@ -542,6 +546,65 @@ def verify_email_otp_and_login(
         user_id=existing.id, metadata={"reason": "step_up_required"}, ip_address=ip_address,
     )
     raise AccountLinkStepUpRequired("verify by phone to link this email")
+
+
+_SECURITY_COPY = {
+    "email_login_new_device": (
+        "New sign-in to your Nowlez account",
+        "We detected a new email sign-in / email link on your account. "
+        "If this wasn't you, reply to this email or contact support to revoke access immediately.",
+    ),
+    "account_merged": (
+        "Your Nowlez accounts were linked",
+        "Two of your Nowlez identities (phone and email) were just merged into one account. "
+        "If you did not request this, contact support immediately to reverse it.",
+    ),
+}
+
+
+def _notify_account_security(
+    session: Session,
+    user,
+    *,
+    event: str,
+    ip_address: str | None = None,
+) -> None:
+    """D4 safeguard: best-effort, user-VISIBLE security alert across the account's
+    other channels. NEVER raises — a delivery failure must not block login/merge.
+    Always audits the outcome so a silently-dead notifier is detectable."""
+    subject, body = _SECURITY_COPY.get(
+        event, ("Security notice on your Nowlez account", "A sensitive change occurred on your account.")
+    )
+    delivered = False
+    # Channel 1 — email (primary; reliable once Resend is configured).
+    if getattr(user, "email", None):
+        try:
+            send_security_email(user.email, f"[{event}] {subject}", body)
+            delivered = True
+        except Exception as e:  # noqa: BLE001 — best-effort
+            logger.warning("security alert email failed for user %s: %s", user.id, e)
+    # Channel 2 — WhatsApp (best-effort; only if a template is configured + user has a phone).
+    if getattr(user, "phone", None) and settings.META_SECURITY_TEMPLATE_NAME:
+        try:
+            from whatsapp_delivery import TemplateClient
+            TemplateClient(
+                phone_number_id=settings.META_PHONE_NUMBER_ID,
+                access_token=settings.META_ACCESS_TOKEN,
+            ).send_template_with_components(
+                to=user.phone, name=settings.META_SECURITY_TEMPLATE_NAME,
+                language="en", body_variables=[event],
+            )
+            delivered = True
+        except Exception as e:  # noqa: BLE001 — best-effort
+            logger.warning("security alert WhatsApp failed for user %s: %s", user.id, e)
+    audit_dao.log_event(
+        session,
+        event_type="account.security_alert_sent" if delivered else "account.security_alert_failed",
+        source="identity",
+        user_id=user.id,
+        metadata={"event": event},
+        ip_address=ip_address,
+    )
 
 
 def link_email_to_phone_account(
@@ -577,6 +640,7 @@ def link_email_to_phone_account(
         session, event_type="account.merged", source="identity", user_id=survivor.id,
         metadata={"survivor": str(survivor.id), "absorbed": str(absorbed.id)},
     )
+    _notify_account_security(session, survivor, event="account_merged")
     return True
 
 
