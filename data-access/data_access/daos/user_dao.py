@@ -177,3 +177,62 @@ def is_email_verified(session: Session, user_id: uuid.UUID) -> bool:
         select(UserNowlez.email_verified).where(UserNowlez.user_id == user_id)
     ).scalar_one_or_none()
     return bool(val)
+
+
+def merge_users(session: Session, *, survivor_id: uuid.UUID, absorbed_id: uuid.UUID) -> None:
+    """D4 auto-merge: fold the absorbed user into the survivor. Survivor is the
+    canonical row (caller passes the older created_at as survivor). Never drops
+    case/billing rows — only re-points the nowlez extension and copies the
+    email/email_verified anchor, then deletes the absorbed users row (its
+    leftover extension is removed by the ondelete=CASCADE FK)."""
+    survivor = session.get(User, survivor_id)
+    absorbed = session.get(User, absorbed_id)
+    if survivor is None or absorbed is None or survivor_id == absorbed_id:
+        return
+
+    # Fold the email anchor onto the survivor if it doesn't already have one.
+    # Use Core UPDATE statements to avoid mixed UUID/str ORM identity-map sort
+    # errors on SQLite (where the ON CONFLICT re-SELECT returns str PKs while
+    # directly-constructed User rows carry uuid.UUID PKs).
+    if survivor.email is None and absorbed.email is not None:
+        absorbed_email = absorbed.email
+        # Release UNIQUE on absorbed first, then claim on survivor.
+        session.execute(update(User).where(User.id == absorbed_id).values(email=None))
+        session.flush()
+        session.execute(update(User).where(User.id == survivor_id).values(email=absorbed_email))
+        session.flush()
+        session.expire(survivor)
+        session.expire(absorbed)
+    if survivor.phone is None and absorbed.phone is not None:
+        absorbed_phone = absorbed.phone
+        session.execute(update(User).where(User.id == absorbed_id).values(phone=None))
+        session.flush()
+        session.execute(update(User).where(User.id == survivor_id).values(phone=absorbed_phone))
+        session.flush()
+        session.expire(survivor)
+        session.expire(absorbed)
+
+    # Re-point the nowlez extension to the survivor only if the survivor has none.
+    survivor_ext = session.get(UserNowlez, survivor_id)
+    absorbed_ext = session.get(UserNowlez, absorbed_id)
+    if survivor_ext is None and absorbed_ext is not None:
+        session.execute(
+            update(UserNowlez)
+            .where(UserNowlez.user_id == absorbed_id)
+            .values(user_id=survivor_id)
+        )
+    # Carry the verified-email flag forward.
+    if absorbed_ext is not None and absorbed_ext.email_verified:
+        session.execute(
+            update(UserNowlez)
+            .where(UserNowlez.user_id == survivor_id)
+            .values(email_verified=True)
+        )
+    session.flush()
+
+    # Delete the absorbed row; CASCADE removes any extension still pointing at it.
+    # Re-fetch absorbed fresh so the ORM delete uses a consistent PK type.
+    absorbed_fresh = session.get(User, absorbed_id)
+    if absorbed_fresh is not None:
+        session.delete(absorbed_fresh)
+        session.flush()
