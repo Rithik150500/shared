@@ -95,6 +95,23 @@ def get_by_id(session: Session, login_id: uuid.UUID) -> LoginRequest | None:
     return session.get(LoginRequest, login_id)
 
 
+def is_pending(session: Session, login_id: uuid.UUID) -> bool:
+    """True iff a still-PENDING (unconfirmed, unexpired) row exists for this
+    public id. DB-clock expiry gate (func.now()), mirroring get_active_by_token.
+    Drives the web2bot status poll's pending-vs-expired decision AFTER a consume
+    returned zero rows — a confirmed/consumed/expired row is NOT 'pending'."""
+    stmt = (
+        select(LoginRequest.id)
+        .where(
+            LoginRequest.id == login_id,
+            LoginRequest.status == "pending",
+            LoginRequest.expires_at > func.now(),
+        )
+        .exists()
+    )
+    return bool(session.execute(select(stmt)).scalar())
+
+
 def confirm(
     session: Session,
     *,

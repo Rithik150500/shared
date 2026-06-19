@@ -106,3 +106,25 @@ def test_consume_wa_login_bot2web_by_token(db_session):
     minted = identity_api.consume_wa_login(db_session, token=nonce)
     assert minted is not None and minted["user"]["id"] == str(u.id)
     assert identity_api.consume_wa_login(db_session, token=nonce) is None
+
+
+def test_wa_login_is_pending_true_then_false_after_confirm(db_session):
+    import uuid as _uuid
+    u, _ = user_dao.get_or_create_by_phone(db_session, phone="+919876543210")
+    db_session.flush()
+    out = identity_api.start_wa_login(db_session, brand="nowlez")
+    db_session.flush()
+    lid = _uuid.UUID(out["login_id"])
+    # Fresh web2bot row is pending (string id accepted too).
+    assert identity_api.wa_login_is_pending(db_session, login_id=lid) is True
+    assert identity_api.wa_login_is_pending(db_session, login_id=out["login_id"]) is True
+    # After the bot confirms, it is no longer 'pending'.
+    identity_api.confirm_wa_login(db_session, nonce=out["nonce"], user=u, brand="munshi")
+    assert identity_api.wa_login_is_pending(db_session, login_id=lid) is False
+
+
+def test_wa_login_is_pending_false_for_unknown_or_malformed(db_session):
+    import uuid as _uuid
+    assert identity_api.wa_login_is_pending(db_session, login_id=_uuid.uuid4()) is False
+    # Malformed id string -> False (anti-enumeration), never raises.
+    assert identity_api.wa_login_is_pending(db_session, login_id="not-a-uuid") is False

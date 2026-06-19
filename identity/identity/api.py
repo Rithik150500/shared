@@ -397,6 +397,20 @@ def consume_wa_login(
     return minted
 
 
+def wa_login_is_pending(session: Session, *, login_id: uuid.UUID | str) -> bool:
+    """web2bot status-poll helper: True iff the login_request for this public id
+    is still PENDING (bot has not yet confirmed) and not past its TTL. Called by
+    the web status endpoint AFTER a consume returned zero rows to distinguish
+    'pending' (keep polling) from 'expired' (terminal). A malformed id is
+    'expired', never an error (anti-enumeration)."""
+    if isinstance(login_id, str):
+        try:
+            login_id = uuid.UUID(login_id)
+        except (ValueError, TypeError):
+            return False
+    return login_request_dao.is_pending(session, login_id)
+
+
 def _canonicalize_email(email: str) -> str:
     """Single choke point: strip + lowercase (incl. casefolded domain). Must
     match how users.email is stored so OTP rows and user rows always join."""

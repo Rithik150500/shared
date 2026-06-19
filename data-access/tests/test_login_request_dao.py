@@ -197,6 +197,34 @@ def test_consume_by_id_expired_confirmed_returns_none(db_session):
     )
 
 
+def test_is_pending_true_for_fresh_pending_row(db_session):
+    lr = login_request_dao.create_web2bot(
+        db_session, token_hash="hip-a", brand="nowlez", poll_bind_hash="p", ttl_seconds=300
+    )
+    assert login_request_dao.is_pending(db_session, lr.id) is True
+
+
+def test_is_pending_false_after_confirm(db_session):
+    u = _make_user(db_session, phone="+919876500040")
+    lr = login_request_dao.create_web2bot(
+        db_session, token_hash="hip-b", brand="nowlez", poll_bind_hash="p", ttl_seconds=300
+    )
+    login_request_dao.confirm(db_session, token_hash="hip-b", user_id=u.id, phone=u.phone)
+    # Confirmed is no longer 'pending'.
+    assert login_request_dao.is_pending(db_session, lr.id) is False
+
+
+def test_is_pending_false_when_expired(db_session):
+    lr = login_request_dao.create_web2bot(
+        db_session, token_hash="hip-c", brand="nowlez", poll_bind_hash="p", ttl_seconds=-10
+    )
+    assert login_request_dao.is_pending(db_session, lr.id) is False
+
+
+def test_is_pending_false_for_unknown_id(db_session):
+    assert login_request_dao.is_pending(db_session, uuid.uuid4()) is False
+
+
 def test_mark_expired_sets_status(db_session):
     lr = login_request_dao.create_web2bot(
         db_session, token_hash="hx1", brand="nowlez", poll_bind_hash="p", ttl_seconds=300
