@@ -168,3 +168,28 @@ def test_consume_by_token_happy_then_replay(db_session):
     login_request_dao.confirm(db_session, token_hash="ht1", user_id=u.id, phone=u.phone)
     assert str(login_request_dao.consume_by_token(db_session, token_hash="ht1")) == str(u.id)
     assert login_request_dao.consume_by_token(db_session, token_hash="ht1") is None
+
+
+def test_consume_by_id_expired_confirmed_returns_none(db_session):
+    # A nonce that was confirmed but then expired must NOT be consumable
+    # (the consume UPDATE's WHERE clause includes expires_at > func.now()).
+    from sqlalchemy import update as sa_update
+
+    from data_access.models import LoginRequest
+
+    u = _make_user(db_session, phone="+919876500030")
+    lr = login_request_dao.create_web2bot(
+        db_session, token_hash="hk5", brand="nowlez", poll_bind_hash="pbh", ttl_seconds=300
+    )
+    login_request_dao.confirm(db_session, token_hash="hk5", user_id=u.id, phone=u.phone)
+    # Backdate expires_at to simulate a nonce that expired after confirm.
+    db_session.execute(
+        sa_update(LoginRequest)
+        .where(LoginRequest.id == lr.id)
+        .values(expires_at="2000-01-01T00:00:00+00:00")
+    )
+    db_session.flush()
+    assert (
+        login_request_dao.consume_by_id(db_session, login_id=lr.id, poll_bind_hash="pbh")
+        is None
+    )
