@@ -210,6 +210,24 @@ def get_by_wamid(
     ).scalar_one_or_none()
 
 
+def list_campaigns(session: Session) -> list[dict]:
+    """Distinct campaigns with a total send-count, newest activity first."""
+    stmt = (select(WaBroadcastLog.campaign,
+                   func.count().label("total"),
+                   func.max(WaBroadcastLog.enqueued_at).label("last_at"))
+            .group_by(WaBroadcastLog.campaign)
+            .order_by(func.max(WaBroadcastLog.enqueued_at).desc()))
+    return [{"campaign": r.campaign, "total": int(r.total),
+             "last_at": r.last_at.isoformat() if r.last_at else None}
+            for r in session.execute(stmt).all()]
+
+
+def list_suppressions(session: Session, *, limit: int = 100, offset: int = 0) -> list[WaSuppression]:
+    stmt = (select(WaSuppression).order_by(WaSuppression.created_at.desc())
+            .limit(limit).offset(offset))
+    return list(session.execute(stmt).scalars().all())
+
+
 def already_done_set(session: Session, campaign: str) -> set[str]:
     """Return the set of ``wa_digits`` already in the ledger for ``campaign``.
 
