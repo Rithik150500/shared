@@ -11,11 +11,20 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from data_access.daos import audit_dao, login_request_dao, otp_dao, session_dao, user_dao
+from data_access.daos import audit_dao, email_otp_dao, login_request_dao, otp_dao, session_dao, user_dao
 from .config import settings
 
-from .delivery.router import deliver_otp
-from .errors import InvalidCredentials, PasswordNotSet
+from .delivery.router import deliver_email_otp, deliver_otp
+from .errors import (
+    AccountLinkStepUpRequired,
+    EmailDeliveryFailed,
+    InvalidCredentials,
+    OtpAlreadyUsed,
+    OtpAttemptsExhausted,
+    OtpInvalid,
+    PasswordNotSet,
+    RateLimited,
+)
 from .otp.issuer import generate_otp_code, hash_otp_code
 from .otp.rate_limiter import check_otp_rate_limit
 from .otp.verifier import verify_otp as _verify_otp, verify_otp_atomic as _verify_otp_atomic
@@ -383,6 +392,49 @@ def consume_wa_login(
     return minted
 
 
+def _canonicalize_email(email: str) -> str:
+    """Single choke point: strip + lowercase (incl. casefolded domain). Must
+    match how users.email is stored so OTP rows and user rows always join."""
+    e = email.strip().lower()
+    if "@" in e:
+        local, _, domain = e.partition("@")
+        e = f"{local}@{domain.casefold()}"
+    return e
+
+
+def start_email_otp(session: Session, *, email: str, ip_address: str | None = None) -> dict:
+    """Begin email-OTP flow. Anti-enumeration: identical shape regardless of
+    registration; returns 200 even on delivery soft-fail (row marked failed)."""
+    email = _canonicalize_email(email)
+    if len(email) > 254:
+        raise ValueError("email too long")
+
+    # Rate limit per email + per IP (mirror check_otp_rate_limit).
+    if email_otp_dao.count_within(session, email, 60) >= settings.OTP_PER_EMAIL_PER_HOUR:
+        raise RateLimited(retry_after_seconds=3600)
+    if ip_address and email_otp_dao.count_by_ip_within(session, ip_address, 60) >= settings.OTP_PER_IP_PER_HOUR:
+        raise RateLimited(retry_after_seconds=3600)
+
+    code = generate_otp_code()
+    o = email_otp_dao.insert(
+        session, email=email, code_hash=hash_otp_code(code),
+        ttl_minutes=settings.OTP_TTL_MINUTES, ip_address=ip_address,
+    )
+    try:
+        _channel, provider_id = deliver_email_otp(email, code)
+        email_otp_dao.mark_delivered(session, o.id, provider_id=provider_id)
+    except EmailDeliveryFailed:
+        # Soft-fail: mark failed, still return otp_id (anti-enumeration). The
+        # web wrapper bumps otp_delivery_total{channel='email',result='fail'}.
+        email_otp_dao.mark_failed(session, o.id)
+
+    audit_dao.log_event(
+        session, event_type="email_otp.issued", source="identity",
+        metadata={"otp_id": str(o.id), "channel": "email"}, ip_address=ip_address,
+    )
+    return {"otp_id": str(o.id), "channel": "email"}
+
+
 __all__ = [
     "start_phone_login",
     "verify_otp_and_login",
@@ -395,4 +447,5 @@ __all__ = [
     "confirm_wa_login",
     "start_wa_login_from_bot",
     "consume_wa_login",
+    "start_email_otp",
 ]
