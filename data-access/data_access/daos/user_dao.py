@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..models import User, UserMunshi, UserNowlez
@@ -121,3 +123,27 @@ def list_munshi_users(
         stmt = stmt.where(User.phone.ilike(f"%{search}%"))
     stmt = stmt.order_by(UserMunshi.created_at.desc()).limit(limit).offset(offset)
     return list(session.execute(stmt).tuples().all())
+
+
+def get_or_create_by_email(
+    session: Session, *, email: str, locale: str = "en"
+) -> tuple[User, bool]:
+    """INSERT ON CONFLICT (email) DO NOTHING then re-SELECT (dialect-aware,
+    mirroring whatsapp_dao.claim_message). ``email`` MUST be pre-canonicalized
+    by the caller. Returns (user, was_created)."""
+    dialect = session.get_bind().dialect.name
+    insert_fn = pg_insert if dialect == "postgresql" else sqlite_insert
+    stmt = (
+        insert_fn(User)
+        .values(email=email, locale=locale)
+        .on_conflict_do_nothing(index_elements=["email"])
+    )
+    result = session.execute(stmt)
+    session.flush()
+    was_created = result.rowcount > 0
+    user = session.execute(select(User).where(User.email == email)).scalar_one()
+    return user, was_created
+
+
+def get_by_email(session: Session, email: str) -> User | None:
+    return session.execute(select(User).where(User.email == email)).scalar_one_or_none()
