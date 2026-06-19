@@ -17,13 +17,22 @@ _IST = ZoneInfo("Asia/Kolkata")
 def get_or_create_by_phone(
     session: Session, *, phone: str, locale: str = "en"
 ) -> tuple[User, bool]:
-    user = session.execute(select(User).where(User.phone == phone)).scalar_one_or_none()
-    if user is not None:
-        return user, False
-    user = User(phone=phone, locale=locale)
-    session.add(user)
+    """INSERT ON CONFLICT (phone) DO NOTHING then re-SELECT (dialect-aware,
+    mirroring whatsapp_dao.claim_message). Fixes the read-then-write race at
+    app.py:154 where two concurrent inbound workers could both INSERT the same
+    phone. Returns (user, was_created)."""
+    dialect = session.get_bind().dialect.name
+    insert_fn = pg_insert if dialect == "postgresql" else sqlite_insert
+    stmt = (
+        insert_fn(User)
+        .values(phone=phone, locale=locale)
+        .on_conflict_do_nothing(index_elements=["phone"])
+    )
+    result = session.execute(stmt)
     session.flush()
-    return user, True
+    was_created = result.rowcount > 0
+    user = session.execute(select(User).where(User.phone == phone)).scalar_one()
+    return user, was_created
 
 
 def get_by_phone(session: Session, phone: str) -> User | None:
