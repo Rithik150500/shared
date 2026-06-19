@@ -73,3 +73,44 @@ def test_get_by_id_roundtrip(db_session):
 
 def test_get_by_id_unknown_returns_none(db_session):
     assert login_request_dao.get_by_id(db_session, uuid.uuid4()) is None
+
+
+def test_confirm_flips_pending_to_confirmed_returns_one(db_session):
+    u = _make_user(db_session, phone="+919876500010")
+    login_request_dao.create_web2bot(
+        db_session, token_hash="hc1", brand="nowlez", poll_bind_hash="p", ttl_seconds=300
+    )
+    rc = login_request_dao.confirm(
+        db_session, token_hash="hc1", user_id=u.id, phone=u.phone
+    )
+    assert rc == 1
+    row = login_request_dao.get_by_id(
+        db_session,
+        login_request_dao.get_active_by_token(db_session, token_hash="hc1").id,
+    )
+    assert row.status == "confirmed"
+    assert str(row.user_id) == str(u.id)
+    assert row.phone == u.phone
+
+
+def test_confirm_second_call_returns_zero(db_session):
+    u = _make_user(db_session, phone="+919876500011")
+    login_request_dao.create_web2bot(
+        db_session, token_hash="hc2", brand="nowlez", poll_bind_hash="p", ttl_seconds=300
+    )
+    assert login_request_dao.confirm(db_session, token_hash="hc2", user_id=u.id, phone=u.phone) == 1
+    # Already confirmed — second confirm is a no-op (rowcount 0).
+    assert login_request_dao.confirm(db_session, token_hash="hc2", user_id=u.id, phone=u.phone) == 0
+
+
+def test_confirm_rejects_expired(db_session):
+    u = _make_user(db_session, phone="+919876500012")
+    login_request_dao.create_web2bot(
+        db_session, token_hash="hc3", brand="nowlez", poll_bind_hash="p", ttl_seconds=-10
+    )
+    assert login_request_dao.confirm(db_session, token_hash="hc3", user_id=u.id, phone=u.phone) == 0
+
+
+def test_confirm_unknown_token_returns_zero(db_session):
+    u = _make_user(db_session, phone="+919876500013")
+    assert login_request_dao.confirm(db_session, token_hash="nope", user_id=u.id, phone=u.phone) == 0

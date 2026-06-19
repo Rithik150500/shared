@@ -93,3 +93,26 @@ def get_active_by_token(
 
 def get_by_id(session: Session, login_id: uuid.UUID) -> LoginRequest | None:
     return session.get(LoginRequest, login_id)
+
+
+def confirm(
+    session: Session,
+    *,
+    token_hash: str,
+    user_id: uuid.UUID,
+    phone: str,
+) -> int:
+    """Atomic pending->confirmed flip. Returns rowcount (1 = this call flipped
+    it; 0 = unknown / already-confirmed / expired). Caller branches ONLY on the
+    return value."""
+    result = session.execute(
+        update(LoginRequest)
+        .where(
+            LoginRequest.token_hash == token_hash,
+            LoginRequest.status == "pending",
+            LoginRequest.expires_at > func.now(),
+        )
+        .values(status="confirmed", user_id=user_id, phone=phone)
+    )
+    session.flush()
+    return result.rowcount
