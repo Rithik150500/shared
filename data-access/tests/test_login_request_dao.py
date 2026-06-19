@@ -173,6 +173,8 @@ def test_consume_by_token_happy_then_replay(db_session):
 def test_consume_by_id_expired_confirmed_returns_none(db_session):
     # A nonce that was confirmed but then expired must NOT be consumable
     # (the consume UPDATE's WHERE clause includes expires_at > func.now()).
+    from datetime import datetime, timezone
+
     from sqlalchemy import update as sa_update
 
     from data_access.models import LoginRequest
@@ -186,7 +188,7 @@ def test_consume_by_id_expired_confirmed_returns_none(db_session):
     db_session.execute(
         sa_update(LoginRequest)
         .where(LoginRequest.id == lr.id)
-        .values(expires_at="2000-01-01T00:00:00+00:00")
+        .values(expires_at=datetime(2000, 1, 1, tzinfo=timezone.utc))
     )
     db_session.flush()
     assert (
