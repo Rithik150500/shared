@@ -63,3 +63,46 @@ def test_start_wa_login_from_bot_returns_raw_nonce_and_pending_row(db_session):
     assert row.status == "pending"
     assert row.user_id == u.id
     assert row.phone == "+919876543210"
+
+
+def test_consume_wa_login_web2bot_happy_then_replay(db_session):
+    import uuid as _uuid
+    u, _ = user_dao.get_or_create_by_phone(db_session, phone="+919876543210")
+    db_session.flush()
+    out = identity_api.start_wa_login(db_session, brand="nowlez")
+    db_session.flush()
+    identity_api.confirm_wa_login(db_session, nonce=out["nonce"], user=u, brand="munshi")
+    minted = identity_api.consume_wa_login(
+        db_session, login_id=_uuid.UUID(out["login_id"]), poll_bind=out["poll_secret"]
+    )
+    assert minted is not None
+    assert set(minted) == {"access_token", "refresh_token", "user"}
+    assert minted["user"]["id"] == str(u.id)
+    # replay -> None
+    assert identity_api.consume_wa_login(
+        db_session, login_id=_uuid.UUID(out["login_id"]), poll_bind=out["poll_secret"]
+    ) is None
+
+
+def test_consume_wa_login_wrong_poll_bind_returns_none(db_session):
+    import uuid as _uuid
+    u, _ = user_dao.get_or_create_by_phone(db_session, phone="+919876543210")
+    db_session.flush()
+    out = identity_api.start_wa_login(db_session, brand="nowlez")
+    db_session.flush()
+    identity_api.confirm_wa_login(db_session, nonce=out["nonce"], user=u, brand="munshi")
+    assert identity_api.consume_wa_login(
+        db_session, login_id=_uuid.UUID(out["login_id"]), poll_bind="WRONG"
+    ) is None
+
+
+def test_consume_wa_login_bot2web_by_token(db_session):
+    u, _ = user_dao.get_or_create_by_phone(db_session, phone="+919876543210")
+    db_session.flush()
+    nonce = identity_api.start_wa_login_from_bot(db_session, user_id=u.id, brand="munshi")
+    db_session.flush()
+    # handler flips pending->confirmed after a successful send
+    login_request_dao.confirm(db_session, token_hash=session_dao._hash(nonce), user_id=u.id, phone=u.phone)
+    minted = identity_api.consume_wa_login(db_session, token=nonce)
+    assert minted is not None and minted["user"]["id"] == str(u.id)
+    assert identity_api.consume_wa_login(db_session, token=nonce) is None

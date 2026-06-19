@@ -325,6 +325,64 @@ def start_wa_login_from_bot(
     return nonce
 
 
+def consume_wa_login(
+    session: Session,
+    *,
+    login_id: uuid.UUID | None = None,
+    token: str | None = None,
+    poll_bind: str | None = None,
+    user_agent: str | None = None,
+    ip_address: str | None = None,
+) -> dict | None:
+    """Confirmed->consumed mint. Two call shapes:
+      - web2bot status-poll: login_id + poll_bind (the poll-cookie value)
+      - bot2web landing: token (raw nonce from the #fragment)
+    Returns the _mint_login_response dict, or None on zero rows (caller maps to
+    expired/link_expired). The DAO commits the consume flip BEFORE we mint
+    (mirror claim_message) so a mint failure cannot un-consume the nonce."""
+    if login_id is not None:
+        row = login_request_dao.get_by_id(session, login_id)
+        brand = row.brand if row is not None else "nowlez"
+        user_id = login_request_dao.consume_by_id(
+            session, login_id=login_id, poll_bind_hash=session_dao._hash(poll_bind or "")
+        )
+    elif token is not None:
+        row = login_request_dao.get_active_by_token(
+            session, token_hash=session_dao._hash(token), statuses=("confirmed",)
+        )
+        brand = row.brand if row is not None else "nowlez"
+        user_id = login_request_dao.consume_by_token(
+            session, token_hash=session_dao._hash(token)
+        )
+    else:
+        return None
+
+    if user_id is None:
+        audit_dao.log_event(
+            session, event_type="wa_login.consume_replayed",
+            source="identity", ip_address=ip_address,
+        )
+        return None
+
+    user = user_dao.get_by_id(session, user_id)
+    if user is None:
+        return None
+    minted = _mint_login_response(
+        session,
+        user=user,
+        brand=brand,
+        user_agent=user_agent,
+        ip_address=ip_address,
+        event_type="user.login.wa",
+        audit_metadata={"via": "wa_login"},
+    )
+    audit_dao.log_event(
+        session, event_type="wa_login.consumed", source=brand if brand in ("munshi", "nowlez") else "identity",
+        user_id=user.id, ip_address=ip_address,
+    )
+    return minted
+
+
 __all__ = [
     "start_phone_login",
     "verify_otp_and_login",
@@ -336,4 +394,5 @@ __all__ = [
     "start_wa_login",
     "confirm_wa_login",
     "start_wa_login_from_bot",
+    "consume_wa_login",
 ]
