@@ -14,6 +14,15 @@ from ..models import User, UserMunshi, UserNowlez
 _IST = ZoneInfo("Asia/Kolkata")
 
 
+class MergeUnsafeError(ValueError):
+    """Raised by ``merge_users`` when the absorbed account owns irreplaceable
+    child data (legal cases / billing subscriptions / a munshi bot identity)
+    that the hard-delete would cascade away (those tables FK ``users.id`` with
+    ondelete=CASCADE). The merge is refused rather than silently destroying
+    data; the caller (D4 ``link_email_to_phone_account``) treats this as a
+    merge_conflict requiring human resolution."""
+
+
 def get_or_create_by_phone(
     session: Session, *, phone: str, locale: str = "en"
 ) -> tuple[User, bool]:
@@ -189,6 +198,30 @@ def merge_users(session: Session, *, survivor_id: uuid.UUID, absorbed_id: uuid.U
     absorbed = session.get(User, absorbed_id)
     if survivor is None or absorbed is None or survivor_id == absorbed_id:
         return
+
+    # SAFETY GUARD (D4): the absorbed row is hard-deleted below, and cases,
+    # billing subscriptions, and the munshi (bot) identity all FK users.id with
+    # ondelete=CASCADE. Refuse to merge — never silently destroy — an absorbed
+    # account that owns any of that irreplaceable data (this also covers the
+    # "survivor=older happens to be the data-light row" case). The caller treats
+    # MergeUnsafeError as a merge_conflict requiring human resolution.
+    from ..models import Case, Subscription
+
+    absorbed_cases = session.execute(
+        select(func.count()).select_from(Case).where(Case.user_id == absorbed_id)
+    ).scalar_one()
+    absorbed_subs = session.execute(
+        select(func.count())
+        .select_from(Subscription)
+        .where(Subscription.user_id == absorbed_id)
+    ).scalar_one()
+    absorbed_has_munshi = session.get(UserMunshi, absorbed_id) is not None
+    if absorbed_cases or absorbed_subs or absorbed_has_munshi:
+        raise MergeUnsafeError(
+            f"refusing to merge user {absorbed_id}: absorbed account owns child "
+            f"data (cases={absorbed_cases}, subscriptions={absorbed_subs}, "
+            f"munshi={absorbed_has_munshi}) that ondelete=CASCADE would destroy"
+        )
 
     # Fold the email anchor onto the survivor if it doesn't already have one.
     # Use Core UPDATE statements to avoid mixed UUID/str ORM identity-map sort

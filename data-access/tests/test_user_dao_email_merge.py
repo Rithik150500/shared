@@ -105,3 +105,32 @@ def test_merge_users_no_extension_clash(db_session):
     user_dao.merge_users(db_session, survivor_id=survivor.id, absorbed_id=absorbed.id)
     assert db_session.get(User, absorbed.id) is None
     assert db_session.get(User, survivor.id).email == "clash@example.com"
+
+
+def test_merge_users_refuses_when_absorbed_owns_child_data(db_session):
+    # D4 safety: the absorbed row is hard-deleted and cases/billing/munshi FK
+    # users.id with ondelete=CASCADE. merge_users must REFUSE (not silently
+    # destroy) an absorbed account that owns such data.
+    import pytest
+    from datetime import datetime, timedelta, timezone
+
+    from data_access.models import User
+    from data_access.daos.user_dao import MergeUnsafeError
+
+    older = datetime.now(timezone.utc) - timedelta(days=3)
+    survivor = User(phone="+919876555555", created_at=older)
+    db_session.add(survivor)
+    db_session.flush()
+
+    # Absorbed owns a munshi (bot) identity — irreplaceable.
+    absorbed, _ = user_dao.get_or_create_by_phone(db_session, phone="+919876556666")
+    user_dao.ensure_munshi_extension(db_session, absorbed.id)
+    db_session.flush()
+
+    with pytest.raises(MergeUnsafeError):
+        user_dao.merge_users(
+            db_session, survivor_id=survivor.id, absorbed_id=absorbed.id
+        )
+    # Nothing destroyed: both rows survive.
+    assert db_session.get(User, absorbed.id) is not None
+    assert db_session.get(User, survivor.id) is not None
