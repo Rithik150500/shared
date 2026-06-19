@@ -69,3 +69,11 @@ def test_status_server_default_is_pending():
 
 def test_email_otp_delivery_status_server_default_is_pending():
     assert EmailOtpCode.__table__.c["delivery_status"].server_default.arg == "pending"
+
+
+def test_users_nowlez_has_email_verified_column():
+    from data_access.models.user import UserNowlez
+
+    col = UserNowlez.__table__.c["email_verified"]
+    assert col.nullable is False
+    assert col.default.arg is False
