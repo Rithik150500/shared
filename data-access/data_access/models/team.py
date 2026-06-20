@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -41,4 +41,31 @@ class Team(Base):
 
     __table_args__ = (
         Index("teams_owner_id_idx", "owner_id"),
+    )
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType, ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False, server_default="viewer")
+    invited_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUIDType, ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    invite_token: Mapped[str | None] = mapped_column(Text, unique=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("team_id", "user_id", name="team_members_team_user_unique"),
+        Index("team_members_user_idx", "user_id"),
+        Index("team_members_team_idx", "team_id"),
     )
