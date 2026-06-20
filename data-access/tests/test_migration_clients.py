@@ -67,6 +67,19 @@ TEAM_MEMBERS_INDEXES = {
     "team_members_team_user_unique",
 }
 
+PENDING_TEAM_INVITES_COLUMNS = {
+    "invite_token",
+    "team_id",
+    "email",
+    "role",
+    "invited_by",
+    "created_at",
+    "last_email_sent_at",
+}
+PENDING_TEAM_INVITES_INDEXES = {
+    "pending_invites_email_idx",
+}
+
 
 def _script_dir() -> ScriptDirectory:
     cfg = Config(str(ALEMBIC_INI))
@@ -154,6 +167,31 @@ def test_pg_upgrade_creates_clients_and_teams(fresh_pg_at_head):
     assert "teams" in tables, "teams table missing after upgrade (FK target for clients.team_id)"
     assert "clients" in tables, "clients table missing after upgrade"
     assert "team_members" in tables, "team_members table missing after upgrade"
+    assert (
+        "pending_team_invites" in tables
+    ), "pending_team_invites table missing after upgrade"
+
+
+def test_pg_pending_team_invites_columns_present(fresh_pg_at_head):
+    cols = {
+        c["name"]
+        for c in inspect(fresh_pg_at_head).get_columns("pending_team_invites")
+    }
+    missing = PENDING_TEAM_INVITES_COLUMNS - cols
+    assert not missing, (
+        f"pending_team_invites missing columns after upgrade: {sorted(missing)}"
+    )
+
+
+def test_pg_pending_team_invites_indexes_present(fresh_pg_at_head):
+    idx = {
+        i["name"]
+        for i in inspect(fresh_pg_at_head).get_indexes("pending_team_invites")
+    }
+    missing = PENDING_TEAM_INVITES_INDEXES - idx
+    assert not missing, (
+        f"pending_team_invites missing indexes after upgrade: {sorted(missing)}"
+    )
 
 
 def test_pg_team_members_columns_present(fresh_pg_at_head):
@@ -202,15 +240,28 @@ def test_pg_downgrade_drops_then_reupgrade(pg_engine):
     assert "clients" not in tables, "downgrade left clients table behind"
     assert "teams" not in tables, "downgrade left teams table behind"
     assert "team_members" not in tables, "downgrade left team_members table behind"
+    assert (
+        "pending_team_invites" not in tables
+    ), "downgrade left pending_team_invites table behind"
 
-    # Re-upgrade restores all three (idempotent forward path).
+    # Re-upgrade restores all four (idempotent forward path).
     command.upgrade(cfg, "head")
     tables_reup = set(inspect(pg_engine).get_table_names())
-    assert {"clients", "teams", "team_members"} <= tables_reup
+    assert {
+        "clients",
+        "teams",
+        "team_members",
+        "pending_team_invites",
+    } <= tables_reup
 
 
 def test_pg_double_upgrade_idempotent(pg_engine):
     cfg = _reset_to_head(pg_engine)
     command.upgrade(cfg, "head")  # second upgrade is a no-op
     tables = set(inspect(pg_engine).get_table_names())
-    assert {"clients", "teams", "team_members"} <= tables
+    assert {
+        "clients",
+        "teams",
+        "team_members",
+        "pending_team_invites",
+    } <= tables
