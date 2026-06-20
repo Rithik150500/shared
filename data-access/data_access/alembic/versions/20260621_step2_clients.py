@@ -84,6 +84,27 @@ def upgrade() -> None:
     op.create_index("team_members_user_idx", "team_members", ["user_id"])
     op.create_index("team_members_team_idx", "team_members", ["team_id"])
 
+    # pending_team_invites: invite_token TEXT PK; FKs to teams + users.
+    op.create_table(
+        "pending_team_invites",
+        sa.Column("invite_token", sa.Text(), nullable=False),
+        sa.Column("team_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("email", sa.Text(), nullable=False),
+        sa.Column("role", sa.Text(), nullable=False, server_default="viewer"),
+        sa.Column("invited_by", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.Column("last_email_sent_at", sa.DateTime(timezone=True), nullable=True),
+        sa.ForeignKeyConstraint(["team_id"], ["teams.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["invited_by"], ["users.id"], ondelete="SET NULL"),
+        sa.PrimaryKeyConstraint("invite_token"),
+    )
+    op.create_index(
+        "pending_invites_email_idx", "pending_team_invites", ["email"],
+    )
+
     op.create_table(
         "clients",
         # 16-hex TEXT natural key, verbatim from SQLite.
@@ -126,6 +147,10 @@ def downgrade() -> None:
     op.drop_index("clients_user_created_idx", table_name="clients")
     op.drop_index("clients_user_id_idx", table_name="clients")
     op.drop_table("clients")
+    op.drop_index(
+        "pending_invites_email_idx", table_name="pending_team_invites",
+    )
+    op.drop_table("pending_team_invites")
     op.drop_index("team_members_team_idx", table_name="team_members")
     op.drop_index("team_members_user_idx", table_name="team_members")
     op.drop_table("team_members")
