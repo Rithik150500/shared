@@ -4,8 +4,12 @@ Minimal `teams` table introduced alongside the `Client` model so the
 ``clients.team_id -> teams.id`` foreign key has a resolvable target (the FK
 target must exist for ``Base.metadata.create_all()`` and for the paired
 Alembic migration to resolve). Team owns a UUID surrogate PK to match the
-identity keyspace (``users.id``); richer team semantics (membership, roles,
-billing) land in later Step-2 tasks and extend this model.
+identity keyspace (``users.id``).
+
+``TeamMember`` (membership + ``role``) ships here too, paired with the
+``team_members`` table in ``20260621_step2_clients.py``. Remaining team
+semantics (billing, the invite-acceptance flow beyond the ``invite_token`` /
+``accepted_at`` columns) land in later Step-2 tasks and extend these models.
 """
 from __future__ import annotations
 
