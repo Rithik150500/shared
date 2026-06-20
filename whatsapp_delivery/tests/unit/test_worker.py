@@ -111,7 +111,7 @@ def test_do_send_template_success_simple_template():
     )
     wamid = w._do_send_template(
         to="+919999999999",
-        template_name="nowlez_signup_welcome_v1",
+        template_name="nowlez_signup_welcome_v2",
         language="en_US",
         variables={"user_name": "Asha"},
         brand="nowlez",
@@ -160,7 +160,7 @@ def test_do_send_template_nowlez_kill_switch_short_circuits(monkeypatch):
     monkeypatch.setenv("WHATSAPP_NOWLEZ_DISABLED", "1")
     out = w._do_send_template(
         to="+919999999999",
-        template_name="nowlez_signup_welcome_v1",
+        template_name="nowlez_signup_welcome_v2",
         language="en_US",
         variables={"user_name": "Asha"},
         brand="nowlez",
@@ -240,7 +240,7 @@ def test_do_send_template_5xx_propagates_transient_for_retry():
     with pytest.raises(MetaTransientError):
         w._do_send_template(
             to="+919999999999",
-            template_name="nowlez_signup_welcome_v1",
+            template_name="nowlez_signup_welcome_v2",
             language="en_US",
             variables={"user_name": "Asha"},
             brand="nowlez",
@@ -264,7 +264,7 @@ def test_do_send_template_24h_window_dead_letters_and_raises(caplog):
     with pytest.raises(Meta24HourWindowExpired):
         w._do_send_template(
             to="+919999999999",
-            template_name="nowlez_signup_welcome_v1",
+            template_name="nowlez_signup_welcome_v2",
             language="en_US",
             variables={"user_name": "Asha"},
             brand="nowlez",

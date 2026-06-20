@@ -119,19 +119,19 @@ def test_null_send_date_rows_are_exempt_from_unique(db_session):
     _insert_row(
         db_session,
         user_id=u.id,
-        template_name="nowlez_signup_welcome_v1",
+        template_name="nowlez_signup_welcome_v2",
         brand="nowlez",
         send_date_ist=None,
     )
     _insert_row(
         db_session,
         user_id=u.id,
-        template_name="nowlez_signup_welcome_v1",
+        template_name="nowlez_signup_welcome_v2",
         brand="nowlez",
         send_date_ist=None,
     )
     rows = db_session.query(WhatsAppDeliveryLog).filter_by(
-        user_id=u.id, template_name="nowlez_signup_welcome_v1",
+        user_id=u.id, template_name="nowlez_signup_welcome_v2",
     ).all()
     assert len(rows) == 2, "NULL send_date_ist rows must NOT collide"
 

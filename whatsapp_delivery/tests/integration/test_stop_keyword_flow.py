@@ -8,7 +8,7 @@ Per plan §19.2.1. The flow is:
   3. ``handle_stop_keyword`` runs:
      - Flips both ``users_nowlez`` consent flags to False.
      - Writes an ``audit_log`` row with ``event_type='whatsapp.opted_out_via_inbound'``.
-     - Enqueues a ``nowlez_stop_confirmation_v1`` template send.
+     - Enqueues a ``nowlez_stop_confirmation_v2`` template send.
 
 This skeleton walks the whole flow against an in-memory SQLite +
 fakeredis. The Nowlez bridge POST (Munshi-side) is out of scope for the
@@ -89,6 +89,6 @@ def test_stop_keyword_full_flow(db_session, fake_redis):
     from rq import Queue
     queued = Queue("whatsapp_send", connection=fake_redis).jobs
     assert any(
-        j.kwargs.get("template_name") == "nowlez_stop_confirmation_v1"
+        j.kwargs.get("template_name") == "nowlez_stop_confirmation_v2"
         for j in queued
     )

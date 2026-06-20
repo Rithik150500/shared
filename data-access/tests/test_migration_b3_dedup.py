@@ -271,7 +271,7 @@ def test_backfill_leaves_non_daily_rows_with_null_send_date():
             "INSERT INTO whatsapp_delivery_log "
             "(id, user_id, template_name, brand, delivery_status, enqueued_at, sent_at) "
             "VALUES ('11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa', :u, "
-            "        'nowlez_signup_welcome_v1', 'nowlez', 'sent', :now, :now)"
+            "        'nowlez_signup_welcome_v2', 'nowlez', 'sent', :now, :now)"
         ), {"u": uid, "now": now})
 
         conn.execute(text("ALTER TABLE whatsapp_delivery_log ADD COLUMN send_date_ist DATE"))
@@ -284,7 +284,7 @@ def test_backfill_leaves_non_daily_rows_with_null_send_date():
 
         row = conn.execute(text(
             "SELECT send_date_ist FROM whatsapp_delivery_log "
-            "WHERE template_name = 'nowlez_signup_welcome_v1'"
+            "WHERE template_name = 'nowlez_signup_welcome_v2'"
         )).one()
         assert row[0] is None, (
             "transactional rows must keep send_date_ist=NULL (they are "

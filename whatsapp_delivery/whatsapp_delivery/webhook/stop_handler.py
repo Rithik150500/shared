@@ -54,7 +54,7 @@ async def handle_stop_keyword(
     #    and they end up correctly opted-out.
     await enqueue_send_template(
         to=message.from_phone,
-        template_name="nowlez_stop_confirmation_v1",
+        template_name="nowlez_stop_confirmation_v2",
         language="en_US",
         variables={},
         brand="nowlez",

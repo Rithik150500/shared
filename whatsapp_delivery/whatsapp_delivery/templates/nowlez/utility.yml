@@ -22,8 +22,8 @@ templates:
   # ---------------------------------------------------------------------------
   # 8. stop_confirmation — sent right after STOP-keyword opt-out (Task 16).
   # ---------------------------------------------------------------------------
-  - name: stop_confirmation_v1
-    full_name: nowlez_stop_confirmation_v1
+  - name: stop_confirmation_v2
+    full_name: nowlez_stop_confirmation_v2
     category: UTILITY
     languages:
       en_US:
@@ -47,8 +47,8 @@ templates:
   # 9. signup_welcome — sent right after a successful phone-OTP signup
   #    (Task 15). 1 body var: user_name.
   # ---------------------------------------------------------------------------
-  - name: signup_welcome_v1
-    full_name: nowlez_signup_welcome_v1
+  - name: signup_welcome_v2
+    full_name: nowlez_signup_welcome_v2
     category: UTILITY
     languages:
       en_US:
@@ -77,8 +77,8 @@ templates:
   #     out (Task 15 / PATCH /me/notification-preferences with
   #     is_re_enabling=True per plan line 2540).
   # ---------------------------------------------------------------------------
-  - name: resumed_v1
-    full_name: nowlez_resumed_v1
+  - name: resumed_v2
+    full_name: nowlez_resumed_v2
     category: UTILITY
     languages:
       en_US:

@@ -14,7 +14,7 @@ This migration adds the DB-side enforcement so duplicate daily sends are
 impossible regardless of how many scheduler pods race:
 
 1. Add ``send_date_ist DATE`` column (NULLABLE — transactional sends like
-   ``nowlez_signup_welcome_v1`` and OTPs keep it NULL and bypass dedup).
+   ``nowlez_signup_welcome_v2`` and OTPs keep it NULL and bypass dedup).
 2. Backfill existing rows from ``sent_at AT TIME ZONE 'Asia/Kolkata'``
    for rows that look like daily-cadence templates (template_name in a
    known allowlist). Other rows are left NULL.

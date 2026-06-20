@@ -43,7 +43,7 @@ def test_get_template_hi_in_variant_uses_devanagari():
 
 
 def test_get_template_signup_welcome_has_one_body_variable():
-    t = get_template("nowlez_signup_welcome_v1", "en_US")
+    t = get_template("nowlez_signup_welcome_v2", "en_US")
     body_vars = t.body_variables_in_order()
     assert [v.name for v in body_vars] == ["user_name"]
 
@@ -161,8 +161,8 @@ def test_nowlez_button_urls_target_www_nowlez_com():
 
 def test_template_accessor_proxies_to_language_spec():
     """The accessor exposes language-specific body + buttons."""
-    en = get_template("nowlez_stop_confirmation_v1", "en_US")
-    hi = get_template("nowlez_stop_confirmation_v1", "hi_IN")
+    en = get_template("nowlez_stop_confirmation_v2", "en_US")
+    hi = get_template("nowlez_stop_confirmation_v2", "hi_IN")
     assert en.body != hi.body
     assert en.buttons[0].url == hi.buttons[0].url  # same target URL
     # but the button text is localized

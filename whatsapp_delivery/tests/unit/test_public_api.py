@@ -172,9 +172,9 @@ def test_public_module_has_same_surface(pkg, pkg_public):
 
 
 def test_get_template_returns_accessor_via_public_api(pkg):
-    t = pkg.get_template("nowlez_signup_welcome_v1", "en_US")
+    t = pkg.get_template("nowlez_signup_welcome_v2", "en_US")
     assert isinstance(t, pkg.TemplateAccessor)
-    assert t.full_name == "nowlez_signup_welcome_v1"
+    assert t.full_name == "nowlez_signup_welcome_v2"
 
 
 def test_template_registry_is_constructible_via_public_path(pkg):

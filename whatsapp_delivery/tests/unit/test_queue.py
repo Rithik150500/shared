@@ -60,7 +60,7 @@ def test_enqueue_send_template_returns_job_id(fake_redis):
     job_id = _run(
         q.enqueue_send_template(
             to="+919999999999",
-            template_name="nowlez_signup_welcome_v1",
+            template_name="nowlez_signup_welcome_v2",
             language="en_US",
             variables={"user_name": "Asha"},
             brand="nowlez",
@@ -74,7 +74,7 @@ def test_enqueue_send_template_returns_job_id(fake_redis):
     assert job.func_name.endswith("_do_send_template")
     kwargs = job.kwargs
     assert kwargs["to"] == "+919999999999"
-    assert kwargs["template_name"] == "nowlez_signup_welcome_v1"
+    assert kwargs["template_name"] == "nowlez_signup_welcome_v2"
     assert kwargs["language"] == "en_US"
     assert kwargs["variables"] == {"user_name": "Asha"}
     assert kwargs["brand"] == "nowlez"
@@ -191,7 +191,7 @@ def test_enqueue_send_template_dedup_default_false(fake_redis):
     _run(
         q.enqueue_send_template(
             to="+919999999999",
-            template_name="nowlez_signup_welcome_v1",
+            template_name="nowlez_signup_welcome_v2",
             language="en_US",
             variables={"user_name": "Asha"},
             brand="nowlez",
@@ -242,7 +242,7 @@ def test_enqueue_send_template_threads_dedup_key(fake_redis):
     _run(
         q.enqueue_send_template(
             to="+919999999999",
-            template_name="nowlez_signup_welcome_v1",
+            template_name="nowlez_signup_welcome_v2",
             language="en_US",
             variables={"user_name": "Asha"},
             brand="nowlez",
@@ -258,7 +258,7 @@ def test_enqueue_send_template_with_components_threads_dedup_key(fake_redis):
     _run(
         q.enqueue_send_template_with_components(
             to="+919999999999",
-            template_name="nowlez_signup_welcome_v1",
+            template_name="nowlez_signup_welcome_v2",
             language="en",
             body_variables=["Asha"],
             brand="nowlez",

@@ -248,7 +248,7 @@ def test_dedup_kwarg_on_transactional_template_is_a_noop(sqlite_session_factory)
 
     common_kwargs = dict(
         to="+919876543210",
-        template_name="nowlez_signup_welcome_v1",  # NOT in allowlist
+        template_name="nowlez_signup_welcome_v2",  # NOT in allowlist
         language="en_US",
         variables={"user_name": "Asha"},
         brand="nowlez",
@@ -343,7 +343,7 @@ def test_dedup_daily_templates_includes_documented_set():
     assert "nowlez_tomorrow_hearings_v1" in w._DEDUP_DAILY_TEMPLATES
     assert "nowlez_weekly_summary_v1" in w._DEDUP_DAILY_TEMPLATES
     # Transactional templates must NOT be in the allowlist.
-    assert "nowlez_signup_welcome_v1" not in w._DEDUP_DAILY_TEMPLATES
+    assert "nowlez_signup_welcome_v2" not in w._DEDUP_DAILY_TEMPLATES
 
 
 # ---------------------------------------------------------------------------
