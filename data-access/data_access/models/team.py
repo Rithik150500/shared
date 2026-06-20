@@ -16,7 +16,7 @@ from sqlalchemy import DateTime, ForeignKey, Index, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
-from .user import UUIDType  # SQLite-roundtrip-safe UUID TypeDecorator INSTANCE
+from .case import UUIDType  # SQLite-roundtrip-safe UUID TypeDecorator INSTANCE
 
 
 class Team(Base):

@@ -27,3 +27,18 @@ def test_client_team_fk_nullable(db_session):
     c = Client(id="bbb222ccc333dddd", user_id=u.id, name="WithTeam", team_id=t.id)
     db_session.add(c); db_session.flush()
     assert db_session.get(Client, "bbb222ccc333dddd").team_id == t.id
+
+
+def test_team_id_uuid_roundtrip(db_session):
+    # Guards the keyspace round-trip on teams: a Team loaded from the SQLite
+    # db_session must hand back .id as uuid.UUID (not str), so DAO comparisons
+    # against Client.team_id (uuid.UUID) compare equal. Regressing teams.id to
+    # the .user with_variant form (str-returning on SQLite read) fails here.
+    u = User(email="o3@x.com", is_active=True)
+    db_session.add(u); db_session.flush()
+    t = Team(id=uuid.uuid4(), owner_id=u.id, name="T3", tier="free")
+    db_session.add(t); db_session.flush()
+    db_session.expire_all()
+    got = db_session.get(Team, t.id)
+    assert isinstance(got.id, uuid.UUID)
+    assert isinstance(got.owner_id, uuid.UUID)
