@@ -7,6 +7,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from ..models import OtpCode
+from ..phone import normalize_phone
 
 
 def insert(
@@ -18,9 +19,14 @@ def insert(
     ttl_minutes: int = 10,
     ip_address: str | None = None,
 ) -> OtpCode:
+    canonical = normalize_phone(phone)
+    if canonical is None:
+        # OtpCode.phone is NOT NULL; fail loudly and clearly rather than with an
+        # opaque IntegrityError at flush. Callers must pass a real phone number.
+        raise ValueError("otp_dao.insert requires a valid phone number")
     now = datetime.now(timezone.utc)
     o = OtpCode(
-        phone=phone,
+        phone=canonical,
         code_hash=code_hash,
         channel=channel,
         expires_at=now + timedelta(minutes=ttl_minutes),
@@ -40,7 +46,7 @@ def get_active(session: Session, phone: str) -> OtpCode | None:
     stmt = (
         select(OtpCode)
         .where(
-            OtpCode.phone == phone,
+            OtpCode.phone == normalize_phone(phone),
             OtpCode.used_at.is_(None),
             OtpCode.expires_at > func.now(),
         )
@@ -113,7 +119,7 @@ def count_within(session: Session, phone: str, minutes: int) -> int:
     stmt = (
         select(func.count())
         .select_from(OtpCode)
-        .where(OtpCode.phone == phone, OtpCode.created_at > cutoff)
+        .where(OtpCode.phone == normalize_phone(phone), OtpCode.created_at > cutoff)
     )
     return session.execute(stmt).scalar_one()
 

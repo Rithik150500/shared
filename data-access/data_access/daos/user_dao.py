@@ -10,6 +10,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..models import User, UserMunshi, UserNowlez
+from ..phone import normalize_phone
 
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -30,6 +31,9 @@ def get_or_create_by_phone(
     mirroring whatsapp_dao.claim_message). Fixes the read-then-write race at
     app.py:154 where two concurrent inbound workers could both INSERT the same
     phone. Returns (user, was_created)."""
+    # Canonicalize to E.164 so the web/OTP path (bare 10-digit) and the WhatsApp
+    # webhook (+91...) converge on one users row instead of splitting identity.
+    phone = normalize_phone(phone)
     dialect = session.get_bind().dialect.name
     insert_fn = pg_insert if dialect == "postgresql" else sqlite_insert
     stmt = (
@@ -45,7 +49,9 @@ def get_or_create_by_phone(
 
 
 def get_by_phone(session: Session, phone: str) -> User | None:
-    return session.execute(select(User).where(User.phone == phone)).scalar_one_or_none()
+    return session.execute(
+        select(User).where(User.phone == normalize_phone(phone))
+    ).scalar_one_or_none()
 
 
 def get_by_id(session: Session, user_id: uuid.UUID) -> User | None:
