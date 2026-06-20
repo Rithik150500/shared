@@ -52,3 +52,33 @@ def test_verify_unknown_otp_id_raises(postgresql_session):
     import uuid
     with pytest.raises(OtpInvalid):
         verify_otp(postgresql_session, otp_id=uuid.uuid4(), code="123456")
+
+
+def test_verify_otp_atomic_success_then_replay(db_session):
+    import pytest
+    from data_access.daos import otp_dao
+    from identity.errors import OtpAlreadyUsed
+    from identity.otp.issuer import hash_otp_code
+    from identity.otp.verifier import verify_otp_atomic
+
+    o = otp_dao.insert(db_session, phone="+919876543210", code_hash=hash_otp_code("123456"), channel="whatsapp")
+    db_session.flush()
+    verify_otp_atomic(db_session, otp_id=o.id, code="123456")  # burns the code
+    with pytest.raises(OtpAlreadyUsed):
+        verify_otp_atomic(db_session, otp_id=o.id, code="123456")
+
+
+def test_verify_otp_atomic_wrong_code_decrements_not_burns(db_session):
+    import pytest
+    from data_access.daos import otp_dao
+    from identity.errors import OtpInvalid
+    from identity.otp.issuer import hash_otp_code
+    from identity.otp.verifier import verify_otp_atomic
+
+    o = otp_dao.insert(db_session, phone="+919876543210", code_hash=hash_otp_code("123456"), channel="whatsapp")
+    db_session.flush()
+    with pytest.raises(OtpInvalid):
+        verify_otp_atomic(db_session, otp_id=o.id, code="000000")
+    db_session.refresh(o)
+    assert o.attempts_remaining == 2  # decremented, NOT used
+    assert o.used_at is None

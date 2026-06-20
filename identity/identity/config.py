@@ -39,6 +39,8 @@ class IdentitySettings(BaseSettings):
     META_ACCESS_TOKEN: str = ""
     META_PHONE_NUMBER_ID: str = ""
     META_AUTH_TEMPLATE_NAME: str = "auth_otp_v1"
+    # Optional approved WhatsApp UTILITY template for security alerts; empty = skip WA alert.
+    META_SECURITY_TEMPLATE_NAME: str = ""
 
     # Delivery — SMS (MSG91)
     MSG91_AUTH_KEY: str = ""
@@ -48,6 +50,19 @@ class IdentitySettings(BaseSettings):
     # Delivery timeouts
     WHATSAPP_SEND_TIMEOUT_SECONDS: float = 15.0
     SMS_SEND_TIMEOUT_SECONDS: float = 10.0
+
+    # WhatsApp one-tap login (Method A)
+    WA_LOGIN_NONCE_TTL_WEB2BOT_SECONDS: int = 300
+    WA_LOGIN_NONCE_TTL_BOT2WEB_SECONDS: int = 120
+    WA_LOGIN_NONCE_LENGTH: int = 24  # token_urlsafe byte count; >=128 bits
+    MUNSHI_WA_DIGITS: str = "919643460175"  # wa.me target = Munshi BOT number (NOT casepilot OTP)
+    WEB_DASHBOARD_BASE_URL: str = ""  # e.g. https://app.nowlez.com (bot2web deep-link base)
+
+    # Email OTP (Method C) — Resend
+    EMAIL_OTP_FROM: str = ""  # e.g. 'Nowlez <noreply@nowlez.com>'
+    RESEND_API_KEY: str = ""  # shared with casepilot RESEND_API_KEY
+    EMAIL_SEND_TIMEOUT_SECONDS: int = 10
+    OTP_PER_EMAIL_PER_HOUR: int = 5  # mirrors OTP_PER_PHONE_PER_HOUR
 
 
 settings = IdentitySettings()

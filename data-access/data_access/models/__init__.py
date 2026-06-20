@@ -1,5 +1,5 @@
 from .audit import AuditLog
-from .auth import AuthSession, OtpCode
+from .auth import AuthSession, EmailOtpCode, LoginRequest, OtpCode
 from .billing import (
     CaseBillingPeriod,
     CouponCode,
@@ -21,6 +21,8 @@ __all__ = [
     "UserNowlez",
     "AuthSession",
     "OtpCode",
+    "LoginRequest",
+    "EmailOtpCode",
     "AuditLog",
     "Case",
     "CaseOrder",

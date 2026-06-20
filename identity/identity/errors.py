@@ -69,3 +69,18 @@ class DeliveryFailed(IdentityError):
         self.channel = channel
         self.provider_error = provider_error
         super().__init__(f"Delivery failed via {channel}: {provider_error}")
+
+
+class EmailDeliveryFailed(DeliveryFailed):
+    """Email OTP delivery (Resend) failed. Soft-fail: caller still returns 200
+    (anti-enumeration) but marks the row failed + bumps the fail metric."""
+
+    def __init__(self, provider_error: str = ""):
+        super().__init__("email", provider_error)
+
+
+# --- Account linking (D4) ---
+class AccountLinkStepUpRequired(IdentityError):
+    """An email-OTP verify landed on an existing phone/password account whose
+    email is not yet verified, and no second proven identifier is present.
+    The SPA must prompt 'verify by phone to link this email' (HTTP 409)."""

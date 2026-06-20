@@ -4,7 +4,9 @@ import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..models import User, UserMunshi, UserNowlez
@@ -12,16 +14,34 @@ from ..models import User, UserMunshi, UserNowlez
 _IST = ZoneInfo("Asia/Kolkata")
 
 
+class MergeUnsafeError(ValueError):
+    """Raised by ``merge_users`` when the absorbed account owns irreplaceable
+    child data (legal cases / billing subscriptions / a munshi bot identity)
+    that the hard-delete would cascade away (those tables FK ``users.id`` with
+    ondelete=CASCADE). The merge is refused rather than silently destroying
+    data; the caller (D4 ``link_email_to_phone_account``) treats this as a
+    merge_conflict requiring human resolution."""
+
+
 def get_or_create_by_phone(
     session: Session, *, phone: str, locale: str = "en"
 ) -> tuple[User, bool]:
-    user = session.execute(select(User).where(User.phone == phone)).scalar_one_or_none()
-    if user is not None:
-        return user, False
-    user = User(phone=phone, locale=locale)
-    session.add(user)
+    """INSERT ON CONFLICT (phone) DO NOTHING then re-SELECT (dialect-aware,
+    mirroring whatsapp_dao.claim_message). Fixes the read-then-write race at
+    app.py:154 where two concurrent inbound workers could both INSERT the same
+    phone. Returns (user, was_created)."""
+    dialect = session.get_bind().dialect.name
+    insert_fn = pg_insert if dialect == "postgresql" else sqlite_insert
+    stmt = (
+        insert_fn(User)
+        .values(phone=phone, locale=locale)
+        .on_conflict_do_nothing(index_elements=["phone"])
+    )
+    result = session.execute(stmt)
     session.flush()
-    return user, True
+    was_created = result.rowcount > 0
+    user = session.execute(select(User).where(User.phone == phone)).scalar_one()
+    return user, was_created
 
 
 def get_by_phone(session: Session, phone: str) -> User | None:
@@ -121,3 +141,131 @@ def list_munshi_users(
         stmt = stmt.where(User.phone.ilike(f"%{search}%"))
     stmt = stmt.order_by(UserMunshi.created_at.desc()).limit(limit).offset(offset)
     return list(session.execute(stmt).tuples().all())
+
+
+def get_or_create_by_email(
+    session: Session, *, email: str, locale: str = "en"
+) -> tuple[User, bool]:
+    """INSERT ON CONFLICT (email) DO NOTHING then re-SELECT (dialect-aware,
+    mirroring whatsapp_dao.claim_message). ``email`` MUST be pre-canonicalized
+    by the caller. Returns (user, was_created)."""
+    dialect = session.get_bind().dialect.name
+    insert_fn = pg_insert if dialect == "postgresql" else sqlite_insert
+    stmt = (
+        insert_fn(User)
+        .values(email=email, locale=locale)
+        .on_conflict_do_nothing(index_elements=["email"])
+    )
+    result = session.execute(stmt)
+    session.flush()
+    was_created = result.rowcount > 0
+    user = session.execute(select(User).where(User.email == email)).scalar_one()
+    return user, was_created
+
+
+def get_by_email(session: Session, email: str) -> User | None:
+    return session.execute(select(User).where(User.email == email)).scalar_one_or_none()
+
+
+def set_email_verified(session: Session, user_id: uuid.UUID) -> None:
+    """Mark this account's email as verified (D4 signal). No-op if no
+    users_nowlez extension exists yet — the caller ensures the extension first
+    on the mint path."""
+    session.execute(
+        update(UserNowlez)
+        .where(UserNowlez.user_id == user_id)
+        .values(email_verified=True)
+    )
+    session.flush()
+
+
+def is_email_verified(session: Session, user_id: uuid.UUID) -> bool:
+    """True iff users_nowlez.email_verified is set for this user. A missing
+    extension row reads as False (unverified)."""
+    val = session.execute(
+        select(UserNowlez.email_verified).where(UserNowlez.user_id == user_id)
+    ).scalar_one_or_none()
+    return bool(val)
+
+
+def merge_users(session: Session, *, survivor_id: uuid.UUID, absorbed_id: uuid.UUID) -> None:
+    """D4 auto-merge: fold the absorbed user into the survivor. Survivor is the
+    canonical row (caller passes the older created_at as survivor). Never drops
+    case/billing rows — only re-points the nowlez extension and copies the
+    email/email_verified anchor, then deletes the absorbed users row (its
+    leftover extension is removed by the ondelete=CASCADE FK)."""
+    survivor = session.get(User, survivor_id)
+    absorbed = session.get(User, absorbed_id)
+    if survivor is None or absorbed is None or survivor_id == absorbed_id:
+        return
+
+    # SAFETY GUARD (D4): the absorbed row is hard-deleted below, and cases,
+    # billing subscriptions, and the munshi (bot) identity all FK users.id with
+    # ondelete=CASCADE. Refuse to merge — never silently destroy — an absorbed
+    # account that owns any of that irreplaceable data (this also covers the
+    # "survivor=older happens to be the data-light row" case). The caller treats
+    # MergeUnsafeError as a merge_conflict requiring human resolution.
+    from ..models import Case, Subscription
+
+    absorbed_cases = session.execute(
+        select(func.count()).select_from(Case).where(Case.user_id == absorbed_id)
+    ).scalar_one()
+    absorbed_subs = session.execute(
+        select(func.count())
+        .select_from(Subscription)
+        .where(Subscription.user_id == absorbed_id)
+    ).scalar_one()
+    absorbed_has_munshi = session.get(UserMunshi, absorbed_id) is not None
+    if absorbed_cases or absorbed_subs or absorbed_has_munshi:
+        raise MergeUnsafeError(
+            f"refusing to merge user {absorbed_id}: absorbed account owns child "
+            f"data (cases={absorbed_cases}, subscriptions={absorbed_subs}, "
+            f"munshi={absorbed_has_munshi}) that ondelete=CASCADE would destroy"
+        )
+
+    # Fold the email anchor onto the survivor if it doesn't already have one.
+    # Use Core UPDATE statements to avoid mixed UUID/str ORM identity-map sort
+    # errors on SQLite (where the ON CONFLICT re-SELECT returns str PKs while
+    # directly-constructed User rows carry uuid.UUID PKs).
+    if survivor.email is None and absorbed.email is not None:
+        absorbed_email = absorbed.email
+        # Release UNIQUE on absorbed first, then claim on survivor.
+        session.execute(update(User).where(User.id == absorbed_id).values(email=None))
+        session.flush()
+        session.execute(update(User).where(User.id == survivor_id).values(email=absorbed_email))
+        session.flush()
+        session.expire(survivor)
+        session.expire(absorbed)
+    if survivor.phone is None and absorbed.phone is not None:
+        absorbed_phone = absorbed.phone
+        session.execute(update(User).where(User.id == absorbed_id).values(phone=None))
+        session.flush()
+        session.execute(update(User).where(User.id == survivor_id).values(phone=absorbed_phone))
+        session.flush()
+        session.expire(survivor)
+        session.expire(absorbed)
+
+    # Re-point the nowlez extension to the survivor only if the survivor has none.
+    survivor_ext = session.get(UserNowlez, survivor_id)
+    absorbed_ext = session.get(UserNowlez, absorbed_id)
+    if survivor_ext is None and absorbed_ext is not None:
+        session.execute(
+            update(UserNowlez)
+            .where(UserNowlez.user_id == absorbed_id)
+            .values(user_id=survivor_id)
+        )
+    # Carry the verified-email flag forward.
+    if absorbed_ext is not None and absorbed_ext.email_verified:
+        session.execute(
+            update(UserNowlez)
+            .where(UserNowlez.user_id == survivor_id)
+            .values(email_verified=True)
+        )
+    session.flush()
+
+    # Delete the absorbed row; CASCADE removes any extension still pointing at it.
+    # Re-fetch absorbed fresh so the ORM delete uses a consistent PK type.
+    absorbed_fresh = session.get(User, absorbed_id)
+    if absorbed_fresh is not None:
+        session.delete(absorbed_fresh)
+        session.flush()

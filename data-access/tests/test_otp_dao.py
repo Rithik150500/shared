@@ -98,3 +98,21 @@ def test_cleanup_expired(postgresql_session):
     otp_dao.insert(postgresql_session, phone="+91...", code_hash="x", channel="whatsapp", ttl_minutes=-2000)
     n = otp_dao.cleanup_expired(postgresql_session, older_than_hours=24)
     assert n >= 1
+
+
+def test_mark_used_atomic_single_use(db_session):
+    # §10 atomic single-use: first call wins (rowcount 1), replay loses (0).
+    o = otp_dao.insert(
+        db_session, phone="+919876500099", code_hash="x", channel="whatsapp", ttl_minutes=10
+    )
+    db_session.flush()
+    assert otp_dao.mark_used_atomic(db_session, o.id) == 1
+    assert otp_dao.mark_used_atomic(db_session, o.id) == 0
+
+
+def test_mark_used_atomic_expired_returns_zero(db_session):
+    o = otp_dao.insert(
+        db_session, phone="+919876500098", code_hash="x", channel="whatsapp", ttl_minutes=-5
+    )
+    db_session.flush()
+    assert otp_dao.mark_used_atomic(db_session, o.id) == 0

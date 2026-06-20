@@ -175,6 +175,14 @@ class UserNowlez(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Unified-auth D4: "verified email on account" signal. True on the first
+    # successful email-OTP verify against this users.id and on the reviewed
+    # Sub-A/Sub-G email backfill. Chosen over a new users column so the shared
+    # core table is untouched and the bot does not need this flag.
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
     # Sub-project G: forensic-only column recording the SQLite 8-char id
     # for each user that existed pre-G. NO FK references this column;
     # production code uses the Postgres UUID exclusively. Used by support
