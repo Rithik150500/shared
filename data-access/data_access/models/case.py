@@ -108,7 +108,9 @@ class Case(Base):
     )
 
     notes: Mapped[str | None] = mapped_column(Text)
-    client_id: Mapped[str | None] = mapped_column(Text)
+    client_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("clients.id", ondelete="SET NULL"), nullable=True,
+    )
 
     # JSONB columns: Python-side defaults so SQLite INSERTs work without the
     # Postgres `'[]'::jsonb` server_default literal.

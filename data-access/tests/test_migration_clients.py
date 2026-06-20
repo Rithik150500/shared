@@ -265,3 +265,12 @@ def test_pg_double_upgrade_idempotent(pg_engine):
         "team_members",
         "pending_team_invites",
     } <= tables
+
+
+def test_cases_client_id_has_fk_to_clients(fresh_pg_at_head):
+    insp = inspect(fresh_pg_at_head)
+    fks = insp.get_foreign_keys("cases")
+    target = [f for f in fks if f["referred_table"] == "clients"
+              and f["constrained_columns"] == ["client_id"]]
+    assert target, "cases.client_id FK to clients(id) missing"
+    assert target[0]["options"].get("ondelete", "").upper() == "SET NULL"

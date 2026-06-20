@@ -141,8 +141,25 @@ def upgrade() -> None:
         postgresql_where=sa.text("team_id IS NOT NULL"),
     )
 
+    # 5. cases.client_id -> real FK clients(id) ON DELETE SET NULL.
+    # Created NOT VALID then VALIDATE so the ALTER never aborts on a populated
+    # prod cases table (any un-bridged/demo client_id is NULLed by the Task-12
+    # orphan sweep before VALIDATE runs in the runbook). This migration is
+    # Postgres-only (postgresql.UUID / gen_random_uuid() throughout); SQLite
+    # cannot ALTER ADD CONSTRAINT, so the FK there is expressed only via the
+    # model (create_all). Guard on the dialect to mirror downgrade().
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(
+            "ALTER TABLE cases ADD CONSTRAINT cases_client_id_fkey "
+            "FOREIGN KEY (client_id) REFERENCES clients (id) "
+            "ON DELETE SET NULL NOT VALID"
+        )
+        op.execute("ALTER TABLE cases VALIDATE CONSTRAINT cases_client_id_fkey")
+
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name == "postgresql":
+        op.drop_constraint("cases_client_id_fkey", "cases", type_="foreignkey")
     op.drop_index("clients_team_id_idx", table_name="clients")
     op.drop_index("clients_user_created_idx", table_name="clients")
     op.drop_index("clients_user_id_idx", table_name="clients")
