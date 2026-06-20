@@ -192,6 +192,26 @@ class UserNowlez(Base):
         Text, nullable=True, unique=True, index=True
     )
 
+    # Sub-G step 1: orphan columns migrated from the SQLite `users` table —
+    # identity-channel users need a PG home for these (no SQLite row).
+    monthly_upload_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    usage_reset_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    last_export_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_case_exports_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    unsubscribed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    first_case_email_sent: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    last_digest_sent_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
