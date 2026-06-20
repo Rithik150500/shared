@@ -76,14 +76,19 @@ def test_get_template_unknown_language_raises():
 # ---------------------------------------------------------------------------
 
 
-def test_list_templates_includes_all_21_nowlez_filings():
-    """11 distinct nowlez templates, 21 total filings (test_smoke hi_IN absent)."""
+def test_list_templates_includes_all_35_nowlez_filings():
+    """18 distinct nowlez templates, 35 total filings.
+
+    Original 11 (10 × {en_US,hi} + test_smoke en_US-only = 21 filings) + the 7
+    billing-lifecycle templates added in billing.yml (each × {en_US,hi} = 14
+    filings) → 18 distinct, 35 filings.
+    """
     nowlez = [t for t in list_templates() if t.full_name.startswith("nowlez_")]
     distinct = {t.full_name for t in nowlez}
-    assert len(distinct) == 11
+    assert len(distinct) == 18
 
     total_filings = sum(len(t.languages) for t in nowlez)
-    assert total_filings == 21
+    assert total_filings == 35
 
 
 def test_list_templates_includes_munshi_extracts():
@@ -137,16 +142,20 @@ def test_button_urls_use_https_only():
                     )
 
 
-def test_nowlez_button_urls_target_app_nowlez_in():
-    """All nowlez URL buttons point at app.nowlez.in (the verified domain)."""
+def test_nowlez_button_urls_target_www_nowlez_com():
+    """All nowlez URL buttons point at www.nowlez.com (the live web origin).
+
+    app.nowlez.in was the original (dead) domain; templates were migrated to
+    www.nowlez.com 2026-06-20 in both the live Meta WABA and this registry.
+    """
     for t in list_templates():
         if not t.full_name.startswith("nowlez_"):
             continue
         for code, lang_spec in t.languages.items():
             for btn in lang_spec.buttons:
                 if btn.type == "url":
-                    assert "app.nowlez.in" in btn.url, (
-                        f"{t.full_name}/{code}: URL not on app.nowlez.in: {btn.url}"
+                    assert "www.nowlez.com" in btn.url, (
+                        f"{t.full_name}/{code}: URL not on www.nowlez.com: {btn.url}"
                     )
 
 

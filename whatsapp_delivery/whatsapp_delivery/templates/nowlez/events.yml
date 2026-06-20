@@ -3,7 +3,7 @@
 # WhatsApp branch on new orders / hearing changes / status changes / disposal
 # / transfer).
 #
-# Domain assumption: app.nowlez.in is the verified deep-link host. The case
+# Domain assumption: www.nowlez.com is the verified deep-link host. The case
 # detail route is /cases/{{case_id}}; templates with a URL button include a
 # `case_id` button_url variable that Meta interpolates into the URL suffix.
 templates:
@@ -24,7 +24,7 @@ templates:
 
           This order was added to your case file on Nowlez.
         buttons:
-          - { type: url, text: "Open in Nowlez", url: "https://app.nowlez.in/cases/{{1}}" }
+          - { type: url, text: "Open in Nowlez", url: "https://www.nowlez.com/cases/{{1}}" }
         variables:
           - { name: case_title, position: 1, location: body }
           - { name: order_date, position: 2, location: body }
@@ -40,7 +40,7 @@ templates:
 
           यह आदेश आपकी केस फ़ाइल में जोड़ दिया गया है।
         buttons:
-          - { type: url, text: "Nowlez में देखें", url: "https://app.nowlez.in/cases/{{1}}" }
+          - { type: url, text: "Nowlez में देखें", url: "https://www.nowlez.com/cases/{{1}}" }
         variables:
           - { name: case_title, position: 1, location: body }
           - { name: order_date, position: 2, location: body }
@@ -64,7 +64,7 @@ templates:
 
           Please review on Nowlez.
         buttons:
-          - { type: url, text: "Open in Nowlez", url: "https://app.nowlez.in/cases/{{1}}" }
+          - { type: url, text: "Open in Nowlez", url: "https://www.nowlez.com/cases/{{1}}" }
         variables:
           - { name: case_title, position: 1, location: body }
           - { name: new_date, position: 2, location: body }
@@ -80,7 +80,7 @@ templates:
 
           कृपया Nowlez पर देखें।
         buttons:
-          - { type: url, text: "Nowlez में देखें", url: "https://app.nowlez.in/cases/{{1}}" }
+          - { type: url, text: "Nowlez में देखें", url: "https://www.nowlez.com/cases/{{1}}" }
         variables:
           - { name: case_title, position: 1, location: body }
           - { name: new_date, position: 2, location: body }
@@ -105,7 +105,7 @@ templates:
 
           Tap below for the full timeline on Nowlez.
         buttons:
-          - { type: url, text: "Open in Nowlez", url: "https://app.nowlez.in/cases/{{1}}" }
+          - { type: url, text: "Open in Nowlez", url: "https://www.nowlez.com/cases/{{1}}" }
         variables:
           - { name: case_title, position: 1, location: body }
           - { name: new_status, position: 2, location: body }
@@ -123,7 +123,7 @@ templates:
 
           पूरी टाइमलाइन देखने के लिए नीचे टैप करें।
         buttons:
-          - { type: url, text: "Nowlez में देखें", url: "https://app.nowlez.in/cases/{{1}}" }
+          - { type: url, text: "Nowlez में देखें", url: "https://www.nowlez.com/cases/{{1}}" }
         variables:
           - { name: case_title, position: 1, location: body }
           - { name: new_status, position: 2, location: body }
@@ -148,7 +148,7 @@ templates:
 
           Open the case file on Nowlez for the order.
         buttons:
-          - { type: url, text: "Open in Nowlez", url: "https://app.nowlez.in/cases/{{1}}" }
+          - { type: url, text: "Open in Nowlez", url: "https://www.nowlez.com/cases/{{1}}" }
         variables:
           - { name: case_title, position: 1, location: body }
           - { name: disposal_date, position: 2, location: body }
@@ -164,7 +164,7 @@ templates:
 
           आदेश के लिए केस फ़ाइल खोलें।
         buttons:
-          - { type: url, text: "Nowlez में देखें", url: "https://app.nowlez.in/cases/{{1}}" }
+          - { type: url, text: "Nowlez में देखें", url: "https://www.nowlez.com/cases/{{1}}" }
         variables:
           - { name: case_title, position: 1, location: body }
           - { name: disposal_date, position: 2, location: body }
@@ -188,7 +188,7 @@ templates:
 
           Updated case details are now on Nowlez.
         buttons:
-          - { type: url, text: "Open in Nowlez", url: "https://app.nowlez.in/cases/{{1}}" }
+          - { type: url, text: "Open in Nowlez", url: "https://www.nowlez.com/cases/{{1}}" }
         variables:
           - { name: case_title, position: 1, location: body }
           - { name: new_court, position: 2, location: body }
@@ -204,7 +204,7 @@ templates:
 
           अद्यतन केस विवरण अब Nowlez पर उपलब्ध है।
         buttons:
-          - { type: url, text: "Nowlez में देखें", url: "https://app.nowlez.in/cases/{{1}}" }
+          - { type: url, text: "Nowlez में देखें", url: "https://www.nowlez.com/cases/{{1}}" }
         variables:
           - { name: case_title, position: 1, location: body }
           - { name: new_court, position: 2, location: body }

@@ -23,7 +23,7 @@ templates:
 
           Open the Nowlez calendar for time slots and court rooms.
         buttons:
-          - { type: url, text: "Open calendar", url: "https://app.nowlez.in/calendar" }
+          - { type: url, text: "Open calendar", url: "https://www.nowlez.com/calendar" }
         variables:
           - { name: count, position: 1, location: body }
           - { name: formatted_list, position: 2, location: body }
@@ -36,7 +36,7 @@ templates:
 
           समय और कोर्ट रूम के लिए Nowlez कैलेंडर खोलें।
         buttons:
-          - { type: url, text: "कैलेंडर खोलें", url: "https://app.nowlez.in/calendar" }
+          - { type: url, text: "कैलेंडर खोलें", url: "https://www.nowlez.com/calendar" }
         variables:
           - { name: count, position: 1, location: body }
           - { name: formatted_list, position: 2, location: body }
@@ -59,7 +59,7 @@ templates:
 
           Tap below to open your Nowlez dashboard.
         buttons:
-          - { type: url, text: "Open dashboard", url: "https://app.nowlez.in/dashboard" }
+          - { type: url, text: "Open dashboard", url: "https://www.nowlez.com/dashboard" }
         variables:
           - { name: new_orders_count, position: 1, location: body }
           - { name: hearings_completed, position: 2, location: body }
@@ -75,7 +75,7 @@ templates:
 
           अपना Nowlez डैशबोर्ड खोलने के लिए नीचे टैप करें।
         buttons:
-          - { type: url, text: "डैशबोर्ड खोलें", url: "https://app.nowlez.in/dashboard" }
+          - { type: url, text: "डैशबोर्ड खोलें", url: "https://www.nowlez.com/dashboard" }
         variables:
           - { name: new_orders_count, position: 1, location: body }
           - { name: hearings_completed, position: 2, location: body }
