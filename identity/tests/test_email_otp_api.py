@@ -16,6 +16,7 @@ def test_start_email_otp_shape_and_canonicalization(db_session):
     o = email_otp_dao.get_by_id(db_session, __import__("uuid").UUID(out["otp_id"]))
     assert o.email == "user@example.com"  # lowercased + stripped
     assert o.delivery_status == "delivered"
+    assert out["delivered"] is True  # web wrapper records success on this
     assert "email_otp.issued" in [a.event_type for a in db_session.query(AuditLog).all()]
 
 
@@ -32,6 +33,7 @@ def test_start_email_otp_soft_fail_still_returns_otp_id(db_session):
     with patch("identity.api.deliver_email_otp", side_effect=EmailDeliveryFailed("resend 500")):
         out = identity_api.start_email_otp(db_session, email="fail@example.com")
     assert "otp_id" in out  # 200 anti-enumeration even on delivery soft-fail
+    assert out["delivered"] is False  # web wrapper records fail -> /health/otp
     o = email_otp_dao.get_by_id(db_session, __import__("uuid").UUID(out["otp_id"]))
     assert o.delivery_status == "failed"
 

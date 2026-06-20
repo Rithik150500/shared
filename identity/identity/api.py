@@ -439,19 +439,23 @@ def start_email_otp(session: Session, *, email: str, ip_address: str | None = No
         session, email=email, code_hash=hash_otp_code(code),
         ttl_minutes=settings.OTP_TTL_MINUTES, ip_address=ip_address,
     )
+    delivered = True
     try:
         _channel, provider_id = deliver_email_otp(email, code)
         email_otp_dao.mark_delivered(session, o.id, provider_id=provider_id)
     except EmailDeliveryFailed:
         # Soft-fail: mark failed, still return otp_id (anti-enumeration). The
-        # web wrapper bumps otp_delivery_total{channel='email',result='fail'}.
+        # `delivered` flag lets the web wrapper bump
+        # otp_delivery_total{channel='email',result='fail'} + the /health/otp
+        # tracker WITHOUT exposing the outcome to the client (it strips it).
         email_otp_dao.mark_failed(session, o.id)
+        delivered = False
 
     audit_dao.log_event(
         session, event_type="email_otp.issued", source="identity",
         metadata={"otp_id": str(o.id), "channel": "email"}, ip_address=ip_address,
     )
-    return {"otp_id": str(o.id), "channel": "email"}
+    return {"otp_id": str(o.id), "channel": "email", "delivered": delivered}
 
 
 def _verify_email_otp_atomic(session: Session, *, otp_id: uuid.UUID, code: str) -> str:
