@@ -51,6 +51,69 @@ _SR_NO_HEADER_RE = re.compile(
 # Row-start markers: digit possibly followed by ')' or '.' (e.g. "1", "1)", "1.")
 _ROW_START_RE = re.compile(r"^\d+[)\.]?$")
 
+# A case_number is already complete when it ends in "/<number>/<year>" (the form
+# the CNR back-resolver's parse_pdf_case_number reads, e.g. "WP(C)/188/2026").
+_FULL_CASE_NUMBER_RE = re.compile(r"/\s*\d+\s*/\s*\d{4}\s*$")
+# Pull "<type> ... <number>/<year>" out of a joined case-no column. The "/+"
+# tolerates the doubled slash Delhi prints ("8287//2026").
+_COLUMN_CASE_NUMBER_RE = re.compile(r"^(.*?)(\d+)\s*/+\s*(\d{4})")
+# Trailing junk on the type half ('-', spaces, commas) that parse_pdf_case_number
+# (type chars are letters, parens, dots, spaces) would choke on.
+_TYPE_TAIL_JUNK_RE = re.compile(r"[^A-Za-z().]+$")
+
+
+def _rebuild_case_number_from_column(bundle: dict[str, Any]) -> str:
+    """Reconstruct a ``TYPE/NUMBER/YEAR`` case number from the whole case-no column.
+
+    Some HCs (Delhi) print the case *type* on the case-no column's first line and
+    the *number/year* on the next, e.g. ``W.P.(C)-`` over ``8287//2026``. The
+    leading token alone (what ``_bundle_to_row`` extracts) is an unparseable
+    fragment. Here we gather every word in the case-no column -- which is
+    left-aligned, so its words share the first-after-serial x position -- across
+    all of the bundle's lines, then pull the first ``type`` + ``number/year``.
+
+    Returns ``""`` when the column carries no number/year, so the caller keeps
+    its existing fallback (and benches whose leading token is already a full
+    case number never reach here).
+    """
+    from collections import defaultdict
+
+    words = bundle["words"]
+    if not words:
+        return ""
+    bands: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for w in words:
+        bands[int(round(w["top"] / 5) * 5)].append(w)
+    ys = sorted(bands)
+    line1 = sorted(bands[ys[0]], key=lambda w: w["x0"])
+    serial_idx = next(
+        (i for i, w in enumerate(line1) if _ROW_START_RE.match(w["text"])), None
+    )
+    if serial_idx is None or serial_idx + 1 >= len(line1):
+        return ""
+    after = line1[serial_idx + 1:]
+    anchor_x0 = after[0]["x0"]
+    # The case-title column is the first line-1 word that jumps clearly right of
+    # the case-no anchor; use it as the column's right boundary (fallback: a
+    # fixed width when this bundle's first line has no title word).
+    title_xs = [w["x0"] for w in after if w["x0"] - anchor_x0 > 50]
+    right_bound = min(title_xs) if title_xs else anchor_x0 + 60
+    col_words = [
+        w
+        for y in ys
+        for w in bands[y]
+        if anchor_x0 - 8 <= w["x0"] < right_bound
+    ]
+    col_words.sort(key=lambda w: (int(round(w["top"] / 5) * 5), w["x0"]))
+    col_text = " ".join(w["text"] for w in col_words)
+    match = _COLUMN_CASE_NUMBER_RE.search(col_text)
+    if match is None:
+        return ""
+    ctype = _TYPE_TAIL_JUNK_RE.sub("", match.group(1).strip())
+    if not ctype:
+        return ""
+    return f"{ctype}/{match.group(2)}/{match.group(3)}"
+
 
 def parse_hc_cause_list_pdf(pdf_bytes: bytes) -> list[HCCauseListPDFRow]:
     """Parse a downloaded HC cause-list PDF into structured row records.
@@ -238,6 +301,16 @@ def _bundle_to_row(bundle: dict[str, Any]) -> HCCauseListPDFRow:
         if saw_marker:
             case_number = w["text"]
             break
+
+    # When the leading token is only a type fragment (no number/year) -- as on
+    # Delhi HC, whose case-no column wraps "W.P.(C)-" over "8287//2026" -- rebuild
+    # the full TYPE/NUMBER/YEAR from the column so downstream CNR resolution can
+    # actually parse it. Benches whose leading token is already a complete case
+    # number (AP, Tripura) keep it unchanged.
+    if not _FULL_CASE_NUMBER_RE.search(case_number):
+        rebuilt = _rebuild_case_number_from_column(bundle)
+        if rebuilt:
+            case_number = rebuilt
 
     return HCCauseListPDFRow(
         sr_no=bundle["sr_no"],
