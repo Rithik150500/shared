@@ -55,6 +55,7 @@ def parse_case_history(response: dict[str, Any], cnr: str) -> Case:
     court = _build_court(history)
     stage = (history.get("purpose_name") or "").strip() or "Unknown"
     next_hearing = _parse_date(history.get("date_next_list"))
+    filing_date = _parse_date(history.get("date_of_filing"))
     judge = (history.get("desgname") or "").strip() or None
 
     parties = _build_parties(history)
@@ -76,6 +77,7 @@ def parse_case_history(response: dict[str, Any], cnr: str) -> Case:
         fir=None,
         objections=None,
         category=None,
+        filing_date=filing_date,
     )
 
 

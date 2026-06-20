@@ -235,6 +235,9 @@ class Case:
     fir: FIRDetails | None = None
     objections: ObjectionDetails | None = None
     category: CategoryDetails | None = None
+    # Filing date from the case-detail API (`date_of_filing`). Optional/last so
+    # existing positional callers keep working. Powers the "Filed" timeline event.
+    filing_date: date | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=_json_default, sort_keys=True)
@@ -284,4 +287,5 @@ def _case_from_dict(d: dict) -> Case:
         fir=fir,
         objections=objections,
         category=category,
+        filing_date=_date(d.get("filing_date")),
     )
