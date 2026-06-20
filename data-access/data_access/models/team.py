@@ -73,3 +73,23 @@ class TeamMember(Base):
         Index("team_members_user_idx", "user_id"),
         Index("team_members_team_idx", "team_id"),
     )
+
+
+class PendingTeamInvite(Base):
+    __tablename__ = "pending_team_invites"
+
+    invite_token: Mapped[str] = mapped_column(Text, primary_key=True)
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False,
+    )
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False, server_default="viewer")
+    invited_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUIDType, ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    last_email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("pending_invites_email_idx", "email"),)
