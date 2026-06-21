@@ -11,6 +11,8 @@ from .billing import (
 from .broadcast import WaBroadcastLog, WaSuppression
 from .case import Case, CaseOrder, CaseOrderNowlez
 from .case_preferences import CasePreferences
+from .client import Client
+from .team import PendingTeamInvite, Team, TeamMember
 from .upsell import MunshiUpsellEvent
 from .user import User, UserMunshi, UserNowlez
 from .whatsapp import MessageLog, WhatsAppDeliveryLog
@@ -28,6 +30,10 @@ __all__ = [
     "CaseOrder",
     "CaseOrderNowlez",
     "CasePreferences",
+    "Client",
+    "Team",
+    "TeamMember",
+    "PendingTeamInvite",
     "Subscription",
     "PaymentEvent",
     "CouponCode",
