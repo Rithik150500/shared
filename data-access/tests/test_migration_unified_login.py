@@ -34,9 +34,13 @@ def _script_dir() -> ScriptDirectory:
 
 
 def test_single_head_after_new_migration():
+    # Head-agnostic branch guard: catches accidental BRANCHING (>1 head). It must
+    # NOT hardcode a specific revision, or every legitimate new migration that
+    # advances the head (e.g. 20260620_g_orphan_cols) breaks it. The current-head
+    # *identity* is asserted by the latest migration's own test.
     sd = _script_dir()
     heads = sd.get_heads()
-    assert heads == [NEW_REVISION], f"expected single head {NEW_REVISION!r}, got {heads}"
+    assert len(heads) == 1, f"expected exactly one alembic head, got {heads}"
 
 
 def test_new_revision_chains_onto_broadcast_tables():
