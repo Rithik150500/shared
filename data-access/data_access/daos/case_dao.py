@@ -138,6 +138,50 @@ def diff_and_update(
     return changes
 
 
+# Step-3: columns the casepilot gap-writes may partial-patch onto a Case.
+# Mirrors the legacy SQLite update_case whitelist that has no DataCase to diff
+# against. Kept SEPARATE from _DIFFABLE_FIELDS (which drives the full-fetch
+# differ); update_fields is a direct setter, not a re-diff.
+_UPDATABLE_FIELDS = frozenset((
+    "case_number", "title", "case_status", "stage", "next_hearing_date",
+    "judge", "court", "portal", "refresh_enabled", "notes",
+    "last_refreshed_at", "last_change_at",
+    "case_detail_json", "case_detail_md", "mini_case_detail_md",
+))
+
+# Subset whose change should bump last_change_at (parity with _DIFFABLE_FIELDS).
+_UPDATABLE_DIFFABLE = frozenset(("stage", "case_status", "next_hearing_date", "judge", "court"))
+
+
+def update_fields(s: Session, *, user_id: uuid.UUID, cnr: str, **cols: Any) -> list[str]:
+    """Partial column patch on the (user_id, cnr) Case row over an explicit
+    allow-list. Returns the list of columns whose value actually changed.
+
+    Unlike diff_and_update (full-fetch differ keyed on a DataCase), this is a
+    direct setter the casepilot gap-writes use to mirror their SQLite update_case
+    whitelist — including the Step-3 detail blobs + notes, which are NOT in
+    _DIFFABLE_FIELDS. Raises ValueError on an unknown column. Missing row -> [].
+    """
+    _assert_valid_cnr(cnr)
+    unknown = set(cols) - _UPDATABLE_FIELDS
+    if unknown:
+        raise ValueError(f"update_fields: unknown column(s) {sorted(unknown)}")
+    row = get_by_cnr(s, user_id=user_id, cnr=cnr)
+    if row is None:
+        return []
+    changed: list[str] = []
+    for k, v in cols.items():
+        if getattr(row, k) != v:
+            setattr(row, k, v)
+            changed.append(k)
+    if any(c in _UPDATABLE_DIFFABLE for c in changed):
+        row.last_change_at = datetime.now(timezone.utc)
+    if changed:
+        row.updated_at = datetime.now(timezone.utc)
+    s.flush()
+    return changed
+
+
 def mark_cnr_not_found(s: Session, *, user_id: uuid.UUID, cnr: str) -> Case:
     """Insert a tombstone row for a CNR that eCourts reports as not-found.
 
