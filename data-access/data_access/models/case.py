@@ -125,6 +125,15 @@ class Case(Base):
         JSONBType, nullable=False, default=dict
     )
 
+    # --- Step-3: detail blobs migrated off disk into PG (D1) ---
+    # case_detail_json is JSONB on PG (JSON on the SQLite test variant) so the
+    # native calendar/timeline rewrite can query history/next_hearing without a
+    # second json.loads; the shim json.dumps()-es it back to the legacy string
+    # CaseRecord.case_detail_json. md/mini are plain TEXT.
+    case_detail_json: Mapped[dict | None] = mapped_column(JSONBType, nullable=True)
+    case_detail_md: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mini_case_detail_md: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(),
     )
