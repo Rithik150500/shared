@@ -9,6 +9,7 @@ from . import (
     order_dao,
     otp_dao,
     session_dao,
+    uploaded_file_dao,
     user_dao,
     whatsapp_dao,
 )
@@ -25,5 +26,6 @@ __all__ = [
     "case_dao",
     "case_preferences_dao",
     "order_dao",
+    "uploaded_file_dao",
     "whatsapp_dao",
 ]
