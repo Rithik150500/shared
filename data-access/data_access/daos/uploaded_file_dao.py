@@ -107,8 +107,12 @@ def get_failed(s: Session, *, user_id: uuid.UUID | None = None) -> list[Uploaded
     return list(s.execute(q).scalars().all())
 
 
-def recent_for_user(s: Session, *, user_id: uuid.UUID, n: int) -> list[UploadedFileNowlez]:
+def recent_for_user(s: Session, *, user_id: uuid.UUID, n: int,
+                    client_id: str | None = None) -> list[UploadedFileNowlez]:
+    q = (select(UploadedFileNowlez)
+         .join(Client, Client.id == UploadedFileNowlez.client_id)
+         .where(Client.user_id == user_id))
+    if client_id is not None:
+        q = q.where(UploadedFileNowlez.client_id == client_id)
     return list(s.execute(
-        select(UploadedFileNowlez).join(Client, Client.id == UploadedFileNowlez.client_id)
-        .where(Client.user_id == user_id)
-        .order_by(UploadedFileNowlez.created_at.desc()).limit(n)).scalars().all())
+        q.order_by(UploadedFileNowlez.created_at.desc()).limit(n)).scalars().all())

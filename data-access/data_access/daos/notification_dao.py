@@ -59,11 +59,15 @@ def count_unread(s: Session, *, user_id: uuid.UUID) -> int:
         NotificationNowlez.is_read.is_(False))).scalar_one())
 
 
-def count_unread_new_orders(s: Session, *, user_id: uuid.UUID) -> int:
-    return int(s.execute(select(func.count()).select_from(NotificationNowlez).where(
+def count_unread_new_orders(s: Session, *, user_id: uuid.UUID,
+                            client_id: str | None = None) -> int:
+    q = select(func.count()).select_from(NotificationNowlez).where(
         NotificationNowlez.user_id == user_id,
         NotificationNowlez.is_read.is_(False),
-        NotificationNowlez.type == "new_orders")).scalar_one())
+        NotificationNowlez.type == "new_orders")
+    if client_id is not None:
+        q = q.where(NotificationNowlez.client_id == client_id)
+    return int(s.execute(q).scalar_one())
 
 
 def verify_ownership(s: Session, *, legacy_sqlite_id: int, user_id: uuid.UUID) -> bool:
