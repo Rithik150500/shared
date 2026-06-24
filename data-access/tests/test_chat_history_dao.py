@@ -39,6 +39,19 @@ def test_delete_by_client_purges_all(db_session):
     assert chat_history_dao.list_for_client(db_session, client_id="c3", limit=10) == []
 
 
+def test_list_for_client_returns_newest_window_in_chronological_order(db_session):
+    """When rows exceed ``limit``, list_for_client returns the NEWEST ``limit``
+    rows in chronological (oldest-first) order — mirroring the legacy SQLite
+    ``ORDER BY id DESC LIMIT ?`` + reverse window, NOT the oldest N.
+    """
+    for i in (40, 41, 42, 43):
+        chat_history_dao.insert(db_session, legacy_sqlite_id=i, client_id="c5",
+                                role="user", content=f"m{i}", sources_json=None,
+                                function_calls_json=None)
+    rows = chat_history_dao.list_for_client(db_session, client_id="c5", limit=2)
+    assert [r.legacy_sqlite_id for r in rows] == [42, 43]
+
+
 def test_list_paginated(db_session):
     for i in range(30, 35):
         chat_history_dao.insert(db_session, legacy_sqlite_id=i, client_id="c4",

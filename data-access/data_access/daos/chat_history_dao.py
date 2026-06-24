@@ -56,10 +56,18 @@ def delete_by_client(s: Session, *, client_id: str) -> int:
 
 
 def list_for_client(s: Session, *, client_id: str, limit: int) -> list[ChatHistoryNowlez]:
-    return list(s.execute(select(ChatHistoryNowlez).where(
+    """Return the most-recent ``limit`` rows in chronological (oldest-first) order.
+
+    Mirrors the legacy SQLite ``ORDER BY id DESC LIMIT ?`` + reverse window so the
+    PG read serves the same newest-N slice the LLM-context path relies on (NOT the
+    oldest N). Selects newest-first via DESC, then reverses to chronological.
+    """
+    rows = s.execute(select(ChatHistoryNowlez).where(
         ChatHistoryNowlez.client_id == client_id)
-        .order_by(ChatHistoryNowlez.created_at, ChatHistoryNowlez.legacy_sqlite_id)
-        .limit(limit)).scalars().all())
+        .order_by(ChatHistoryNowlez.created_at.desc(),
+                  ChatHistoryNowlez.legacy_sqlite_id.desc())
+        .limit(limit)).scalars().all()
+    return list(reversed(rows))
 
 
 def list_paginated(s: Session, *, client_id: str, offset: int, limit: int) -> list[ChatHistoryNowlez]:
