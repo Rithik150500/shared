@@ -11,12 +11,12 @@ from data_access.models import UploadedFileNowlez, Client
 _INSERT_FIELDS = (
     "original_filename", "descriptive_name", "summary", "page_count", "cnr",
     "document_type", "file_path", "file_storage", "r2_object_key", "r2_etag",
-    "preprocessed", "retry_count", "permanently_failed",
+    "preprocessed", "retry_count", "permanently_failed", "created_at",
 )
 _UPDATABLE_FIELDS = frozenset((
     "descriptive_name", "summary", "page_count", "cnr", "document_type",
     "file_path", "file_storage", "r2_object_key", "r2_etag", "preprocessed",
-    "retry_count", "permanently_failed", "original_filename",
+    "retry_count", "permanently_failed", "original_filename", "created_at",
 ))
 
 

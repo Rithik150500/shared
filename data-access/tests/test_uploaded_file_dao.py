@@ -1,5 +1,6 @@
 """Step-4: uploaded_file_dao CRUD + reads + surgical deletes (NULL-cnr carve-out)."""
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -20,6 +21,35 @@ def test_insert_and_get_by_legacy_id(db_session):
         file_path="abc123def456aaaa/a.pdf", file_storage="local", cnr=None)
     row = uploaded_file_dao.get_by_legacy_id(db_session, legacy_sqlite_id=1)
     assert row.id == fid and row.original_filename == "a.pdf"
+
+
+def test_insert_preserves_created_at(db_session):
+    # Backfill carries the ORIGINAL upload time (spec §10.1 ISO TEXT -> TIMESTAMPTZ)
+    # so the migrated corpus keeps its upload-time ordering instead of collapsing
+    # to the backfill instant.
+    u, c = _seed(db_session)
+    ts = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    uploaded_file_dao.insert(
+        db_session, legacy_sqlite_id=10, client_id=c.id, original_filename="old.pdf",
+        file_path="abc123def456aaaa/old.pdf", file_storage="local", created_at=ts)
+    row = uploaded_file_dao.get_by_legacy_id(db_session, legacy_sqlite_id=10)
+    got = row.created_at
+    if got.tzinfo is None:  # SQLite test backend stores naive UTC
+        got = got.replace(tzinfo=timezone.utc)
+    assert got == ts
+
+
+def test_update_fields_can_correct_created_at(db_session):
+    u, c = _seed(db_session)
+    uploaded_file_dao.insert(db_session, legacy_sqlite_id=11, client_id=c.id,
+                             original_filename="a.pdf", file_path="p", file_storage="local")
+    ts = datetime(2023, 6, 7, 8, 9, 10, tzinfo=timezone.utc)
+    uploaded_file_dao.update_fields(db_session, legacy_sqlite_id=11, created_at=ts)
+    row = uploaded_file_dao.get_by_legacy_id(db_session, legacy_sqlite_id=11)
+    got = row.created_at
+    if got.tzinfo is None:
+        got = got.replace(tzinfo=timezone.utc)
+    assert got == ts
 
 
 def test_update_fields_allowlist_and_reject_unknown(db_session):
