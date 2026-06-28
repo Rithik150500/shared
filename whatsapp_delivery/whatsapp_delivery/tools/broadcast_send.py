@@ -57,6 +57,12 @@ _DEFAULT_RETRY_BACKOFF = 5.0
 # Auto-pause guard defaults
 _DEFAULT_MAX_FAIL_RATE = 0.1
 _DEFAULT_MAX_UNDELIVERABLE = 0.4
+# 131049-rate ceiling (incident 2026-06-25): an individual 131049 ("healthy
+# ecosystem engagement") is a retryable per-user marketing cap, but a SUSTAINED
+# HIGH RATE of it is Meta actively throttling the account for spam — the direct
+# precursor to enforcement. The spam-flagged run was ~32% 131049, so 0.30 halts
+# that scenario while still tolerating the occasional per-user cap.
+_DEFAULT_MAX_MARKETING_CAP_RATE = 0.3
 _DEFAULT_MIN_SAMPLE = 50
 
 
@@ -213,6 +219,9 @@ def run(args: Any, *, rows: list[dict] | None = None) -> int:  # noqa: C901 (com
     video_file: str | None = getattr(args, "video_file", None)
     max_fail_rate: float = float(getattr(args, "max_fail_rate", _DEFAULT_MAX_FAIL_RATE))
     max_undeliverable: float = float(getattr(args, "max_undeliverable", _DEFAULT_MAX_UNDELIVERABLE))
+    max_marketing_cap_rate: float = float(
+        getattr(args, "max_marketing_cap_rate", _DEFAULT_MAX_MARKETING_CAP_RATE)
+    )
     min_sample: int = int(getattr(args, "min_sample", _DEFAULT_MIN_SAMPLE))
 
     # Load rows from xlsx unless injected by test
@@ -238,14 +247,24 @@ def run(args: Any, *, rows: list[dict] | None = None) -> int:  # noqa: C901 (com
             non_transient_failed = stats["failed"] - stats["marketing_capped"]
             fail_rate = non_transient_failed / stats["attempted"]
             undel_rate = stats["undeliverable"] / stats["attempted"]
-            if fail_rate > max_fail_rate or undel_rate > max_undeliverable:
+            # 131049-rate ceiling (incident 2026-06-25): a single 131049 is a
+            # retryable per-user marketing cap and stays out of fail_rate, but a
+            # SUSTAINED HIGH RATE means Meta is throttling the whole account for
+            # spam — halt before that tips into a policy enforcement.
+            mktcap_rate = stats["marketing_capped"] / stats["attempted"]
+            if (
+                fail_rate > max_fail_rate
+                or undel_rate > max_undeliverable
+                or mktcap_rate > max_marketing_cap_rate
+            ):
                 log.error(
                     "auto-pause: campaign=%s fail_rate=%.2f (excl %d marketing-cap) "
-                    "undel_rate=%.2f attempted=%d — refusing to send",
+                    "undel_rate=%.2f mktcap_rate=%.2f attempted=%d — refusing to send",
                     campaign,
                     fail_rate,
                     stats["marketing_capped"],
                     undel_rate,
+                    mktcap_rate,
                     stats["attempted"],
                 )
                 return 3
@@ -537,6 +556,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Auto-pause guard: refuse to send if undeliverable/attempted exceeds "
             "this fraction (requires --min-sample rows attempted). Default: 0.4."
+        ),
+    )
+    p.add_argument(
+        "--max-marketing-cap-rate",
+        dest="max_marketing_cap_rate",
+        type=float,
+        default=_DEFAULT_MAX_MARKETING_CAP_RATE,
+        help=(
+            "Auto-pause guard: refuse to send if 131049 (marketing-cap) / "
+            "attempted exceeds this fraction (requires --min-sample rows "
+            "attempted). A sustained-high 131049 rate is Meta throttling the "
+            "account for spam. Default: 0.3."
         ),
     )
     p.add_argument(

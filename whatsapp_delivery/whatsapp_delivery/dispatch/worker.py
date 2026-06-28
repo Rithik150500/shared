@@ -99,6 +99,22 @@ _DEDUP_DAILY_TEMPLATES: frozenset[str] = frozenset({
     "nowlez_weekly_summary_v1",
 })
 
+# Consent / opt-out gate (incident 2026-06-25 spam flag). The inbound STOP
+# handler writes a ``wa_suppression`` row for an opted-out number; the worker
+# is the single chokepoint every business-initiated *template* send passes
+# through, so checking suppression HERE enforces "global STOP across all
+# categories" regardless of which producer (broadcast, cron, re-engagement)
+# enqueued it.
+#
+# Exempt: the opt-out *confirmation* must still reach a user who just sent
+# STOP — otherwise they never learn the opt-out worked. Keep this allowlist
+# tiny and explicit. Free-text replies (``_do_send_text``) are intentionally
+# NOT gated: they are only deliverable inside Meta's 24h customer-service
+# window (the user messaged first), so gating them would break the bot.
+_SUPPRESSION_EXEMPT_TEMPLATES: frozenset[str] = frozenset({
+    "nowlez_stop_confirmation_v2",
+})
+
 # IST timezone for per-day key computation. Computed once at module load —
 # ``ZoneInfo`` is cheap to look up but doing it per-send is wasteful.
 _IST = ZoneInfo("Asia/Kolkata")
@@ -368,6 +384,63 @@ def _claim_daily_send_slot(
         return True
 
 
+def _lookup_suppression(digits: str) -> bool:
+    """Return True iff ``digits`` is in the ``wa_suppression`` list.
+
+    Best-effort / fail-open: a DB or import error logs a warning and returns
+    False (proceed with the send) — consistent with ``_claim_daily_send_slot``.
+    The durable enforcement is the inbound STOP handler (which writes the
+    suppression row) and the broadcast's own selection-time filter; this
+    worker check is the catch-all backstop for every other producer, so a
+    transient DB hiccup must not block legitimate transactional sends.
+
+    Patchable seam: tests monkeypatch this single symbol to control the
+    verdict without standing up a data-access fixture.
+    """
+    try:
+        # Lazy import so worker callers that never send templates don't pay
+        # the data-access import cost (mirrors ``_claim_daily_send_slot``).
+        from data_access.daos import broadcast_dao
+        from data_access.engine import get_session
+
+        with get_session() as s:
+            return broadcast_dao.is_suppressed(s, digits)
+    except Exception as e:  # pragma: no cover — best-effort
+        log.warning("suppression lookup failed (%s); proceeding without gate", e)
+        return False
+
+
+def _is_suppressed_recipient(to: str, *, template_name: str | None = None) -> bool:
+    """Return True iff ``to`` has opted out AND the send is not exempt.
+
+    ``wa_suppression`` is keyed by digits-only ``wa_digits`` (the inbound STOP
+    handler stores e.g. ``919999999999``), so we strip ``to`` to digits before
+    the lookup. Exempt templates (the opt-out confirmation) bypass the lookup
+    entirely so a user who just sent STOP still gets confirmation. A blank /
+    no-digit ``to`` is treated as not-suppressed.
+    """
+    if template_name in _SUPPRESSION_EXEMPT_TEMPLATES:
+        return False
+    digits = "".join(c for c in str(to) if c.isdigit())
+    if not digits:
+        return False
+    return _lookup_suppression(digits)
+
+
+def _record_suppression_short_circuit(template_name: str, brand: str) -> None:
+    """Emit the structured log line for a consent-gate short-circuit.
+
+    Mirrors the dedup metric loggers so log-based scrapers can pick this up
+    without code change. Distinct metric name so opt-out suppression is
+    observable independently of dedup.
+    """
+    log.info(
+        "metric=whatsapp_suppression_short_circuit_total template=%s brand=%s",
+        template_name,
+        brand,
+    )
+
+
 def _resolve_document_url(
     document_url: str,
     *,
@@ -562,6 +635,18 @@ def _do_send_template(
         )
         return ""
 
+    # Consent gate (incident 2026-06-25 spam flag): never send a
+    # business-initiated template to an opted-out recipient. Runs before the
+    # dedup claims so a suppressed send doesn't consume a daily/Redis slot.
+    if _is_suppressed_recipient(to, template_name=template_name):
+        _record_suppression_short_circuit(template_name, brand)
+        log.info(
+            "suppression short-circuit: opted-out recipient name=%s to=%s",
+            template_name,
+            _redact_phone(to),
+        )
+        return ""
+
     # B-3: per-day dedup short-circuit. Only honored when the producer
     # explicitly opts in AND the template is in the allowlist, so a
     # mis-set kwarg can't silently silence a transactional send.
@@ -679,6 +764,18 @@ def _do_send_template_with_components(
         # D-3: redact phone in kill-switch logs too.
         log.warning(
             "nowlez kill-switch on; skipping send_template_with_components name=%s to=%s",
+            template_name,
+            _redact_phone(to),
+        )
+        return ""
+
+    # Consent gate (incident 2026-06-25 spam flag): same opt-out check as
+    # _do_send_template — the broadcast/marketing path sends through this
+    # entry point, so the gate must live here too.
+    if _is_suppressed_recipient(to, template_name=template_name):
+        _record_suppression_short_circuit(template_name, brand)
+        log.info(
+            "suppression short-circuit: opted-out recipient name=%s to=%s",
             template_name,
             _redact_phone(to),
         )

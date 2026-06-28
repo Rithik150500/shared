@@ -263,6 +263,7 @@ def _make_args(
     # Auto-pause guard params (defaults keep existing tests unaffected)
     max_fail_rate: float = 0.99,
     max_undeliverable: float = 0.99,
+    max_marketing_cap_rate: float = 0.99,
     min_sample: int = 999_999,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -283,6 +284,7 @@ def _make_args(
         access_token=access_token,
         max_fail_rate=max_fail_rate,
         max_undeliverable=max_undeliverable,
+        max_marketing_cap_rate=max_marketing_cap_rate,
         min_sample=min_sample,
     )
 
@@ -1035,6 +1037,7 @@ class TestAutoPauseGuard:
         min_sample: int = 10,
         max_fail_rate: float = 0.10,
         max_undeliverable: float = 0.40,
+        max_marketing_cap_rate: float = 0.30,
         tier: str = "T1",
     ) -> SimpleNamespace:
         return _make_args(
@@ -1043,6 +1046,7 @@ class TestAutoPauseGuard:
             min_sample=min_sample,
             max_fail_rate=max_fail_rate,
             max_undeliverable=max_undeliverable,
+            max_marketing_cap_rate=max_marketing_cap_rate,
         )
 
     def test_guard_trips_on_high_fail_rate_returns_3(
@@ -1106,6 +1110,80 @@ class TestAutoPauseGuard:
 
         assert result == 0
         assert send_mock.call_count == 2
+
+    def test_guard_trips_on_high_marketing_cap_rate_returns_3(
+        self, monkeypatch, sqlite_session_factory
+    ):
+        """A SUSTAINED-HIGH 131049 rate trips the guard (incident 2026-06-25).
+
+        Individual 131049 ('healthy ecosystem engagement') is retryable and is
+        excluded from the fail-rate — but a high *rate* of it is Meta actively
+        throttling the account for spam, the direct precursor to enforcement.
+        30 sent + 20 failed(131049) → mktcap_rate = 20/50 = 0.40 > default 0.30.
+        """
+        from whatsapp_delivery.tools.broadcast_send import run
+
+        campaign = "guard_mktcap_rate"
+        _seed_ledger(
+            sqlite_session_factory,
+            campaign=campaign,
+            n_sent=30,
+            n_failed=20,
+            fail_error_code=131049,
+        )
+
+        args = self._make_guard_args(campaign=campaign, min_sample=10)
+        rows = [_row(f"9400{i}") for i in range(2)]
+
+        send_mock = MagicMock(return_value="wamid.mcr")
+        upload_mock = MagicMock(return_value="MEDIA_ID_MCR")
+        self._patch_get_session(monkeypatch, sqlite_session_factory)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        with patch("whatsapp_delivery.tools.broadcast_send.TemplateClient") as MockTC, \
+             patch("whatsapp_delivery.tools.broadcast_send.MetaClient") as MockMC:
+            MockTC.return_value.send_template_with_components = send_mock
+            MockMC.return_value.upload_media = upload_mock
+            result = run(args, rows=rows)
+
+        assert result == 3
+        send_mock.assert_not_called()
+        upload_mock.assert_not_called()
+
+    def test_guard_marketing_cap_rate_is_configurable(
+        self, monkeypatch, sqlite_session_factory
+    ):
+        """The 131049-rate ceiling is tunable: a moderate 22% rate that passes
+        the default 0.30 ceiling trips when the ceiling is lowered to 0.10."""
+        from whatsapp_delivery.tools.broadcast_send import run
+
+        campaign = "guard_mktcap_cfg"
+        # 39 sent + 11 failed(131049) → mktcap_rate = 11/50 = 0.22
+        _seed_ledger(
+            sqlite_session_factory,
+            campaign=campaign,
+            n_sent=39,
+            n_failed=11,
+            fail_error_code=131049,
+        )
+
+        args = self._make_guard_args(
+            campaign=campaign, min_sample=10, max_marketing_cap_rate=0.10
+        )
+        rows = [_row(f"9300{i}") for i in range(2)]
+
+        send_mock = MagicMock(return_value="wamid.cfg")
+        self._patch_get_session(monkeypatch, sqlite_session_factory)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        with patch("whatsapp_delivery.tools.broadcast_send.TemplateClient") as MockTC, \
+             patch("whatsapp_delivery.tools.broadcast_send.MetaClient") as MockMC:
+            MockTC.return_value.send_template_with_components = send_mock
+            MockMC.return_value.upload_media = MagicMock(return_value="X")
+            result = run(args, rows=rows)
+
+        assert result == 3
+        send_mock.assert_not_called()
 
     def test_guard_inactive_below_min_sample(
         self, monkeypatch, sqlite_session_factory
