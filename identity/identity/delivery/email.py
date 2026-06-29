@@ -43,7 +43,13 @@ def send_otp_email(
                 json=payload,
             )
         if r.status_code // 100 != 2:
-            raise EmailDeliveryFailed(f"Resend {r.status_code}: {r.text}")
+            # Truncate the provider body: the OTP request payload contains the
+            # plaintext code, and some provider error responses echo request
+            # fields. Capping (matching send_security_email) keeps a leaked code
+            # out of any exception string / log sink. The soft-fail handler in
+            # start_email_otp already swallows this exception (load-bearing for
+            # code secrecy — do NOT add a logger that prints e.args here).
+            raise EmailDeliveryFailed(f"Resend {r.status_code}: {r.text[:200]}")
         try:
             provider_id = r.json().get("id", "")
         except ValueError:

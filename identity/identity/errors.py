@@ -40,6 +40,21 @@ class InvalidToken(IdentityError):
     """Token signature is invalid, malformed, or unknown."""
 
 
+class RefreshTokenReuse(InvalidToken):
+    """A refresh token that was already ROTATED (replaced) was presented again
+    beyond the concurrency grace window — a replay / theft signal. The whole
+    session family is revoked and the caller audits 'auth.refresh_replay'.
+
+    Subclasses InvalidToken so existing ``except InvalidToken`` handlers (the
+    web layer maps it to 401) keep working; catch this FIRST when an auditable
+    distinction is needed. Carries user_id + family_id for the audit event."""
+
+    def __init__(self, *, user_id=None, family_id=None):
+        self.user_id = user_id
+        self.family_id = family_id
+        super().__init__("refresh token reuse detected; session family revoked")
+
+
 class SessionRevoked(IdentityError):
     """The session was explicitly revoked (e.g., logout)."""
 
@@ -81,6 +96,13 @@ class EmailDeliveryFailed(DeliveryFailed):
 
 # --- Account linking (D4) ---
 class AccountLinkStepUpRequired(IdentityError):
-    """An email-OTP verify landed on an existing phone/password account whose
-    email is not yet verified, and no second proven identifier is present.
+    """An email-OTP / Google verify landed on an existing phone/password account
+    whose email is not yet verified, and no second proven identifier is present.
     The SPA must prompt 'verify by phone to link this email' (HTTP 409)."""
+
+
+# --- Federated identity (Google Sign-In) ---
+class GoogleTokenInvalid(IdentityError):
+    """The supplied Google ID token failed verification: bad signature, wrong
+    audience/issuer, expired, missing subject/email, or an unverified email.
+    The web layer maps this to HTTP 401."""

@@ -23,13 +23,17 @@ from .delivery.router import deliver_email_otp, deliver_otp
 from .errors import (
     AccountLinkStepUpRequired,
     EmailDeliveryFailed,
+    GoogleTokenInvalid,
     InvalidCredentials,
     OtpAlreadyUsed,
     OtpAttemptsExhausted,
+    OtpExpired,
     OtpInvalid,
     PasswordNotSet,
     RateLimited,
+    RefreshTokenReuse,
 )
+from .google import verify_google_id_token
 from .otp.issuer import generate_otp_code, hash_otp_code
 from .otp.rate_limiter import check_otp_rate_limit
 from .otp.verifier import verify_otp as _verify_otp, verify_otp_atomic as _verify_otp_atomic
@@ -40,6 +44,7 @@ from .session.refresh import (
     consume_refresh_token,
     issue_refresh_token,
     revoke_refresh_token,
+    rotate_refresh_token,
 )
 
 
@@ -210,10 +215,36 @@ def login_with_password(
     }
 
 
-def refresh_access_token(session: Session, *, refresh_token: str) -> dict:
-    """Mint a fresh access JWT given a valid refresh token. Raises InvalidToken if dead."""
-    s = consume_refresh_token(session, refresh_token)
-    return {"access_token": encode_access_token(s.user_id)}
+def refresh_access_token(
+    session: Session,
+    *,
+    refresh_token: str,
+    user_agent: str | None = None,
+    ip_address: str | None = None,
+) -> dict:
+    """Rotate the refresh token and mint a fresh access JWT.
+
+    Returns {"access_token", "refresh_token"} — the web layer MUST re-set the
+    refresh cookie to the returned (rotated) token. Raises InvalidToken if the
+    presented token is unknown/expired/revoked; RefreshTokenReuse (a subclass)
+    when a rotated token is replayed beyond the grace window — in which case the
+    whole session family has been revoked and 'auth.refresh_replay' is audited.
+    """
+    try:
+        new_raw, s = rotate_refresh_token(
+            session, refresh_token, user_agent=user_agent, ip_address=ip_address
+        )
+    except RefreshTokenReuse as exc:
+        audit_dao.log_event(
+            session,
+            event_type="auth.refresh_replay",
+            source="identity",
+            user_id=exc.user_id,
+            metadata={"family_id": str(exc.family_id) if exc.family_id else None},
+            ip_address=ip_address,
+        )
+        raise
+    return {"access_token": encode_access_token(s.user_id), "refresh_token": new_raw}
 
 
 def revoke_session(session: Session, *, refresh_token: str) -> None:
@@ -428,11 +459,18 @@ def start_email_otp(session: Session, *, email: str, ip_address: str | None = No
     if len(email) > 254:
         raise ValueError("email too long")
 
-    # Rate limit per email + per IP (mirror check_otp_rate_limit).
+    # Rate limit per email + per IP (mirror check_otp_rate_limit). count_within
+    # counts ALL rows by created_at (used or not), so the hourly issuance cap is
+    # unaffected by the supersede step below.
     if email_otp_dao.count_within(session, email, 60) >= settings.OTP_PER_EMAIL_PER_HOUR:
         raise RateLimited(retry_after_seconds=3600)
     if ip_address and email_otp_dao.count_by_ip_within(session, ip_address, 60) >= settings.OTP_PER_IP_PER_HOUR:
         raise RateLimited(retry_after_seconds=3600)
+
+    # One-live-code: supersede any prior unused codes for this email so a new
+    # request leaves exactly one verifiable code and cannot reset the per-code
+    # attempt budget (defeating the OTP_MAX_ATTEMPTS lockout otherwise).
+    email_otp_dao.invalidate_unused_for_email(session, email)
 
     code = generate_otp_code()
     o = email_otp_dao.insert(
@@ -462,6 +500,8 @@ def _verify_email_otp_atomic(session: Session, *, otp_id: uuid.UUID, code: str) 
     """Atomic email-OTP verify. argon2 first; mismatch -> decrement (no burn);
     match -> atomic email_otp_dao.mark_used (rowcount==0 -> already-used/expired).
     Returns the canonical email on success."""
+    from datetime import datetime, timezone
+
     from argon2 import PasswordHasher
     from argon2 import exceptions as a2err
     o = email_otp_dao.get_by_id(session, otp_id)
@@ -471,6 +511,11 @@ def _verify_email_otp_atomic(session: Session, *, otp_id: uuid.UUID, code: str) 
         raise OtpAlreadyUsed("OTP has already been used")
     if o.attempts_remaining <= 0:
         raise OtpAttemptsExhausted("OTP attempts exhausted; request a new code")
+    # Expiry gate BEFORE the argon2 verify (mirrors otp/verifier.py): an expired
+    # code is rejected cheaply instead of forcing a 64 MB argon2id hash. mark_used
+    # remains the authoritative atomic single-use guard for the live-code race.
+    if o.expires_at <= datetime.now(timezone.utc):
+        raise OtpExpired("OTP has expired; request a new code")
     hasher = PasswordHasher(
         time_cost=settings.ARGON2_TIME_COST,
         memory_cost=settings.ARGON2_MEMORY_COST_KB,
@@ -486,6 +531,97 @@ def _verify_email_otp_atomic(session: Session, *, otp_id: uuid.UUID, code: str) 
     if email_otp_dao.mark_used(session, otp_id) == 0:
         raise OtpAlreadyUsed("OTP has already been used")
     return o.email
+
+
+def _resolve_verified_email_and_mint(
+    session: Session,
+    *,
+    email: str,
+    brand: str,
+    channel: str,
+    login_event: str,
+    name: str | None = None,
+    user_agent: str | None = None,
+    ip_address: str | None = None,
+    second_signal_user_id: uuid.UUID | None = None,
+) -> dict:
+    """D4 §8.1 account-resolution matrix for an externally-PROVEN email, shared
+    by every email-anchored login method (email-OTP and Google).
+
+    Caller guarantees control of ``email`` is proven (a passed OTP, or a Google
+    token with email_verified=true). ``channel`` tags the audit metadata
+    ('email'|'google'); ``login_event`` is the mint event for the login branches
+    ('user.login.email'|'user.login.google'). New-account creation always audits
+    'user.created'. Raises AccountLinkStepUpRequired when an unverified email
+    collides with an existing second-factor account and no matching second signal
+    is present.
+    """
+    existing = user_dao.get_by_email(session, email)
+    if existing is None:
+        # Clean new signup: create email-only user, mark verified, mint.
+        user, _was_created = user_dao.get_or_create_by_email(session, email=email)
+        if brand == "nowlez":
+            user_dao.ensure_nowlez_extension(session, user.id, name=name or "")
+        user_dao.set_email_verified(session, user.id)
+        return _mint_login_response(
+            session, user=user, brand=brand, name=name,
+            user_agent=user_agent, ip_address=ip_address,
+            event_type="user.created", audit_metadata={"channel": channel},
+        )
+
+    # Existing account for this email.
+    if user_dao.is_email_verified(session, existing.id):
+        return _mint_login_response(
+            session, user=existing, brand=brand, name=name,
+            user_agent=user_agent, ip_address=ip_address,
+            event_type=login_event, audit_metadata={"channel": channel},
+        )
+
+    # Unverified email on an existing account.
+    has_second_factor = existing.phone is not None or existing.password_hash is not None
+    if not has_second_factor:
+        # Pure email-only legacy row: email control is the only anchor -> mint.
+        if brand == "nowlez":
+            user_dao.ensure_nowlez_extension(session, existing.id, name=name or "")
+        user_dao.set_email_verified(session, existing.id)
+        # Audit hardening: a pre-existing email-only row (e.g. a Sub-A/Sub-G
+        # backfill) is being claimed by email control alone, with no second
+        # factor and no security channel other than this email. Make the claim
+        # observable (distinct audit event) + emit a best-effort alert so a
+        # silent takeover of a legacy row leaves a trail.
+        audit_dao.log_event(
+            session, event_type="account.email_only_claim", source=brand,
+            user_id=existing.id, metadata={"channel": channel}, ip_address=ip_address,
+        )
+        _notify_account_security(session, existing, event="email_login_new_device", ip_address=ip_address)
+        return _mint_login_response(
+            session, user=existing, brand=brand, name=name,
+            user_agent=user_agent, ip_address=ip_address,
+            event_type=login_event, audit_metadata={"channel": channel},
+        )
+
+    # Second-signal gate: only link if a same-flow proven identifier matches.
+    if second_signal_user_id is not None and second_signal_user_id == existing.id:
+        if brand == "nowlez":
+            user_dao.ensure_nowlez_extension(session, existing.id, name=name or "")
+        user_dao.set_email_verified(session, existing.id)
+        audit_dao.log_event(
+            session, event_type="account.email_login_new_device", source=brand,
+            user_id=existing.id, metadata={"channel": channel}, ip_address=ip_address,
+        )
+        _notify_account_security(session, existing, event="email_login_new_device", ip_address=ip_address)
+        return _mint_login_response(
+            session, user=existing, brand=brand, name=name,
+            user_agent=user_agent, ip_address=ip_address,
+            event_type=login_event, audit_metadata={"channel": channel},
+        )
+
+    audit_dao.log_event(
+        session, event_type=f"{channel}.verify_failed" if channel != "email" else "email_otp.verify_failed",
+        source=brand, user_id=existing.id,
+        metadata={"reason": "step_up_required", "channel": channel}, ip_address=ip_address,
+    )
+    raise AccountLinkStepUpRequired("verify by phone to link this email")
 
 
 def verify_email_otp_and_login(
@@ -508,62 +644,106 @@ def verify_email_otp_and_login(
     if isinstance(otp_id, str):
         otp_id = uuid.UUID(otp_id)
     email = _verify_email_otp_atomic(session, otp_id=otp_id, code=code)
-
-    existing = user_dao.get_by_email(session, email)
-    if existing is None:
-        # Clean new signup: create email-only user, mark verified, mint.
-        user, was_created = user_dao.get_or_create_by_email(session, email=email)
-        if brand == "nowlez":
-            user_dao.ensure_nowlez_extension(session, user.id, name=name or "")
-        user_dao.set_email_verified(session, user.id)
-        return _mint_login_response(
-            session, user=user, brand=brand, name=name,
-            user_agent=user_agent, ip_address=ip_address,
-            event_type="user.created", audit_metadata={"channel": "email"},
-        )
-
-    # Existing account for this email.
-    if user_dao.is_email_verified(session, existing.id):
-        return _mint_login_response(
-            session, user=existing, brand=brand, name=name,
-            user_agent=user_agent, ip_address=ip_address,
-            event_type="user.login.email", audit_metadata={"channel": "email"},
-        )
-
-    # Unverified email on an existing account.
-    has_second_factor = existing.phone is not None or existing.password_hash is not None
-    if not has_second_factor:
-        # Pure email-only legacy row: email control is the only anchor -> mint.
-        if brand == "nowlez":
-            user_dao.ensure_nowlez_extension(session, existing.id, name=name or "")
-        user_dao.set_email_verified(session, existing.id)
-        return _mint_login_response(
-            session, user=existing, brand=brand, name=name,
-            user_agent=user_agent, ip_address=ip_address,
-            event_type="user.login.email", audit_metadata={"channel": "email"},
-        )
-
-    # Second-signal gate: only link if a same-flow proven identifier matches.
-    if second_signal_user_id is not None and second_signal_user_id == existing.id:
-        if brand == "nowlez":
-            user_dao.ensure_nowlez_extension(session, existing.id, name=name or "")
-        user_dao.set_email_verified(session, existing.id)
-        audit_dao.log_event(
-            session, event_type="account.email_login_new_device", source=brand,
-            user_id=existing.id, metadata={"channel": "email"}, ip_address=ip_address,
-        )
-        _notify_account_security(session, existing, event="email_login_new_device", ip_address=ip_address)
-        return _mint_login_response(
-            session, user=existing, brand=brand, name=name,
-            user_agent=user_agent, ip_address=ip_address,
-            event_type="user.login.email", audit_metadata={"channel": "email"},
-        )
-
-    audit_dao.log_event(
-        session, event_type="email_otp.verify_failed", source=brand,
-        user_id=existing.id, metadata={"reason": "step_up_required"}, ip_address=ip_address,
+    return _resolve_verified_email_and_mint(
+        session,
+        email=email,
+        brand=brand,
+        name=name,
+        user_agent=user_agent,
+        ip_address=ip_address,
+        second_signal_user_id=second_signal_user_id,
+        channel="email",
+        login_event="user.login.email",
     )
-    raise AccountLinkStepUpRequired("verify by phone to link this email")
+
+
+def verify_google_id_token_and_login(
+    session: Session,
+    *,
+    id_token: str,
+    brand: str,
+    name: str | None = None,
+    user_agent: str | None = None,
+    ip_address: str | None = None,
+    second_signal_user_id: uuid.UUID | None = None,
+) -> dict:
+    """Verify a Google ID token ("Sign in with Google") and log in / sign up.
+
+    Server-side verification (signature, audience == GOOGLE_OAUTH_CLIENT_ID,
+    issuer, expiry) is delegated to ``verify_google_id_token``; we additionally
+    require Google's ``email_verified`` claim to be true, so a Google login is
+    treated exactly like a passed email-OTP for account resolution.
+
+    Resolution order:
+      1. Stable anchor — a previously linked Google ``sub`` wins regardless of
+         the email Google currently reports (emails can change).
+      2. Otherwise resolve by the verified email through the SAME D4 §8.1 matrix
+         as email-OTP (auto-link verified-email accounts; step-up for an
+         unverified second-factor account), then persist the ``sub`` link.
+
+    Returns {"access_token", "refresh_token", "user"}. Raises GoogleTokenInvalid
+    on a bad/unverified token, AccountLinkStepUpRequired on the step-up case.
+    """
+    audience = settings.GOOGLE_OAUTH_CLIENT_ID
+    if not audience:
+        raise GoogleTokenInvalid("Google login is not configured")
+
+    claims = verify_google_id_token(id_token, audience=audience)
+    sub = claims.get("sub")
+    raw_email = claims.get("email")
+    if not sub:
+        raise GoogleTokenInvalid("Google token missing subject (sub)")
+    if not raw_email:
+        raise GoogleTokenInvalid("Google token missing email")
+    # email_verified can arrive as bool True or the string "true" from Google.
+    email_verified = claims.get("email_verified")
+    if email_verified not in (True, "true"):
+        raise GoogleTokenInvalid("Google email is not verified")
+
+    email = _canonicalize_email(raw_email)
+    google_name = name or claims.get("name") or ""
+
+    # 1) Stable anchor: a prior Google link is authoritative over the email.
+    linked = user_dao.get_by_google_sub(session, sub)
+    if linked is not None:
+        return _mint_login_response(
+            session, user=linked, brand=brand, name=google_name,
+            user_agent=user_agent, ip_address=ip_address,
+            event_type="user.login.google", audit_metadata={"channel": "google"},
+        )
+
+    # 2) Resolve by verified email (shared D4 matrix), then link the sub so
+    # future logins match on the stable id.
+    result = _resolve_verified_email_and_mint(
+        session,
+        email=email,
+        brand=brand,
+        name=google_name,
+        user_agent=user_agent,
+        ip_address=ip_address,
+        second_signal_user_id=second_signal_user_id,
+        channel="google",
+        login_event="user.login.google",
+    )
+    resolved_user_id = uuid.UUID(result["user"]["id"])
+    linked = user_dao.link_google_identity(
+        session, user_id=resolved_user_id, google_sub=sub, email=email
+    )
+    # Observability: a Google identity being attached to an account is a
+    # security-relevant event (esp. auto-linking onto a pre-existing verified
+    # account). `linked` is True only on the FIRST link for this (user, Google
+    # identity) — returning logins short-circuit at the get_by_google_sub anchor
+    # above. A False here means the user already had a different Google identity
+    # (the rare second-Google-account-same-email case) — surface the skip.
+    audit_dao.log_event(
+        session,
+        event_type="account.google_linked" if linked else "account.google_link_skipped",
+        source="identity",
+        user_id=resolved_user_id,
+        metadata={"channel": "google"},
+        ip_address=ip_address,
+    )
+    return result
 
 
 _SECURITY_COPY = {
@@ -676,5 +856,6 @@ __all__ = [
     "consume_wa_login",
     "start_email_otp",
     "verify_email_otp_and_login",
+    "verify_google_id_token_and_login",
     "link_email_to_phone_account",
 ]

@@ -16,6 +16,7 @@ dependencies = [
     "phonenumbers>=8.13",
     "pydantic-settings>=2.0",
     "sentry-sdk>=1.40,<3.0",
+    "google-auth>=2.28",
 ]
 
 [project.optional-dependencies]

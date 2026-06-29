@@ -22,13 +22,23 @@ def create(
     user_agent: str | None = None,
     ip_address: str | None = None,
     ttl_days: int = 30,
+    family_id: uuid.UUID | None = None,
+    expires_at: datetime | None = None,
 ) -> AuthSession:
+    """Persist a refresh-token session row.
+
+    ``family_id`` defaults to a fresh uuid (a new login = a new rotation family);
+    the rotation path passes the parent's family_id to keep the lineage. When
+    ``expires_at`` is given (rotation) it is used verbatim so a rotated token
+    inherits the family's ABSOLUTE expiry; otherwise it is ttl_days from now.
+    """
     now = datetime.now(timezone.utc)
     s = AuthSession(
         user_id=user_id,
         refresh_token_hash=_hash(refresh_token),
+        family_id=family_id or uuid.uuid4(),
         created_at=now,
-        expires_at=now + timedelta(days=ttl_days),
+        expires_at=expires_at if expires_at is not None else now + timedelta(days=ttl_days),
         last_used_at=func.now(),
         user_agent=user_agent,
         ip_address=ip_address,
@@ -47,6 +57,46 @@ def lookup_by_token(session: Session, refresh_token: str) -> AuthSession | None:
         AuthSession.expires_at > func.now(),
     )
     return session.execute(stmt).scalar_one_or_none()
+
+
+def get_by_token_any_state(session: Session, refresh_token: str) -> AuthSession | None:
+    """Look up a session by token hash REGARDLESS of revoked/expired state.
+
+    Rotation + reuse-detection need to see a revoked row (a replayed rotated
+    token) that lookup_by_token would hide. The hash is unique so this returns
+    at most one row."""
+    h = _hash(refresh_token)
+    return session.execute(
+        select(AuthSession).where(AuthSession.refresh_token_hash == h)
+    ).scalar_one_or_none()
+
+
+def revoke_for_rotation(
+    session: Session, *, session_id: uuid.UUID, replaced_by: uuid.UUID, now: datetime
+) -> int:
+    """Atomically claim a rotation: mark the row revoked + point it at its
+    successor, ONLY if still live. Returns rowcount (1 = we claimed it; 0 = a
+    concurrent refresh already rotated it). Branch on the rowcount — no
+    read-then-write TOCTOU window."""
+    result = session.execute(
+        update(AuthSession)
+        .where(AuthSession.id == session_id, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=now, replaced_by=replaced_by)
+    )
+    session.flush()
+    return result.rowcount or 0
+
+
+def revoke_family(session: Session, family_id: uuid.UUID, *, now: datetime | None = None) -> int:
+    """Revoke every still-active session in a rotation family (reuse-detection
+    response). Returns the number of sessions revoked."""
+    result = session.execute(
+        update(AuthSession)
+        .where(AuthSession.family_id == family_id, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=now or func.now())
+    )
+    session.flush()
+    return result.rowcount or 0
 
 
 def touch_last_used(session: Session, session_id: uuid.UUID) -> None:
