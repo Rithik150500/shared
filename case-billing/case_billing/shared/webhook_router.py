@@ -55,7 +55,7 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from case_billing.errors import WebhookSignatureInvalid
+from case_billing.errors import WebhookHandlerError, WebhookSignatureInvalid
 from case_billing.razorpay_client.webhooks import (
     parse_webhook_event,
     verify_webhook_signature,
@@ -202,6 +202,22 @@ async def handle_unified_webhook(
     result.event_id = event.id
     result.event_type = event.event
     result.product = product
+
+    # A handler error must NOT be recorded as processed: record_event_processed
+    # writes the idempotency row, which makes the Razorpay retry short-circuit as
+    # already_processed, so a transient failure is never reconciled and a paid
+    # customer is silently never activated (audit: webhook-handler-error-recorded-
+    # as-processed). Leave the event UNrecorded and raise so the calling route
+    # returns a non-2xx and Razorpay retries on its own (finite) schedule.
+    if result.status == STATUS_HANDLER_ERROR:
+        logger.error(
+            "Razorpay webhook handler error for %s (%s) — not recording; "
+            "surfacing the failure so Razorpay retries",
+            result.event_type, event.id,
+        )
+        raise WebhookHandlerError(
+            f"handler error for {result.event_type} ({event.id})"
+        )
 
     # Persist the idempotency + audit row. If the row already exists
     # (concurrent worker raced us) record_event_processed returns

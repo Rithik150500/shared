@@ -38,6 +38,15 @@ class WebhookSignatureInvalid(BillingError):
     """Raised when an inbound Razorpay webhook fails HMAC-SHA256 verification."""
 
 
+class WebhookHandlerError(BillingError):
+    """Raised when a per-event webhook handler fails.
+
+    The unified webhook router surfaces this (instead of recording the event as
+    processed) so the calling route returns a non-2xx and Razorpay retries —
+    otherwise a transient handler failure would be permanently marked processed
+    and never reconciled (a paid customer never activated)."""
+
+
 class SubscriptionNotActive(BillingError):
     """Raised when an action requires an active subscription but the row is not."""
 

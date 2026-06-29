@@ -207,6 +207,46 @@ def test_missing_signature_raises(session: Session) -> None:
         )
 
 
+def test_handler_error_raises_and_writes_no_rows(
+    session: Session, monkeypatch,
+) -> None:
+    """A per-event handler failure must surface as WebhookHandlerError and must
+    NOT record a payment_events row — otherwise the Razorpay retry short-circuits
+    as already_processed and a transient failure is never reconciled (a paid
+    customer never activated). Regression for
+    webhook-handler-error-recorded-as-processed."""
+    from data_access.models.billing import PaymentEvent
+    from case_billing.errors import WebhookHandlerError
+    import case_billing.shared.webhook_router as wr
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("transient db blip during handler")
+
+    monkeypatch.setattr(wr, "_handle_subscription_activated", _boom)
+
+    raw, sig = _wrap_event(
+        "subscription.activated",
+        event_id="evt_boom_1",
+        subscription={"id": "sub_boom", "notes": {"product": "nowlez"}},
+    )
+
+    with pytest.raises(WebhookHandlerError):
+        _run(
+            handle_unified_webhook(
+                raw_body=raw,
+                signature=sig,
+                secret=WEBHOOK_SECRET,
+                session=session,
+                razorpay_client=_fake_razorpay_client(),
+                send_template_fn=AsyncMock(),
+            )
+        )
+
+    # The failed event must NOT be recorded — so Razorpay's retry re-dispatches.
+    rows = session.execute(select(PaymentEvent)).scalars().all()
+    assert rows == []
+
+
 # ---------- idempotency / replay --------------------------------------------
 
 
