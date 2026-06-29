@@ -88,6 +88,7 @@ def _add_nowlez_ext(
     *,
     tier: str | None,
     trial_ends_at: datetime | None = None,
+    tier_expires_at: datetime | None = None,
     name: str = "Test User",
 ) -> None:
     from data_access.models.user import UserNowlez
@@ -98,6 +99,7 @@ def _add_nowlez_ext(
             name=name,
             tier=tier,
             trial_ends_at=trial_ends_at,
+            tier_expires_at=tier_expires_at,
         )
     )
     session.flush()
@@ -222,6 +224,60 @@ def test_effective_tier_after_trial_expired_with_no_tier(session: Session) -> No
     assert _run(effective_tier(user_id, session)) is None
 
 
+# ---------- paid-tier expiry (tier_expires_at) -----------------------------
+# A paid tier whose tier_expires_at is in the past is no longer entitled —
+# matches casepilot's usage.is_tier_expired (which downgrades to free). A NULL
+# expiry means non-expiring (real Razorpay subs leave it NULL); a future
+# expiry is still active.
+
+
+def test_effective_tier_none_when_paid_tier_expired(session: Session) -> None:
+    user_id = _make_user(session)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="chambers",
+        tier_expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    assert _run(effective_tier(user_id, session)) is None
+
+
+def test_effective_tier_returns_tier_when_expiry_in_future(session: Session) -> None:
+    user_id = _make_user(session)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="chambers",
+        tier_expires_at=datetime.now(timezone.utc) + timedelta(days=10),
+    )
+    assert _run(effective_tier(user_id, session)) == "chambers"
+
+
+def test_effective_tier_returns_tier_when_expiry_null(session: Session) -> None:
+    """NULL expiry = non-expiring paid subscription (Razorpay subs)."""
+    user_id = _make_user(session)
+    _add_nowlez_ext(session, user_id, tier="counsel", tier_expires_at=None)
+    assert _run(effective_tier(user_id, session)) == "counsel"
+
+
+def test_is_paying_nowlez_subscriber_false_when_paid_tier_expired(session: Session) -> None:
+    user_id = _make_user(session)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="advocate",
+        tier_expires_at=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+    assert _run(is_paying_nowlez_subscriber(user_id, session)) is False
+
+
+def test_has_nowlez_access_false_when_paid_tier_expired(session: Session) -> None:
+    user_id = _make_user(session)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="chambers",
+        tier_expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    assert _run(has_nowlez_access(user_id, session)) is False
+
+
 # ---------- is_user_eligible_for_munshi_billing — all seven states ---------
 
 
@@ -256,6 +312,23 @@ def test_state_4_both_active_paid_nowlez_suppresses_munshi(session: Session) -> 
     # Even though munshi extension exists, the paid Nowlez tier suppresses
     # Munshi billing.
     assert _run(is_user_eligible_for_munshi_billing(user_id, session)) is False
+
+
+def test_expired_paid_nowlez_does_not_suppress_munshi(session: Session) -> None:
+    """An *expired* paid Nowlez grant no longer suppresses Munshi billing.
+
+    Deliberate behaviour change (Fix B): expired grants stop counting as
+    paying, so the Munshi cron resumes invoicing — consistent with
+    is_paying_nowlez_subscriber/effective_tier honouring tier_expires_at.
+    """
+    user_id = _make_user(session)
+    _add_munshi_ext(session, user_id)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="chambers",
+        tier_expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    assert _run(is_user_eligible_for_munshi_billing(user_id, session)) is True
 
 
 def test_state_5_munshi_during_nowlez_trial_is_not_eligible(session: Session) -> None:
