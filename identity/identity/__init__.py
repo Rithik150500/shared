@@ -14,6 +14,7 @@ from .api import (
     start_wa_login,
     start_wa_login_from_bot,
     verify_email_otp_and_login,
+    verify_google_id_token_and_login,
     verify_otp_and_login,
     wa_login_is_pending,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "wa_login_is_pending",
     "start_email_otp",
     "verify_email_otp_and_login",
+    "verify_google_id_token_and_login",
     "link_email_to_phone_account",
     "errors",
 ]

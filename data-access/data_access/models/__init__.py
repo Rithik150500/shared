@@ -1,5 +1,11 @@
 from .audit import AuditLog
-from .auth import AuthSession, EmailOtpCode, LoginRequest, OtpCode
+from .auth import (
+    AuthSession,
+    EmailOtpCode,
+    LoginRequest,
+    OtpCode,
+    UserExternalIdentity,
+)
 from .billing import (
     CaseBillingPeriod,
     CouponCode,
@@ -26,6 +32,7 @@ __all__ = [
     "OtpCode",
     "LoginRequest",
     "EmailOtpCode",
+    "UserExternalIdentity",
     "AuditLog",
     "Case",
     "CaseOrder",

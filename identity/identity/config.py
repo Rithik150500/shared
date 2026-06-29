@@ -18,6 +18,12 @@ class IdentitySettings(BaseSettings):
 
     # Refresh tokens (opaque, SHA-256-hashed)
     REFRESH_TTL_DAYS: int = 30
+    # Rotation: each /refresh issues a NEW token and revokes the presented one.
+    # A just-rotated token replayed within this grace window (e.g. a second
+    # browser tab that read the cookie before the new one landed) is treated as
+    # a benign concurrent retry and issued a fresh sibling token, NOT flagged as
+    # reuse. Beyond the window, replay of a rotated token = theft -> family revoke.
+    REFRESH_ROTATION_GRACE_SECONDS: int = 15
 
     # OTP
     OTP_LENGTH: int = 6
@@ -63,6 +69,14 @@ class IdentitySettings(BaseSettings):
     RESEND_API_KEY: str = ""  # shared with casepilot RESEND_API_KEY
     EMAIL_SEND_TIMEOUT_SECONDS: int = 10
     OTP_PER_EMAIL_PER_HOUR: int = 5  # mirrors OTP_PER_PHONE_PER_HOUR
+
+    # Google Sign-In (Method D) — OIDC ID-token (One-Tap / GIS button) verify.
+    # GOOGLE_OAUTH_CLIENT_ID is the OAuth 2.0 *Web* client id; it is the audience
+    # the ID token is validated against. NOT the same as the Calendar client id.
+    # No client secret is needed for ID-token verification (only for an
+    # authorization-code exchange, which this flow does not use).
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
+    GOOGLE_TOKEN_VERIFY_TIMEOUT_SECONDS: int = 10  # Google cert (JWKS) fetch timeout
 
 
 settings = IdentitySettings()

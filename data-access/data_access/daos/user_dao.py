@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from ..models import User, UserMunshi, UserNowlez
+from ..models import User, UserExternalIdentity, UserMunshi, UserNowlez
 from ..phone import normalize_phone
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -192,6 +192,53 @@ def is_email_verified(session: Session, user_id: uuid.UUID) -> bool:
         select(UserNowlez.email_verified).where(UserNowlez.user_id == user_id)
     ).scalar_one_or_none()
     return bool(val)
+
+
+def get_by_google_sub(session: Session, google_sub: str) -> User | None:
+    """Resolve the users row linked to this Google subject id (the stable login
+    anchor). Returns None if no Google identity has been linked for this sub."""
+    return session.execute(
+        select(User)
+        .join(UserExternalIdentity, UserExternalIdentity.user_id == User.id)
+        .where(
+            UserExternalIdentity.provider == "google",
+            UserExternalIdentity.provider_sub == google_sub,
+        )
+    ).scalar_one_or_none()
+
+
+def link_google_identity(
+    session: Session, *, user_id: uuid.UUID, google_sub: str, email: str | None = None
+) -> bool:
+    """Attach a Google identity to ``user_id``. Idempotent: a re-login for an
+    already-linked (provider, sub) is a no-op (INSERT ... ON CONFLICT DO NOTHING,
+    dialect-aware, mirroring get_or_create_by_email). ``email`` is the
+    provider-asserted address stored for audit only.
+
+    Returns True iff a NEW link row was inserted; False when the insert was a
+    no-op (the sub is already linked, or this user already has a Google identity)
+    so the caller can surface the skip.
+    """
+    dialect = session.get_bind().dialect.name
+    insert_fn = pg_insert if dialect == "postgresql" else sqlite_insert
+    stmt = (
+        insert_fn(UserExternalIdentity)
+        .values(
+            user_id=user_id,
+            provider="google",
+            provider_sub=google_sub,
+            email=email,
+        )
+        # No index_elements: DO NOTHING on EITHER unique key
+        # ((provider, provider_sub) or (user_id, provider)) so a repeat link or a
+        # second Google account on the same user is a safe no-op, never an error.
+        # NOTE: the untargeted ON CONFLICT DO NOTHING needs SQLite >= 3.35.0
+        # (2021); Postgres is unaffected. All supported runtimes ship newer.
+        .on_conflict_do_nothing()
+    )
+    result = session.execute(stmt)
+    session.flush()
+    return (result.rowcount or 0) > 0
 
 
 def merge_users(session: Session, *, survivor_id: uuid.UUID, absorbed_id: uuid.UUID) -> None:
