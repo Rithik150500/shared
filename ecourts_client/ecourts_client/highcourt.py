@@ -16,9 +16,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import date
+from typing import ClassVar
 
 from ecourts_client._session import Session
 from ecourts_client.errors import CNRNotFound
+from ecourts_client.forums import Forum, ForumCapabilities, IdentifierKind
 from ecourts_client.models import (
     BenchRef,
     Case,
@@ -46,6 +48,16 @@ from ecourts_client.pdf import fetch_pdf
 @dataclass
 class HighCourtClient:
     scope: str = "highcourt"
+    # Multi-forum adapter contract (see forums.ForumAdapter). ClassVar so it
+    # isn't a dataclass field; fetch_case/fetch_pdf below satisfy the Protocol.
+    capabilities: ClassVar[ForumCapabilities] = ForumCapabilities(
+        forum=Forum.ECOURTS_HIGHCOURT,
+        identifier_kind=IdentifierKind.CNR,
+        supports_fetch=True,
+        supports_search=True,
+        supports_pdf=True,
+        is_manual=False,
+    )
     _session: Session = field(init=False, repr=False)
 
     def __post_init__(self) -> None:

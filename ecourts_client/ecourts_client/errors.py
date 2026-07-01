@@ -66,3 +66,29 @@ class CircuitOpen(ECourtsError):
 
 class JWTExpired(ECourtsError):
     """Two consecutive 401s; the caller must mint a fresh JWT."""
+
+
+class ForumNotAutomated(ECourtsError):
+    """No automated adapter is registered for this forum.
+
+    Raised by ``client.get_adapter`` for manual-only forums (arbitration) and
+    forums not yet automated (SC/consumer/DRT before their phase). Callers route
+    such forums to the manual-entry path instead of an upstream fetch.
+    """
+
+    def __init__(self, forum: str) -> None:
+        self.forum = forum
+        super().__init__(f"No automated adapter registered for forum {forum!r}")
+
+
+class IdentifierMalformed(ECourtsError):
+    """A forum identifier is empty or doesn't match the forum's expected kind."""
+
+    def __init__(self, forum: str, identifier: str, reason: str | None = None) -> None:
+        self.forum = forum
+        self.identifier = identifier
+        self.reason = reason
+        super().__init__(
+            f"Malformed identifier {identifier!r} for forum {forum!r}"
+            + (f" ({reason})" if reason else "")
+        )

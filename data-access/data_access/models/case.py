@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     TypeDecorator,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -80,10 +81,32 @@ class Case(Base):
         nullable=False,
     )
 
-    cnr: Mapped[str] = mapped_column(String(16), nullable=False)
+    # cnr is eCourts-only now (nullable). Non-eCourts / manual forums have no
+    # 16-char CNR — they are keyed by (user_id, forum, forum_case_ref) instead.
+    cnr: Mapped[str | None] = mapped_column(String(16), nullable=True)
     case_number: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)
-    portal: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Multi-forum discriminator. eCourts rows use ecourts_district /
+    # ecourts_highcourt (kept consistent with `portal` via a CHECK); SC /
+    # consumer / drt / arbitration have no `portal`.
+    forum: Mapped[str] = mapped_column(
+        Text, nullable=False, default="ecourts_district",
+        server_default=text("'ecourts_district'"),
+    )
+    # Universal per-forum identity: == cnr for eCourts; the user's normalized
+    # case number for other forums; a synthetic 'm-<uuid4hex>' for a manual case
+    # with no official number. Unique per (user_id, forum).
+    forum_case_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    # Provenance / whether an automated adapter refreshes this row. Manual rows
+    # ('manual') are skipped by get_due_for_refresh regardless of refresh_enabled.
+    source: Mapped[str] = mapped_column(
+        Text, nullable=False, default="ecourts_auto",
+        server_default=text("'ecourts_auto'"),
+    )
+
+    # eCourts sub-classifier (district/highcourt). NULL for non-eCourts forums.
+    portal: Mapped[str | None] = mapped_column(Text, nullable=True)
     filing_year: Mapped[int | None] = mapped_column(Integer)
 
     court: Mapped[str | None] = mapped_column(Text)
@@ -146,8 +169,39 @@ class Case(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("user_id", "cnr", name="cases_user_cnr_unique"),
-        CheckConstraint("portal IN ('district', 'highcourt')", name="cases_portal_check"),
+        # eCourts uniqueness kept as a PARTIAL unique index so multiple non-eCourts
+        # rows (cnr IS NULL) never collide. Postgres/SQLite both treat NULLs as
+        # distinct in a unique index; the partial predicate makes intent explicit
+        # and keeps the index small. (Was a table UniqueConstraint pre-multiforum.)
+        Index(
+            "cases_user_cnr_unique", "user_id", "cnr", unique=True,
+            postgresql_where=text("cnr IS NOT NULL"),
+        ),
+        # Universal per-forum identity uniqueness (all forums, including manual).
+        UniqueConstraint(
+            "user_id", "forum", "forum_case_ref", name="cases_user_forum_ref_unique",
+        ),
+        CheckConstraint(
+            "portal IS NULL OR portal IN ('district', 'highcourt')",
+            name="cases_portal_check",
+        ),
+        CheckConstraint(
+            "forum IN ('ecourts_district', 'ecourts_highcourt', 'supreme_court', "
+            "'consumer', 'drt', 'arbitration')",
+            name="cases_forum_check",
+        ),
+        CheckConstraint(
+            "source IN ('ecourts_auto', 'manual', 'ejagriti_auto', 'drt_auto', "
+            "'sc_auto')",
+            name="cases_source_check",
+        ),
+        # eCourts forum and portal must stay consistent; non-eCourts forums ignore portal.
+        CheckConstraint(
+            "(forum = 'ecourts_district'  AND portal = 'district')  OR "
+            "(forum = 'ecourts_highcourt' AND portal = 'highcourt') OR "
+            "(forum NOT IN ('ecourts_district', 'ecourts_highcourt'))",
+            name="cases_forum_portal_consistency",
+        ),
         Index("cases_user_id_idx", "user_id"),
         Index(
             "cases_next_hearing_date_idx", "next_hearing_date",
@@ -260,3 +314,25 @@ class CaseOrderNowlez(Base):
             ),
         ),
     )
+
+
+@event.listens_for(Case, "before_insert")
+def _fill_ecourts_identity(mapper, connection, target: "Case") -> None:
+    """Backfill eCourts identity for rows built with just a cnr.
+
+    ``forum_case_ref`` is NOT NULL and ``forum`` must match ``portal`` (CHECK).
+    Rather than make every eCourts construction site repeat that boilerplate,
+    derive them here for any row that carries a CNR: align ``forum`` to
+    ``portal`` and default ``forum_case_ref`` to the CNR. Manual / non-eCourts
+    rows have ``cnr IS NULL`` and set their own forum/forum_case_ref/source via
+    ``case_dao.create_manual_case``, so this no-ops for them.
+    """
+    if target.cnr is None:
+        return
+    if target.portal in ("district", "highcourt"):
+        target.forum = (
+            "ecourts_highcourt" if target.portal == "highcourt"
+            else "ecourts_district"
+        )
+    if not target.forum_case_ref:
+        target.forum_case_ref = target.cnr
