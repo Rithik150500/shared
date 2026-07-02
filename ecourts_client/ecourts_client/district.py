@@ -84,9 +84,11 @@ class DistrictCourtClient:
         case_number = list_resp.get("case_number")
 
         if case_number:
+            # eCourts v4.0: caseHistoryWebService keys on ``cino`` (the v3 ``cinum``
+            # now returns ``error_ERROR_State_code1``). See docs/RE_NOTES_v4.md.
             history_resp = self._session.call(
                 "caseHistoryWebService.php",
-                {"cinum": cnr, "language_flag": "english", "bilingual_flag": "0"},
+                {"cino": cnr, "language_flag": "english", "bilingual_flag": "0"},
             )
         else:
             history_resp = self._session.call(

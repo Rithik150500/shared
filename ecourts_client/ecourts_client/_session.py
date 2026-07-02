@@ -5,24 +5,24 @@ Workflow:
     s.init()                          # bootstrap, mints initial JWT
     response_dict = s.call("stateWebService.php", {})
 
-The cleartext request body always carries the common envelope (version_number, uid,
-language_code) plus endpoint-specific fields. The whole body is encrypted into the
-request envelope and sent as ?params=<envelope> query string. The Bearer header
-on every non-bootstrap call is wrap_bearer(jwt) -- the JWT is itself encrypted
-before being placed in the Bearer slot.
+The cleartext request body carries the bundle-id ``uid`` plus endpoint-specific
+fields. The whole body is encrypted into the request envelope and sent as
+?params=<envelope> query string. The Bearer header on every non-bootstrap call
+is the RAW JWT (v4.0; v3 wrapped it with encrypt_request).
 
-See docs/RE_NOTES.md sections 2.4 and 2.5 for the full provenance.
+Migrated to the eCourts mobile API v4.0 on 2026-07-02 -- see the block above the
+DC_BASE_URL/HC_BASE_URL constants for the full v3->v4 delta and provenance
+(eCourts Services v4.0.1 APK + live verification).
 """
 from __future__ import annotations
 
 import json
-import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import requests
 
-from ecourts_client._crypto import decrypt_response, encrypt_request, wrap_bearer
+from ecourts_client._crypto import decrypt_response, encrypt_request
 from ecourts_client.errors import (
     BlockedByGeoIP,
     CourtSiteDown,
@@ -31,12 +31,28 @@ from ecourts_client.errors import (
 )
 
 
-DC_BASE_URL = "https://app.ecourts.gov.in/ecourt_mobile_DC/"
-HC_BASE_URL = "https://app.ecourts.gov.in/ecourt_mobile_HC/"
+# --- eCourts mobile API v4.0 (migrated 2026-07-02) --------------------------
+# eCourts retired the v3.0 mobile endpoints (``/ecourt_mobile_DC/`` and
+# ``/ecourt_mobile_HC/`` -> HTTP 404) and moved to the v4.0 service paths.
+# Verified against the eCourts Services v4.0.1 APK (Hermes RN bundle) + live:
+#   * base URL          : /services_{DC,HC}_4.0/  (was /ecourt_mobile_{DC,HC}/)
+#   * bootstrap payload : {"appVersion": "4.0.1", "uid": <bundle id>}
+#                         (v3 sent {"version": ..., "uid": "<uuid>:<pkg>"})
+#   * bearer            : "Bearer <raw jwt>"  (v3 wrapped the jwt with
+#                         encrypt_request via wrap_bearer -> now "UnAuthorized")
+#   * common envelope   : the app's request interceptor injects ``uid`` (the
+#                         bare bundle id) into every request's params.
+#   * AES envelope keys : UNCHANGED (request + response crypto identical).
+DC_BASE_URL = "https://app.ecourts.gov.in/services_DC_4.0/"
+HC_BASE_URL = "https://app.ecourts.gov.in/services_HC_4.0/"
 
 _USER_AGENT = "eCourts-Bot/0.1 (+https://github.com/yourorg/ecourts-bot)"
 _PACKAGE_NAME = "in.gov.ecourts.eCourtsServices"
-_APP_VERSION = "3.0"
+# v4.0: the ``uid`` on every request is the bare bundle id (NOT ``<uuid>:<pkg>``
+# as in v3). Sending the v3 form makes appReleaseWebService.php withhold the
+# token (``version_compatible:"S1", token:null``) and data calls 401.
+_UID = _PACKAGE_NAME
+_APP_VERSION = "4.0.1"
 _REQUEST_TIMEOUT = 30
 
 # A-5 audit fix: the transport layer is now retry-free. The outer
@@ -70,30 +86,33 @@ class Session:
 
     def __post_init__(self) -> None:
         self.base_url = DC_BASE_URL if self.scope == "district" else HC_BASE_URL
-        self.uid = str(uuid.uuid4())
+        # v4.0: uid is the bare bundle id (constant); the per-session identity is
+        # the JWT itself (each init() mints a fresh iat/nbf/exp token). The old
+        # per-instance uuid is no longer part of the uid.
+        self.uid = _UID
         self._http = requests.Session()
         self._http.headers.update({"User-Agent": _USER_AGENT})
 
     @property
     def uid_with_pkgname(self) -> str:
-        """The uid format the server expects: <UUID>:<pkgname>."""
-        return f"{self.uid}:{_PACKAGE_NAME}"
+        """v4.0 uid == the bare bundle id (kept as a property for call sites)."""
+        return self.uid
 
     def init(self) -> None:
-        """Mint the initial JWT via appReleaseWebService.php.
+        """Mint the initial JWT via appReleaseWebService.php (v4.0).
 
-        Per index.js:63 the bootstrap payload is exactly {version, uid} where uid
-        already includes the package-name suffix.
+        v4.0 bootstrap payload is ``{"appVersion": <ver>, "uid": <bundle id>}``.
+        The response carries the HS256 JWT in ``token`` (same slot as v3). Sending
+        the v3 shape (``version`` + ``<uuid>:<pkg>`` uid) makes the server return
+        ``version_compatible:"S1", token:null``.
         """
-        payload = {"version": _APP_VERSION, "uid": self.uid_with_pkgname}
+        payload = {"appVersion": _APP_VERSION, "uid": self.uid}
         body = self._send("appReleaseWebService.php", payload, with_bearer=False)
         token = body.get("token")
         if not token:
-            # Some server responses include only appReleaseObj/version_compatible and a null
-            # token; in that case we cannot proceed with authenticated calls.
             raise ECourtsError(
                 f"appReleaseWebService.php returned no token: {body!r}. "
-                "JWT-issuing init may require additional fields or a separate endpoint."
+                "Check appVersion/uid (v4.0 wants appVersion + bare-bundle-id uid)."
             )
         self.jwt = token
 
@@ -109,28 +128,44 @@ class Session:
 
         result = self._send(endpoint, payload, with_bearer=True)
 
+        # v4.0: a 401 ("UnAuthorized" / "Not in session") means the JWT expired or
+        # was rejected -> mint a fresh token via init() and retry once.
         if result.get("status") == "N" and str(result.get("status_code")) == "401":
-            retried = {**payload, "uid": self.uid_with_pkgname}
-            result = self._send(endpoint, retried, with_bearer=True)
+            self.jwt = None
+            self.init()
+            result = self._send(endpoint, payload, with_bearer=True)
             if result.get("status") == "N" and str(result.get("status_code")) == "401":
                 self.jwt = None
                 raise JWTExpired(f"Second 401 from {endpoint}; JWT must be re-minted")
 
         if result.get("status") == "N":
-            msg = result.get("msg") or result.get("errorMessage") or "unknown eCourts error"
+            # v4.0 uses "Msg"; v3 used "msg"/"errorMessage".
+            msg = (
+                result.get("Msg")
+                or result.get("msg")
+                or result.get("errorMessage")
+                or "unknown eCourts error"
+            )
             raise ECourtsError(f"{endpoint}: {msg}")
 
         return result
 
     def _send(self, endpoint: str, payload: Any, *, with_bearer: bool) -> dict[str, Any]:
         url = self.base_url + endpoint
+
+        # v4.0: the app's request interceptor injects the bundle-id ``uid`` into
+        # every request's params. Mirror that here so per-endpoint callers don't
+        # each have to remember it.
+        if isinstance(payload, dict) and "uid" not in payload:
+            payload = {**payload, "uid": self.uid}
         encrypted_body = encrypt_request(payload)
 
         headers: dict[str, str] = {}
         if with_bearer:
             if self.jwt is None:
                 raise ECourtsError("attempt to send authenticated call without JWT")
-            headers["Authorization"] = f"Bearer {wrap_bearer(self.jwt)}"
+            # v4.0: the JWT is sent RAW (v3 wrapped it via encrypt_request).
+            headers["Authorization"] = f"Bearer {self.jwt}"
 
         # A-5: no inner retry loop. Classify the failure and let the outer
         # ``with_retry`` decorator decide. Transport-level connection errors

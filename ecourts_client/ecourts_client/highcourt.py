@@ -162,8 +162,11 @@ class HighCourtClient:
         Used by `bot.causelist.case_type_cache` to build the abbrev -> numeric
         code map that the CNR back-resolver needs.
         """
+        # eCourts v4.0 renamed the case-types endpoint caseNumberWebService.php
+        # -> caseTypesWebService.php (same {case_types:[{case_type:"code~name#…"}]}
+        # response, parsed by parse_case_types). See docs/RE_NOTES_v4.md.
         resp = self._session.call(
-            "caseNumberWebService.php",
+            "caseTypesWebService.php",
             {
                 "state_code": str(state_code),
                 "dist_code": str(district_code),
@@ -196,8 +199,11 @@ class HighCourtClient:
         """
         if pending_disposed not in {"Pending", "Disposed", "Both"}:
             raise ValueError(f"pending_disposed must be Pending|Disposed|Both, got {pending_disposed!r}")
+        # eCourts v4.0 renamed the party-search endpoint showDataWebService.php
+        # -> searchByPartyName.php (same establishment/caseNos response shape,
+        # parsed by parse_party_search). See docs/RE_NOTES_v4.md.
         resp = self._session.call(
-            "showDataWebService.php",
+            "searchByPartyName.php",
             {
                 "state_code": str(state_code),
                 "dist_code": str(bench_code),
