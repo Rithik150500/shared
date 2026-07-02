@@ -44,7 +44,13 @@ def validate_cnr_shape(cnr: str) -> None:
     if not isinstance(cnr, str) or not CNR_REGEX.match(cnr):
         raise CNRMalformed(cnr=cnr, reason="failed regex [A-Z]{2}[A-Z]{2}[A-Z0-9]{12}")
     state = cnr[:2]
-    if state not in STATE_CODES:
+    court_type = cnr[2:4]
+    # High Court CNRs carry an HC-specific 2-letter code in the state slot that
+    # is not always a geographic state (e.g. 'PH' = Punjab & Haryana HC, 'GA'
+    # shared by Gauhati HC). Only enforce the geographic-state whitelist for
+    # District Court CNRs; HC CNRs are validated by shape + the 'HC' court-type
+    # segment (the search that produced the CNR already scoped the establishment).
+    if court_type not in HC_ESTABLISHMENT_CODES and state not in STATE_CODES:
         raise CNRMalformed(cnr=cnr, reason=f"unknown state code '{state}'")
 
 
