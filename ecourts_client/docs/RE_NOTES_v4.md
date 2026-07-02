@@ -50,22 +50,30 @@ the v3 HTML tables became **structured JSON** (rewrite validated live +
 `parse_case_history` now type-dispatches (v4 list vs v3 HTML) so it stays
 back-compatible with the fixtures.
 
+### DONE — order-PDF fetch (POST), search renames, DC fetch
+- **Order PDF (POST)** — v4 is TWO steps: **POST** `display_pdf_new.php?params=<enc>`
+  (encrypted order fields `{filename,caseno,cCode,appFlag,state_cd,dist_cd,court_code,
+  bilingual_flag:"1"}`, raw-jwt bearer) → returns `{"pdf_url":"https://csc.ecourts.gov.in/
+  helpdesk_alias/<hash>.pdf"}`, then **GET** that signed alias URL for the bytes.
+  Body-POST returns `{status:N}`; params MUST be on the query string. Implemented in
+  `pdf.py` (`encode_v4_order` → `displaypdf:` scheme; `fetch_order_pdf(session,url)`
+  does POST→pdf_url→GET); `_session._send` gained a `method` arg; the clients'
+  `fetch_pdf` route through it. Validated live: real `%PDF-1.4` bytes.
+- **Search endpoints renamed** — `caseNumberWebService`→`caseTypesWebService.php`
+  (`list_case_types`, HC + DC) and `showDataWebService`→`searchByPartyName.php`
+  (party search, HC + DC); `caseNumberSearch.php` unchanged. The existing
+  `parse_case_types` (#-delimited `code~name`) and `parse_case_number_search`
+  (`{0:{caseNos:[{cino}]}}`) already matched v4 → no parser change.
+- **DC fetch** — `caseHistoryWebService.php` keys on `cino` (v3 `cinum` →
+  `error_ERROR_State_code1`); `listOfCasesWebService.php` works with `{cino}` + uid.
+
 ### REMAINING
-- **Order PDF fetch (POST)**: v4 fetches order PDFs via **POST** `display_pdf_new.php`
-  with params `{filename, caseno, cCode, appFlag, state_cd, dist_cd, court_code,
-  bilingual_flag:"1"}` (the order dict carries all of them). The naive static URL
-  `https://app.ecourts.gov.in{filename}` **405s**. `pdf.py` needs a v4 POST path;
-  until then order PDFs 404-degrade (order stored, case still lands). The parser
-  currently emits the static URL as `order_url` (absolute, so no MissingSchema).
-- **Search endpoints renamed** (needed to resolve case-number → CNR from
-  screenshots): v3 `caseNumberWebService.php` (case-type codes, `list_case_types`)
-  → **`caseTypesWebService.php`**; v3 `showDataWebService.php` (party search) →
-  **`searchByPartyName.php`**; `caseNumberSearch.php` still present (verify
-  payload/response). Response shapes likely changed → re-check the `parsers/`.
-- **District fetch flow**: DC `caseHistoryWebService.php` errors
-  `error_ERROR_State_code1` with `{cino}` alone — the DC multi-step flow
-  (`listOfCasesWebService.php` → `caseHistoryWebService.php {cinum,…}`) needs the
-  establishment envelope (`state_code`/`dist_code`/`court_code`).
+- **DC case-type lister court_code** — `caseTypesWebService.php` for District rejects
+  every court_code tried (court-no `1/2/3`, est `1270001`, envelope) with
+  `error_ERROR_courtcode4`. v4 changed the DC case-type param; needs disasm RE.
+  Blocks DC search-by-case-number (party-search avoids it). DC fetch-by-CNR is fine.
+- **Hearing history v4 shape** — `historyOfCaseHearing` is null on disposed cases;
+  confirm the structured-list field names on a pending case.
 
 Full v4 `.php` inventory + disasm on the droplet: `~/ecourts_re/disasm.hasm`,
 saved HC sample `~/ecourts_re/hc_case_history.json`, APK `~/ecourts_re/ecourts.apk`.

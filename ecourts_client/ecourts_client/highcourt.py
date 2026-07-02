@@ -42,7 +42,7 @@ from ecourts_client.parsers.daily_business import parse_daily_business
 from ecourts_client.parsers.dropdowns import parse_states
 from ecourts_client.parsers.dropdowns_extra import parse_case_types, parse_hc_benches
 from ecourts_client.parsers.search import parse_case_number_search, parse_party_search
-from ecourts_client.pdf import fetch_pdf
+from ecourts_client.pdf import fetch_order_pdf, fetch_pdf
 
 
 @dataclass
@@ -72,7 +72,7 @@ class HighCourtClient:
         return parse_case_history(response, cnr=cnr)
 
     def fetch_pdf(self, url: str) -> bytes:
-        return fetch_pdf(self._session._http, url)
+        return fetch_order_pdf(self._session, url)
 
     def list_states(self) -> list[StateRef]:
         resp = self._session.call(

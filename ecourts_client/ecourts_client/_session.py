@@ -150,7 +150,7 @@ class Session:
 
         return result
 
-    def _send(self, endpoint: str, payload: Any, *, with_bearer: bool) -> dict[str, Any]:
+    def _send(self, endpoint: str, payload: Any, *, with_bearer: bool, method: str = "GET") -> dict[str, Any]:
         url = self.base_url + endpoint
 
         # v4.0: the app's request interceptor injects the bundle-id ``uid`` into
@@ -173,12 +173,18 @@ class Session:
         # and GeoIP-403 are *not* retryable (no rationale to hammer the
         # same throttled endpoint or relocate the egress IP).
         try:
-            resp = self._http.get(
-                url,
-                params={"params": encrypted_body},
-                headers=headers,
-                timeout=_REQUEST_TIMEOUT,
-            )
+            # v4.0: most endpoints are encrypted-GET; display_pdf_new.php is an
+            # encrypted-POST (params still on the query string). Keep the plain
+            # ``.get`` for the GET path (test doubles stub ``.get``); use
+            # ``.request`` only for the rarer POST.
+            if method == "GET":
+                resp = self._http.get(
+                    url, params={"params": encrypted_body}, headers=headers, timeout=_REQUEST_TIMEOUT,
+                )
+            else:
+                resp = self._http.request(
+                    method, url, params={"params": encrypted_body}, headers=headers, timeout=_REQUEST_TIMEOUT,
+                )
         except (requests.ConnectionError, requests.Timeout) as e:
             raise CourtSiteDown(f"connection error on {endpoint}: {e}") from e
 

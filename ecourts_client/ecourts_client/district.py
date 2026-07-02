@@ -50,7 +50,7 @@ from ecourts_client.parsers.dropdowns_extra import (
 )
 from ecourts_client.parsers.fir_search import parse_fir_search
 from ecourts_client.parsers.search import parse_case_number_search, parse_party_search
-from ecourts_client.pdf import fetch_pdf
+from ecourts_client.pdf import fetch_order_pdf, fetch_pdf
 
 
 @dataclass
@@ -102,7 +102,7 @@ class DistrictCourtClient:
         return parse_case_history(history_resp, cnr=cnr)
 
     def fetch_pdf(self, url: str) -> bytes:
-        return fetch_pdf(self._session._http, url)
+        return fetch_order_pdf(self._session, url)
 
     # --- dropdown listers -------------------------------------------------
 
@@ -149,8 +149,9 @@ class DistrictCourtClient:
     def list_case_types(
         self, *, state_code: str, district_code: str, court_code: str
     ) -> list[CaseTypeRef]:
+        # eCourts v4.0 renamed caseNumberWebService.php -> caseTypesWebService.php.
         resp = self._session.call(
-            "caseNumberWebService.php",
+            "caseTypesWebService.php",
             {
                 "state_code": str(state_code),
                 "dist_code": str(district_code),
@@ -178,8 +179,9 @@ class DistrictCourtClient:
         njdg_est_codes within the selected complex (e.g. '1' for a single complex)."""
         if pending_disposed not in {"Pending", "Disposed", "Both"}:
             raise ValueError(f"pending_disposed must be Pending|Disposed|Both, got {pending_disposed!r}")
+        # eCourts v4.0 renamed showDataWebService.php -> searchByPartyName.php.
         resp = self._session.call(
-            "showDataWebService.php",
+            "searchByPartyName.php",
             {
                 "state_code": str(state_code),
                 "dist_code": str(district_code),

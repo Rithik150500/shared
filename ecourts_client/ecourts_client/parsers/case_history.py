@@ -36,6 +36,7 @@ from ecourts_client.models import (
     OrderRef,
     Party,
 )
+from ecourts_client.pdf import encode_v4_order
 
 
 def parse_case_history(response: dict[str, Any], cnr: str) -> Case:
@@ -136,14 +137,6 @@ def _build_parties(h: dict[str, Any]) -> list[Party]:
     return parties
 
 
-# eCourts host that serves order PDFs. v4 order items carry a root-relative
-# ``filename`` (e.g. "/orders/2024/..._1.pdf"); most establishments serve these
-# statically off the app host. When that 404s the order is still stored (the
-# case lands); the signed POST ``display_pdf_new.php`` path is a downstream
-# fallback -- see docs/RE_NOTES_v4.md.
-_PDF_HOST = "https://app.ecourts.gov.in"
-
-
 def _parse_acts(value: Any) -> list[Act]:
     """eCourts v4 returns a JSON list of ``{actCodeName, actSectionName}``;
     v3 returned an HTML ``<table>``. Handle both (and null)."""
@@ -202,7 +195,9 @@ def _parse_orders(value: Any) -> list[OrderRef]:
             filename = (row.get("filename") or "").strip()
             if order_date is None or not filename:
                 continue
-            url = filename if filename.startswith("http") else _PDF_HOST + filename
+            # v4 order PDFs need a POST to display_pdf_new.php; encode the order's
+            # params so fetch_order_pdf can resolve the signed pdf_url later.
+            url = encode_v4_order(row)
             order_id = str(row.get("order_id") or order_date.isoformat())
             orders.append(OrderRef(order_date=order_date, order_url=url, order_id=order_id))
         return orders
