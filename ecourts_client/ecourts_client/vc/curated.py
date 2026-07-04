@@ -20,6 +20,7 @@ def _access_from_row(row: dict) -> VCAccess | None:
         passcode=(str(row["passcode"]) if row.get("passcode") else None),
         requires_intimation=bool(row.get("requires_intimation", False)),
         persistent=bool(row.get("persistent", True)),
+        room=(str(row["room"]) if row.get("room") else None),
     )
 
 

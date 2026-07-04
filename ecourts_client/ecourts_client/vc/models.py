@@ -37,6 +37,10 @@ class VCAccess:
     passcode: str | None = None
     requires_intimation: bool = False
     persistent: bool = True
+    # Physical courtroom / room number as published in the VC directory
+    # (e.g. "611", "137A"). Distinct from the eCourts court_no; used for
+    # human display in the digest where the directory provides it.
+    room: str | None = None
 
     def to_meta(self) -> dict[str, str | bool | None]:
         """Compact dict for the cause_list_rows.vc_meta JSON column."""
@@ -44,6 +48,7 @@ class VCAccess:
             "vendor": self.vendor.value, "link_type": self.link_type.value,
             "meeting_id": self.meeting_id, "passcode": self.passcode,
             "requires_intimation": self.requires_intimation, "persistent": self.persistent,
+            "room": self.room,
         }
 
 
