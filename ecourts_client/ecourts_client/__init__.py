@@ -78,6 +78,12 @@ register_adapter(Forum.ECOURTS_HIGHCOURT, HighCourtClient)
 from ecourts_client.consumer import ConsumerClient  # noqa: E402
 register_adapter(Forum.CONSUMER, ConsumerClient)
 
+# Supreme Court — Phase 3. Token-gated mobile backend (scourtapp.sci.gov.in);
+# needs SC_MOBILE_TOKEN (a device-captured session token). Registers here so
+# has_automated_adapter(SUPREME_COURT) flips true + the forum-first path resolves.
+from ecourts_client.supreme import SupremeCourtClient  # noqa: E402
+register_adapter(Forum.SUPREME_COURT, SupremeCourtClient)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -91,7 +97,7 @@ __all__ = [
     "HearingHistoryRow", "HighCourtClient", "IdentifierKind",
     "IdentifierMalformed", "JWTExpired", "ObjectionDetails",
     "OrderRef", "PDFInvalid", "PDFNotFound", "Party", "PoliceStationRef",
-    "RateLimited", "SchemaChanged", "StateRef", "fetch_case",
+    "RateLimited", "SchemaChanged", "StateRef", "SupremeCourtClient", "fetch_case",
     "fetch_case_for_forum", "fetch_pdf", "get_adapter", "get_client_for",
     "has_automated_adapter", "register_adapter",
 ]
