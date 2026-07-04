@@ -178,6 +178,15 @@ class HighCourtClient:
         # eCourts v4.0 renamed the case-types endpoint caseNumberWebService.php
         # -> caseTypesWebService.php (same {case_types:[{case_type:"code~name#…"}]}
         # response, parsed by parse_case_types). See docs/RE_NOTES_v4.md.
+        #
+        # ⚠️ HC uses the SINGULAR ``court_code`` here -- the REVERSE of the
+        # District lister, which v4 forces onto ``court_code_arr`` (singular ->
+        # error_ERROR_courtcode4). On the HC endpoint the opposite holds:
+        # ``court_code`` -> OK (~117 types), ``court_code_arr`` -> "error".
+        # Live-confirmed 2026-07-05 (High Court of Rajasthan(9), dist/court 1/1).
+        # Do NOT "align" this with district.py's court_code_arr fix -- that would
+        # break the HC add-case case-type list. Locked by
+        # tests/unit/test_highcourt_lister_courtcode.py.
         resp = self._session.call(
             "caseTypesWebService.php",
             {
