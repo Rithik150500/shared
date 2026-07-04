@@ -17,18 +17,86 @@ DC_BASE_URL/HC_BASE_URL constants for the full v3->v4 delta and provenance
 from __future__ import annotations
 
 import json
+import re
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import requests
 
 from ecourts_client._crypto import decrypt_response, encrypt_request
+from ecourts_client.config import ECourtsConfig
 from ecourts_client.errors import (
     BlockedByGeoIP,
     CourtSiteDown,
     ECourtsError,
     RateLimited,
 )
+
+
+# A successful response is an AES envelope: 32 hex chars (the IV) followed by at
+# least one base64 ciphertext char. Used to reject non-envelope bodies (HTML
+# error/throttle pages, captchas, edge-proxy notices, or a lone 32-hex IV with no
+# ciphertext) before they reach decrypt_response(), whose bytes.fromhex() would
+# otherwise raise an opaque ValueError.
+_RESPONSE_ENVELOPE_RE = re.compile(r"[0-9a-fA-F]{32}[A-Za-z0-9+/=]")
+
+
+class _RateGate:
+    """Process-wide minimum interval between outbound eCourts HTTP calls.
+
+    eCourts rate-limits IP bursts to HTTP 405 + an HTML page for ~15-30 min
+    (docs/RE_NOTES_v4.md). A bulk add/refresh fires one ``display_pdf_new.php``
+    POST per order, so a book of cases can burst hundreds of calls in seconds and
+    trip the throttle. This gate hands each caller a slot spaced ``min_interval``
+    apart and sleeps until it -- capping the *rate* (the semaphore only caps
+    concurrency). The lock is not held across the sleep, so concurrent callers
+    reserve staggered slots rather than serialising on lock acquisition.
+
+    ``monotonic``/``sleep`` are injectable so the slot arithmetic is unit-testable
+    without real waiting.
+    """
+
+    def __init__(
+        self,
+        min_interval: float,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.min_interval = min_interval
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def wait(self) -> None:
+        if self.min_interval <= 0:
+            return
+        with self._lock:
+            slot = max(self._monotonic(), self._next_allowed)
+            self._next_allowed = slot + self.min_interval
+        delay = slot - self._monotonic()
+        if delay > 0:
+            self._sleep(delay)
+
+
+# One gate per process, created lazily on first send (NOT at import time, so a
+# consumer that imports ecourts_client isn't coupled to ECourtsConfig()/env at
+# import). Seeded from config (env: ECOURTS_MIN_REQUEST_INTERVAL_SECONDS).
+_rate_gate: _RateGate | None = None
+_rate_gate_lock = threading.Lock()
+
+
+def _get_rate_gate() -> _RateGate:
+    global _rate_gate
+    if _rate_gate is None:
+        with _rate_gate_lock:
+            if _rate_gate is None:
+                _rate_gate = _RateGate(ECourtsConfig().ecourts_min_request_interval_seconds)
+    return _rate_gate
 
 
 # --- eCourts mobile API v4.0 (migrated 2026-07-02) --------------------------
@@ -172,6 +240,12 @@ class Session:
         # and HTTP 5xx both become ``CourtSiteDown`` and are retryable; 429
         # and GeoIP-403 are *not* retryable (no rationale to hammer the
         # same throttled endpoint or relocate the egress IP).
+        # Proactive burst control: space outbound eCourts calls so a bulk
+        # add/refresh (one display_pdf_new.php POST per order) can't trip the
+        # 405/HTML throttle. No-op when the interval is 0. Placed here so it
+        # gates every wire call (bootstrap, search, fetch, PDF POST) uniformly.
+        _get_rate_gate().wait()
+
         try:
             # v4.0: most endpoints are encrypted-GET; display_pdf_new.php is an
             # encrypted-POST (params still on the query string). Keep the plain
@@ -192,6 +266,15 @@ class Session:
             raise RateLimited(f"eCourts returned 429 for {endpoint}")
         if resp.status_code == 403 and "geographic" in resp.text.lower():
             raise BlockedByGeoIP(f"GeoIP block for {endpoint}")
+        if resp.status_code == 405:
+            # eCourts throttles IP bursts to HTTP 405 + an HTML "Search Page not
+            # Found" page for ~15-30 min (docs/RE_NOTES_v4.md). Classify as
+            # RateLimited -- NOT CourtSiteDown -- so the outer with_retry policy
+            # (which retries CourtSiteDown 3x) does not hammer the throttle and
+            # reset its window. The shared "ecourts_global" circuit breaker still
+            # trips after the failure threshold, backing the whole process off
+            # until it clears.
+            raise RateLimited(f"eCourts returned 405 (burst throttle) for {endpoint}")
         if 500 <= resp.status_code < 600:
             raise CourtSiteDown(f"{resp.status_code} on {endpoint}")
 
@@ -204,6 +287,19 @@ class Session:
                 return json.loads(body)
             except json.JSONDecodeError:
                 pass  # fall through to decrypt — may genuinely be ciphertext that happens to start with {
+
+        # Guard decrypt_response against non-envelope bodies. A success response
+        # is 32 hex chars (IV) + base64 ciphertext; anything else here -- an HTML
+        # error/throttle/maintenance page, a captcha, an edge-proxy notice --
+        # would make decrypt_response's bytes.fromhex() raise an opaque
+        # ValueError (which the API layer turns into a confusing 500). Surface it
+        # as a transient CourtSiteDown with a short diagnostic snippet instead.
+        if not _RESPONSE_ENVELOPE_RE.match(body):
+            snippet = " ".join(body[:160].split())
+            raise CourtSiteDown(
+                f"non-envelope response from {endpoint} "
+                f"(HTTP {resp.status_code}, {len(body)} bytes): {snippet!r}"
+            )
 
         plaintext = decrypt_response(resp.text)
         try:

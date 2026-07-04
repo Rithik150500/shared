@@ -22,3 +22,14 @@ class ECourtsConfig(BaseSettings):
 
     ecourts_retry_max_attempts: int = 3
     ecourts_retry_base_delay_seconds: float = 1.0
+
+    # Proactive burst control (opt-in tuning knob; OFF by default). eCourts
+    # throttles IP bursts to HTTP 405 + an HTML error page for ~15-30 min
+    # (docs/RE_NOTES_v4.md); a bulk add/refresh fires one display_pdf_new.php POST
+    # per order and can trip it. Set a positive value to enforce a minimum
+    # wall-clock interval process-wide between outbound eCourts HTTP calls (see
+    # _session._RateGate) -- e.g. ~0.34s => ~3 req/s, under the burst threshold,
+    # adding only ~0.34s to a single interactive search. 0 disables (the default:
+    # rely on the reactive circuit breaker + the 405->RateLimited classification,
+    # and enable this via ECOURTS_MIN_REQUEST_INTERVAL_SECONDS if throttling recurs).
+    ecourts_min_request_interval_seconds: float = 0.0

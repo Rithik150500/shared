@@ -84,3 +84,35 @@ saved HC sample `~/ecourts_re/hc_case_history.json`, APK `~/ecourts_re/ecourts.a
 - Strings appear as `# String: '...'`; endpoints via `grep "String: '[a-z]*\.php'"`.
 - Live tests must come from an **India egress** (the prod droplet) and be
   **rate-limited** — eCourts throttles bursts to 405/HTML for ~15–30 min.
+
+## Burst throttle (405/HTML) — signature + mitigation (added 2026-07-03)
+
+On 2026-07-03 ~09:50 IST a bulk case-add (Gujarat HC book; one
+`display_pdf_new.php` POST per order → a burst of hundreds of app-host calls in
+minutes) tripped eCourts' IP throttle. Signature, captured live:
+
+    HTTP 405, Content-Type text/html, no Server header, body:
+    "<!DOCTYPE html>… <center><strong>Welcome User Search Page not Found
+    here</strong></center> …"  (~228 bytes)
+
+This is **transient** (the IP recovers on its own in ~15–30 min — verified: a
+200 + valid `token` returned ~20 min later, endpoints unchanged) and is
+distinct from a genuine API rotation (which 404s the path permanently). Both,
+unfortunately, share the same downstream symptom if unhandled: the HTML body
+reaches `_crypto.decrypt_response`, whose `bytes.fromhex("<!DOCTYPE…")` raises
+`ValueError: non-hexadecimal number found in fromhex() arg at position 0`.
+
+Mitigations in `_session.py`:
+- **Classify, don't crash.** `_send` maps HTTP 405 → `RateLimited` (not retried
+  — hammering resets the window; the shared `ecourts_global` circuit breaker
+  still trips after the failure threshold). Any other non-envelope body →
+  `CourtSiteDown` with a diagnostic snippet, guarded by `_RESPONSE_ENVELOPE_RE`
+  before `decrypt_response`. The API layer turns both into a clean 502
+  "temporarily unavailable" instead of an opaque 500.
+- **Don't trip it in the first place** (opt-in). A process-wide `_RateGate` can
+  pace outbound app-host calls to `ECOURTS_MIN_REQUEST_INTERVAL_SECONDS`.
+  **Default 0 (off)** — the reactive path above (405→RateLimited + circuit
+  breaker) is the day-1 posture; set e.g. `0.34` (≈3 req/s) to enable proactive
+  prevention if bursts recur. Worst-case added interactive latency is then
+  bounded by `max_concurrency × interval` (the semaphore caps concurrency); bulk
+  background operations slow proportionally, which is the intended trade.
