@@ -157,18 +157,23 @@ def exists(s: Session, *, user_id: uuid.UUID, cnr: str) -> bool:
 def get_due_for_refresh(s: Session, *, limit: int = 100) -> list[Case]:
     """Cases needing refresh, ordered NULLS FIRST then oldest first.
 
-    Multi-forum: only rows with an automated `source` and a non-NULL `cnr` are
-    returned. This keeps manual / arbitration rows out of the poll (regardless of
-    refresh_enabled) and guarantees the scheduler never calls classify_cnr on a
-    NULL cnr. As Phase-2/3 auto sources land (ejagriti_auto/drt_auto/sc_auto),
-    the scheduler's per-row portal classification must branch on `forum` first.
+    Multi-forum: returns rows with an automated `source` (which excludes manual /
+    arbitration rows regardless of refresh_enabled). eCourts auto rows carry a
+    CNR; non-eCourts auto rows (ejagriti_auto/drt_auto/sc_auto) carry cnr=NULL and
+    a forum_case_ref instead.
+
+    ⚠️ DEPLOY ORDER: this used to also require ``cnr IS NOT NULL`` so the
+    scheduler could safely call ``portal_class_from_cnr(case.cnr)``. That guard
+    is now lifted, so the scheduler MUST forum-branch (route cnr=NULL rows to the
+    forum-aware refresh) BEFORE this relaxed DAO reaches it — i.e. ship the
+    casepilot scheduler branch first, then bump the shared pin. See
+    ``casepilot/backend/scheduler.py`` ``_refresh_one``.
     """
     stmt = (
         select(Case)
         .where(
             Case.refresh_enabled.is_(True),
             Case.source.in_(_AUTO_SOURCES),
-            Case.cnr.isnot(None),
         )
         .order_by(Case.last_refreshed_at.asc().nullsfirst())
         .limit(limit)
@@ -387,11 +392,15 @@ def create_manual_case(
     client_id: str | None = None,
     notes: str | None = None,
     case_detail_json: dict[str, Any] | None = None,
+    source: str = "manual",
+    refresh_enabled: bool = False,
 ) -> Case:
-    """Create-or-update a manually-entered, non-eCourts case with no fetch.
+    """Create-or-update a non-eCourts case with no eCourts CNR fetch.
 
-    Manual cases carry no CNR and are never auto-refreshed (source='manual',
-    refresh_enabled=False → excluded by get_due_for_refresh). Identity is
+    Defaults to a MANUAL tracker (source='manual', refresh_enabled=False →
+    excluded from get_due_for_refresh). Automated non-eCourts adapters (Phase-2/3:
+    consumer/drt/sc) pass source='<forum>_auto' + refresh_enabled=True so the
+    scheduler polls them via get_due_for_refresh. Identity is
     (user_id, forum, forum_case_ref); when the user has no official number a
     synthetic 'm-<uuid4hex>' ref is minted so the (forum, ref) unique key still
     has teeth. `case_detail_json` should follow the scraper-flat schema the
@@ -416,6 +425,8 @@ def create_manual_case(
         "case_detail_json": detail,
         "parties": detail.get("parties", []),
         "history": detail.get("hearing_history", []),
+        "source": source,
+        "refresh_enabled": refresh_enabled,
         "updated_at": datetime.now(timezone.utc),
     }
     existing = get_by_ref(s, user_id=user_id, forum=forum, forum_case_ref=ref)
@@ -430,8 +441,6 @@ def create_manual_case(
         portal=None,
         forum=forum,
         forum_case_ref=ref,
-        source="manual",
-        refresh_enabled=False,
         client_id=client_id,
         raw_response={},
         **fields,

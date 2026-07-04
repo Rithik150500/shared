@@ -42,6 +42,12 @@ class OrderRef:
     order_date: date
     order_url: str
     order_id: str
+    # Some forums (e-Jagriti/Consumer) return the order PDF INLINE as base64 on
+    # the case row rather than as a fetchable URL. When set, callers should
+    # decode + store it directly (no second fetch) and MUST strip it before
+    # persisting the Case JSON so the case blob doesn't balloon. None for
+    # URL-based forums (eCourts).
+    inline_pdf_b64: str | None = None
 
 
 @dataclass(frozen=True)

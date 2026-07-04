@@ -22,7 +22,9 @@ from ecourts_client.errors import CNRMalformed
 from ecourts_client.forums import ECOURTS_FORUMS, IdentifierKind
 from ecourts_client.routing import forum_for_cnr, validate_identifier
 
-NON_ECOURTS = [Forum.SUPREME_COURT, Forum.CONSUMER, Forum.DRT, Forum.ARBITRATION]
+# Consumer became automated in Phase 2 (the e-Jagriti adapter); the rest are
+# still manual-only until their own phases.
+UNAUTOMATED_FORUMS = [Forum.SUPREME_COURT, Forum.DRT, Forum.ARBITRATION]
 
 
 def test_forum_values_match_db_discriminator():
@@ -46,11 +48,18 @@ def test_ecourts_adapters_registered():
     assert isinstance(get_adapter(Forum.ECOURTS_HIGHCOURT), HighCourtClient)
 
 
-@pytest.mark.parametrize("forum", NON_ECOURTS)
-def test_non_ecourts_forums_not_automated(forum):
+@pytest.mark.parametrize("forum", UNAUTOMATED_FORUMS)
+def test_unautomated_forums_have_no_adapter(forum):
     assert not has_automated_adapter(forum)
     with pytest.raises(ForumNotAutomated):
         get_adapter(forum)
+
+
+def test_consumer_adapter_registered():
+    # Phase 2: the e-Jagriti adapter makes the Consumer forum automated.
+    from ecourts_client.consumer import ConsumerClient
+    assert has_automated_adapter(Forum.CONSUMER)
+    assert isinstance(get_adapter(Forum.CONSUMER), ConsumerClient)
 
 
 def test_adapters_satisfy_protocol_and_capabilities():

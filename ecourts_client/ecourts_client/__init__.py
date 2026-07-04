@@ -72,12 +72,18 @@ apply_sync_resilience()
 register_adapter(Forum.ECOURTS_DISTRICT, DistrictCourtClient)
 register_adapter(Forum.ECOURTS_HIGHCOURT, HighCourtClient)
 
+# Consumer forum (e-Jagriti) — Phase 2. Imported after the base adapters;
+# ConsumerClient satisfies the ForumAdapter protocol and registers here so the
+# forum-first path (get_adapter / fetch_case_for_forum) resolves it.
+from ecourts_client.consumer import ConsumerClient  # noqa: E402
+register_adapter(Forum.CONSUMER, ConsumerClient)
+
 __version__ = "0.1.0"
 
 __all__ = [
     "Act", "BenchRef", "BlockedByGeoIP", "CNRMalformed", "CNRNotFound",
     "Case", "CaseStub", "CaseTypeRef", "CategoryDetails", "CauseList",
-    "CauseListEntry", "CircuitOpen", "CourtComplexRef", "CourtSiteDown",
+    "CauseListEntry", "CircuitOpen", "ConsumerClient", "CourtComplexRef", "CourtSiteDown",
     "DailyBusiness", "DistrictCourtClient", "DistrictRef", "ECourtsClient",
     "ECourtsConfig", "ECourtsError", "EcourtsError", "FIRDetails",
     "Forum", "ForumAdapter", "ForumCapabilities", "ForumNotAutomated",
