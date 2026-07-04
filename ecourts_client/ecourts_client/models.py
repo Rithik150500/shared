@@ -244,6 +244,16 @@ class Case:
     # Filing date from the case-detail API (`date_of_filing`). Optional/last so
     # existing positional callers keep working. Powers the "Filed" timeline event.
     filing_date: date | None = None
+    # Routing facts to LOCATE this case's cause list (district). court_no +
+    # case_no are top-level in the caseHistory response (verified live:
+    # court_no='75'); numeric state/district/court_code come from order rows.
+    # Optional/last so positional callers keep working; not serialised into
+    # snapshots (capture reads them off the fetched Case directly).
+    case_no: str | None = None
+    court_no: str | None = None
+    state_code: str | None = None
+    district_code: str | None = None
+    court_code: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=_json_default, sort_keys=True)

@@ -69,6 +69,7 @@ def parse_case_history(response: dict[str, Any], cnr: str) -> Case:
     acts = _parse_acts(history.get("act"))
     hearings = _parse_history(history.get("historyOfCaseHearing"))
     orders = _parse_orders(history.get("interimOrder")) + _parse_orders(history.get("finalOrder"))
+    facts = _extract_routing_facts(history)
 
     return Case(
         cnr=cnr,
@@ -85,6 +86,9 @@ def parse_case_history(response: dict[str, Any], cnr: str) -> Case:
         objections=None,
         category=None,
         filing_date=filing_date,
+        case_no=facts["case_no"], court_no=facts["court_no"],
+        state_code=facts["state_code"], district_code=facts["district_code"],
+        court_code=facts["court_code"],
     )
 
 
@@ -204,6 +208,33 @@ def _parse_orders(value: Any) -> list[OrderRef]:
     if isinstance(value, str):
         return _parse_orders_html(value)
     return []
+
+
+def _extract_routing_facts(h: dict[str, Any]) -> dict[str, str | None]:
+    """court_no + case_no are top-level in the district caseHistory response;
+    numeric state/dist/court_code come from an order row (v4 interimOrder /
+    finalOrder carry state_cd/dist_cd/court_code). Best-effort — all None on HC
+    or when the case has no orders (fallback lookup lives in the bot)."""
+    facts: dict[str, str | None] = {
+        "case_no": (h.get("case_no") or "").strip() or None,
+        "court_no": (str(h.get("court_no")).strip() or None) if h.get("court_no") is not None else None,
+        "state_code": None, "district_code": None, "court_code": None,
+    }
+    sources: list[Any] = []
+    for key in ("interimOrder", "finalOrder"):
+        val = h.get(key)
+        if isinstance(val, list):
+            sources.extend(val)
+    lo = h.get("last_order")
+    if isinstance(lo, dict):
+        sources.append(lo)
+    for r in sources:
+        if isinstance(r, dict) and (r.get("court_code")):
+            facts["state_code"] = str(r.get("state_cd") or "").strip() or None
+            facts["district_code"] = str(r.get("dist_cd") or "").strip() or None
+            facts["court_code"] = str(r.get("court_code") or "").strip() or None
+            break
+    return facts
 
 
 def _parse_acts_html(html: str) -> list[Act]:
