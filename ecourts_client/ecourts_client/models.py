@@ -161,6 +161,7 @@ class HCCauseListPDFRow:
     raw_text: str  # full multi-line text of the row, in reading order
     parties: str = ""
     advocates: str = ""
+    court_no: str | None = None  # "COURT NO. NN" header this row sits under; None when the PDF has no such header
 
 
 @dataclass(frozen=True)
