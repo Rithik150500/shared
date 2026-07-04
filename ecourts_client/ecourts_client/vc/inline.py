@@ -68,17 +68,38 @@ def harvest_vc_links(text: str) -> dict[str, VCAccess]:
                     if nxt and not _URL.search(nxt) and " " not in nxt:
                         url = url + nxt
                         i += 1
-                mid = _MEETING.search(text[text.find(raw):text.find(raw) + 300]) if raw in text else None
-                pwd = _PASSWORD.search(text[text.find(raw):text.find(raw) + 300]) if raw in text else None
                 vendor = _classify(url)
-                out.setdefault(current, VCAccess(
+                has_join_hint = bool(_JOIN_HINT.search(raw))
+                # Accept only if there is a positive VC signal:
+                # • the line (or adjacent line) carries a join hint, OR
+                # • the URL resolves to a known vendor (not CUSTOM).
+                # A bare CUSTOM URL with no join hint is silently skipped.
+                if vendor is VCVendor.CUSTOM and not has_join_hint:
+                    i += 1
+                    continue
+                # Scan the next few lines for meeting/password info, keyed by
+                # current line index so two courts with identical VC lines don't
+                # share each other's meeting ids (FIX 1b).
+                context = "\n".join(lines[i: i + 3])
+                mid = _MEETING.search(context)
+                pwd = _PASSWORD.search(context)
+                access = VCAccess(
                     vendor=vendor,
                     link_type=(VCLinkType.LIVESTREAM_URL
                                if vendor is VCVendor.YOUTUBE_LIVESTREAM else VCLinkType.JOIN_URL),
                     url=url,
                     meeting_id=(mid.group(1).strip() if mid else None),
                     passcode=(pwd.group(1).strip() if pwd else None),
-                ))
+                )
+                # Prefer a known-vendor URL over a previously stored CUSTOM one
+                # (upgrade); never replace a known-vendor entry with CUSTOM.
+                existing = out.get(current)
+                if existing is None:
+                    out[current] = access
+                elif existing.vendor is VCVendor.CUSTOM and vendor is not VCVendor.CUSTOM:
+                    # Upgrade: replace the CUSTOM placeholder with the real VC link.
+                    out[current] = access
+                # else: keep the existing known-vendor entry (never downgrade).
         i += 1
     return out
 
