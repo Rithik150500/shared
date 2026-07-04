@@ -17,6 +17,8 @@ DC_BASE_URL/HC_BASE_URL constants for the full v3->v4 delta and provenance
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import threading
 import time
@@ -97,6 +99,60 @@ def _get_rate_gate() -> _RateGate:
             if _rate_gate is None:
                 _rate_gate = _RateGate(ECourtsConfig().ecourts_min_request_interval_seconds)
     return _rate_gate
+
+
+logger = logging.getLogger(__name__)
+
+# Throttle observability (audit finding: eCourts throttling was invisible --
+# RateLimited/CourtSiteDown were raised silently, so frequency couldn't be
+# measured). Every classification site emits ONE greppable WARNING carrying a
+# stable ``ECOURTS_THROTTLE`` token + a ``kind=`` tag, so
+# ``docker logs <c> | grep ECOURTS_THROTTLE`` yields a per-hour, per-kind tally
+# across all containers with no new hard dependency. A best-effort Redis
+# hour-bucket counter adds cross-process aggregation where Redis is reachable.
+_THROTTLE_COUNTER_TTL_SECONDS = 8 * 24 * 3600  # keep ~8 days of hour buckets
+_throttle_redis_singleton: Any = None
+
+
+def _throttle_redis_client() -> Any:
+    """Lazily build a best-effort Redis client from ``SHARED_REDIS_URL`` /
+    ``REDIS_URL``. Returns a client or None. The ``redis`` import is LAZY so
+    environments without the wheel (e.g. casepilot) never import-fail; short
+    socket timeouts keep a down/slow Redis off the throttle path's latency."""
+    global _throttle_redis_singleton
+    if _throttle_redis_singleton is not None:
+        return _throttle_redis_singleton
+    url = os.environ.get("SHARED_REDIS_URL") or os.environ.get("REDIS_URL")
+    if not url:
+        return None
+    import redis  # lazy: casepilot has no redis wheel -> ImportError swallowed by caller
+
+    _throttle_redis_singleton = redis.Redis.from_url(
+        url, socket_connect_timeout=0.25, socket_timeout=0.25,
+    )
+    return _throttle_redis_singleton
+
+
+def _record_throttle_event(kind: str, endpoint: str) -> None:
+    """Best-effort per-hour, per-kind Redis counter. FAIL-OPEN: any error (redis
+    absent, unreachable, or slow) is a silent no-op -- observability must never
+    mask the real RateLimited/CourtSiteDown the caller has to see."""
+    try:
+        client = _throttle_redis_client()
+        if client is None:
+            return
+        bucket = time.strftime("%Y%m%d%H", time.gmtime())
+        key = f"ecourts:throttle:{bucket}:{kind}"
+        client.incr(key)
+        client.expire(key, _THROTTLE_COUNTER_TTL_SECONDS)
+    except Exception:  # noqa: BLE001 -- observability must never break transport
+        pass
+
+
+def _log_throttle(kind: str, endpoint: str, status: int) -> None:
+    """Emit the greppable WARNING + bump the best-effort Redis counter."""
+    logger.warning("ECOURTS_THROTTLE kind=%s endpoint=%s http=%s", kind, endpoint, status)
+    _record_throttle_event(kind, endpoint)
 
 
 # --- eCourts mobile API v4.0 (migrated 2026-07-02) --------------------------
@@ -263,8 +319,10 @@ class Session:
             raise CourtSiteDown(f"connection error on {endpoint}: {e}") from e
 
         if resp.status_code == 429:
+            _log_throttle("throttle_429", endpoint, 429)
             raise RateLimited(f"eCourts returned 429 for {endpoint}")
         if resp.status_code == 403 and "geographic" in resp.text.lower():
+            _log_throttle("geoip_403", endpoint, 403)
             raise BlockedByGeoIP(f"GeoIP block for {endpoint}")
         if resp.status_code == 405:
             # eCourts throttles IP bursts to HTTP 405 + an HTML "Search Page not
@@ -274,8 +332,10 @@ class Session:
             # reset its window. The shared "ecourts_global" circuit breaker still
             # trips after the failure threshold, backing the whole process off
             # until it clears.
+            _log_throttle("throttle_405", endpoint, 405)
             raise RateLimited(f"eCourts returned 405 (burst throttle) for {endpoint}")
         if 500 <= resp.status_code < 600:
+            _log_throttle("http_5xx", endpoint, resp.status_code)
             raise CourtSiteDown(f"{resp.status_code} on {endpoint}")
 
         # eCourts returns plaintext JSON on validation/auth errors (e.g. {"status":"N","msg":"ERROR"})
@@ -296,6 +356,7 @@ class Session:
         # as a transient CourtSiteDown with a short diagnostic snippet instead.
         if not _RESPONSE_ENVELOPE_RE.match(body):
             snippet = " ".join(body[:160].split())
+            _log_throttle("non_envelope", endpoint, resp.status_code)
             raise CourtSiteDown(
                 f"non-envelope response from {endpoint} "
                 f"(HTTP {resp.status_code}, {len(body)} bytes): {snippet!r}"
