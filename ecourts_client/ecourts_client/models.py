@@ -248,8 +248,8 @@ class Case:
     # Routing facts to LOCATE this case's cause list (district). court_no +
     # case_no are top-level in the caseHistory response (verified live:
     # court_no='75'); numeric state/district/court_code come from order rows.
-    # Optional/last so positional callers keep working; not serialised into
-    # snapshots (capture reads them off the fetched Case directly).
+    # Optional/last so positional callers keep working; serialised into
+    # snapshots via to_json/from_json so cached Cases retain routing facts.
     case_no: str | None = None
     court_no: str | None = None
     state_code: str | None = None
@@ -305,4 +305,9 @@ def _case_from_dict(d: dict) -> Case:
         objections=objections,
         category=category,
         filing_date=_date(d.get("filing_date")),
+        case_no=d.get("case_no"),
+        court_no=d.get("court_no"),
+        state_code=d.get("state_code"),
+        district_code=d.get("district_code"),
+        court_code=d.get("court_code"),
     )
