@@ -140,6 +140,19 @@ class HighCourtClient:
         pdf_bytes = fetch_pdf(self._session._http, pdf_url)
         return parse_hc_cause_list_pdf(pdf_bytes)
 
+    def fetch_cause_list_pdf_rows_with_vc(
+        self, *, pdf_url: str
+    ) -> tuple[list[HCCauseListPDFRow], dict]:
+        """Download the HC cause-list PDF ONCE; return (parsed rows, court_no->VCAccess).
+
+        The VC map keys on the 'COURT NO. NN' header; callers join to rows by
+        row.court_no.  A single download avoids a throttle-risky second fetch.
+        """
+        from ecourts_client.vc.inline import harvest_vc_links_from_pdf
+
+        pdf_bytes = fetch_pdf(self._session._http, pdf_url)
+        return parse_hc_cause_list_pdf(pdf_bytes), harvest_vc_links_from_pdf(pdf_bytes)
+
     def list_hc_benches(self, state_code: str) -> list[BenchRef]:
         """HC bench list. Reuses districtWebService.php with action_code='benches' --
         the response key is still `districts` but the rows are benches."""

@@ -7,7 +7,11 @@ break, and de-spaces letter-spaced URLs. Opportunistic: returns whatever it
 finds (Delhi HC verified), {} otherwise."""
 from __future__ import annotations
 
+import io
 import re
+
+import pdfplumber
+
 from ecourts_client.vc.models import VCAccess, VCLinkType, VCVendor
 
 _COURT_HDR = re.compile(r"COURT\s*NO\.?\s*([0-9]+[A-Z]?)", re.IGNORECASE)
@@ -77,3 +81,19 @@ def harvest_vc_links(text: str) -> dict[str, VCAccess]:
                 ))
         i += 1
     return out
+
+
+def harvest_vc_links_from_pdf(pdf_bytes: bytes) -> dict[str, VCAccess]:
+    """Run harvest_vc_links over an HC cause-list PDF's text. Returns {} on any
+    error or non-PDF input (never raises) — VC harvest must never break indexing."""
+    try:
+        stripped = pdf_bytes.lstrip()
+        if not stripped.startswith(b"%PDF"):
+            return {}
+        parts: list[str] = []
+        with pdfplumber.open(io.BytesIO(stripped)) as pdf:
+            for page in pdf.pages:
+                parts.append(page.extract_text() or "")
+        return harvest_vc_links("\n".join(parts))
+    except Exception:  # noqa: BLE001 - never let VC harvest break the caller
+        return {}
