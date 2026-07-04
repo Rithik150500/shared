@@ -5,6 +5,7 @@ vs hosted, MS Teams, Jitsi, Google Meet, portal-login, YouTube livestream), so
 a flat URL string is insufficient. Providers return this record or None."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -52,3 +53,30 @@ VCRoomKey = tuple[str, str, str]
 
 def make_key(scope: str, court_complex_code: str, court_no: str) -> VCRoomKey:
     return (scope.strip().lower(), court_complex_code.strip().lower(), str(court_no).strip().lower())
+
+
+# Regex to normalise spacing around a trailing "-NN" suffix (e.g. "- 01", " - 01").
+_SUFFIX_RE = re.compile(r"\s*-\s*(\d+)$")
+
+
+def normalize_designation(s: str | None) -> str:
+    """Normalise a judicial-officer designation for use as a VC-map lookup key.
+
+    Rules (in order):
+    - None or empty → "".
+    - Lowercase.
+    - Collapse internal whitespace to single spaces, strip leading/trailing.
+    - Normalise the ``-NN`` suffix so "District Judge- 01", "District Judge-01",
+      and "District Judge - 01" all become "district judge-01".
+
+    The directory text already matches eCourts vocabulary; only whitespace/case
+    and the suffix-space differ, so NO abbreviation dictionary is needed.
+    """
+    if not s:
+        return ""
+    s = s.lower()
+    # Collapse internal whitespace.
+    s = " ".join(s.split())
+    # Normalise trailing "-NN" spacing (including spaces before/after the dash).
+    s = _SUFFIX_RE.sub(lambda m: f"-{m.group(1)}", s)
+    return s

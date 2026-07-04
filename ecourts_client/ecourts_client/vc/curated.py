@@ -1,6 +1,6 @@
 from __future__ import annotations
 import logging
-from ecourts_client.vc.models import VCAccess, VCLinkType, VCRoomKey, VCVendor, make_key
+from ecourts_client.vc.models import VCAccess, VCLinkType, VCRoomKey, VCVendor, make_key, normalize_designation
 
 log = logging.getLogger(__name__)
 
@@ -52,5 +52,5 @@ class CuratedMapProvider:
             desg = row.get("designation")
             if desg:
                 rooms[(scope.strip().lower(), complex_.strip().lower(),
-                       "desg:" + str(desg).strip().lower())] = access
+                       "desg:" + normalize_designation(str(desg)))] = access
         return cls(rooms)
