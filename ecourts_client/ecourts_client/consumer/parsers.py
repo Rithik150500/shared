@@ -153,25 +153,62 @@ def _pdf_b64_or_none(value: Any) -> str | None:
     return s
 
 
+_MAX_ORDER_TEXT = 8000
+
+
+def _html_order_text(value: Any) -> str | None:
+    """Extract readable text from an HTML 'daily order' page, else None.
+
+    The other half of the polymorphic ``documentBase64`` (see
+    ``_pdf_b64_or_none``): a raw ``<html>…`` page that IS the order text (court
+    header, parties, then the disposition e.g. "partly allowed"). Rather than
+    drop it, pull the visible text so the order still surfaces on the timeline
+    (date + text). Uses the stdlib ``html.parser`` (no lxml dependency) and is
+    defensive — any parse failure degrades to None, never crashing the fetch.
+    Only treats a RAW ``<…`` string as HTML (a base64 PDF is handled upstream)."""
+    if not value:
+        return None
+    s = str(value).strip()
+    if s[:1] != "<":  # not raw HTML (base64/empty handled elsewhere)
+        return None
+    try:
+        from bs4 import BeautifulSoup
+
+        text = BeautifulSoup(s, "html.parser").get_text(" ", strip=True)
+    except Exception:
+        import re
+
+        text = re.sub(r"<[^>]+>", " ", s)
+    text = " ".join(text.split())  # collapse runs of whitespace
+    if not text:
+        return None
+    return text[:_MAX_ORDER_TEXT]
+
+
 def _one_order(
     *, order_date: date | None, b64: Any, path: Any, order_id: str
 ) -> OrderRef | None:
     """Build one OrderRef from a (date, inline-b64, path) triple, or None.
 
-    Kept only if it carries a real PDF (validated inline base64) OR a document
-    path, AND has a date to place it on the timeline. Invalid/HTML inline blobs
-    are dropped to None so a bogus 'order' never appears."""
+    The ``b64`` field is POLYMORPHIC (see ``_pdf_b64_or_none``): a real base64
+    PDF → ``inline_pdf_b64``; an HTML 'daily order' page → its text extracted to
+    ``order_text``. Kept when it has a date AND at least one of: a valid inline
+    PDF, a document path, or extracted HTML text — so HTML-only orders surface
+    (date + disposition text) instead of being silently dropped."""
     if not order_date:
         return None
     pdf_b64 = _pdf_b64_or_none(b64)
+    # If it wasn't a PDF, the same field may be the order-text HTML page.
+    order_text = None if pdf_b64 else _html_order_text(b64)
     path_str = _str(path)
-    if not pdf_b64 and not path_str:
+    if not pdf_b64 and not path_str and not order_text:
         return None
     return OrderRef(
         order_date=order_date,
         order_url=path_str,
         order_id=order_id,
         inline_pdf_b64=pdf_b64,
+        order_text=order_text,
     )
 
 

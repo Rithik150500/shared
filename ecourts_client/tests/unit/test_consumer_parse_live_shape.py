@@ -108,13 +108,21 @@ def test_real_base64_pdf_captured_inline():
     # sanity: it really decodes to a PDF
     assert base64.b64decode(o.inline_pdf_b64).startswith(b"%PDF")
     assert o.order_date.isoformat() == "2024-11-29"
+    # a PDF order carries no extracted HTML text
+    assert o.order_text is None
 
 
-def test_html_interstitial_is_not_stored_as_pdf():
-    # documentBase64 is raw HTML + no orderDocumentPath => no order at all
-    # (never an OrderRef carrying HTML as if it were a PDF).
+def test_html_order_text_extracted_never_stored_as_pdf():
+    # documentBase64 is the raw-HTML 'daily order' page (no PDF, no path):
+    # the order is KEPT with its extracted text (not dropped, never a fake PDF).
     c = parse_case(_order_row_with_html())
-    assert c.orders == []
+    assert len(c.orders) == 1
+    o = c.orders[0]
+    assert o.inline_pdf_b64 is None          # never HTML-as-PDF
+    assert o.order_text is not None
+    assert "partly allowed" in o.order_text  # the disposition text survives
+    assert "<html>" not in o.order_text      # tags stripped
+    assert o.order_date.isoformat() == "2024-11-29"
 
 
 def test_judgment_only_row_yields_a_judgment_order():

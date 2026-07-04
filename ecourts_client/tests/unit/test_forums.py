@@ -24,7 +24,7 @@ from ecourts_client.routing import forum_for_cnr, validate_identifier
 
 # Consumer became automated in Phase 2 (the e-Jagriti adapter); the rest are
 # still manual-only until their own phases.
-UNAUTOMATED_FORUMS = [Forum.SUPREME_COURT, Forum.DRT, Forum.ARBITRATION]
+UNAUTOMATED_FORUMS = [Forum.DRT, Forum.ARBITRATION]
 
 
 def test_forum_values_match_db_discriminator():
@@ -60,6 +60,13 @@ def test_consumer_adapter_registered():
     from ecourts_client.consumer import ConsumerClient
     assert has_automated_adapter(Forum.CONSUMER)
     assert isinstance(get_adapter(Forum.CONSUMER), ConsumerClient)
+
+
+def test_supreme_adapter_registered():
+    # Phase 3: the com.nic.sciapp adapter makes the Supreme Court forum automated.
+    from ecourts_client.supreme import SupremeCourtClient
+    assert has_automated_adapter(Forum.SUPREME_COURT)
+    assert isinstance(get_adapter(Forum.SUPREME_COURT), SupremeCourtClient)
 
 
 def test_adapters_satisfy_protocol_and_capabilities():
