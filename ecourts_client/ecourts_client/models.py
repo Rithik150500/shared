@@ -48,6 +48,11 @@ class OrderRef:
     # persisting the Case JSON so the case blob doesn't balloon. None for
     # URL-based forums (eCourts).
     inline_pdf_b64: str | None = None
+    # Some forums (e-Jagriti/Consumer) deliver the order as an HTML page (the
+    # order text itself) rather than a PDF. When there's no PDF/URL, callers
+    # extract the readable text here so the order still surfaces (date + text)
+    # on the timeline instead of being dropped. None for PDF/URL orders.
+    order_text: str | None = None
 
 
 @dataclass(frozen=True)
