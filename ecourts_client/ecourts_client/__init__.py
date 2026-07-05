@@ -31,6 +31,7 @@ from ecourts_client.forums import (
     ForumAdapter,
     ForumCapabilities,
     IdentifierKind,
+    TribunalKind,
 )
 from ecourts_client.highcourt import HighCourtClient
 from ecourts_client.models import (
@@ -97,7 +98,8 @@ __all__ = [
     "HearingHistoryRow", "HighCourtClient", "IdentifierKind",
     "IdentifierMalformed", "JWTExpired", "ObjectionDetails",
     "OrderRef", "PDFInvalid", "PDFNotFound", "Party", "PoliceStationRef",
-    "RateLimited", "SchemaChanged", "StateRef", "SupremeCourtClient", "fetch_case",
+    "RateLimited", "SchemaChanged", "StateRef", "SupremeCourtClient",
+    "TribunalKind", "fetch_case",
     "fetch_case_for_forum", "fetch_pdf", "get_adapter", "get_client_for",
     "has_automated_adapter", "register_adapter",
 ]

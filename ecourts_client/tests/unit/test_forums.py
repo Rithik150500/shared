@@ -33,8 +33,21 @@ def test_forum_values_match_db_discriminator():
     assert Forum.ECOURTS_HIGHCOURT.value == "ecourts_highcourt"
     assert {f.value for f in Forum} == {
         "ecourts_district", "ecourts_highcourt", "supreme_court",
-        "consumer", "drt", "arbitration",
+        "consumer", "drt", "arbitration", "tribunal",
     }
+
+
+def test_tribunal_registry_is_kind_keyed_and_backward_compatible():
+    from ecourts_client import TribunalKind, has_automated_adapter
+    # Forum-only calls are unchanged (kind defaults to None).
+    assert has_automated_adapter(Forum.CONSUMER) is True
+    assert has_automated_adapter(Forum.TRIBUNAL) is False
+    # No tribunal kind is automated at T1 (manual floor).
+    assert all(
+        not has_automated_adapter(Forum.TRIBUNAL, kind=k) for k in TribunalKind
+    )
+    # DRT/DRAT live as tribunal kinds; the family is non-empty and includes them.
+    assert {"drt", "drat", "nclt", "nclat", "cat", "itat"} <= {k.value for k in TribunalKind}
 
 
 def test_ecourts_forums_set():

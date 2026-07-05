@@ -51,7 +51,9 @@ _ECOURTS_FORUMS = frozenset(("ecourts_district", "ecourts_highcourt"))
 # Sources an automated adapter can refresh. Manual rows are excluded from
 # get_due_for_refresh so the scheduler never fetches them (and never calls
 # portal_class_from_cnr on their NULL cnr).
-_AUTO_SOURCES = frozenset(("ecourts_auto", "ejagriti_auto", "drt_auto", "sc_auto"))
+_AUTO_SOURCES = frozenset(
+    ("ecourts_auto", "ejagriti_auto", "drt_auto", "sc_auto", "tribunal_auto")
+)
 
 # forum_case_ref for non-eCourts forums. Real Indian case numbers are messy —
 # e.g. "SLP(C) 12345/2026", "O.A. No. 77 of 2025", "CC/512/2024" — so allow
@@ -130,14 +132,23 @@ def get_by_cnr(s: Session, *, user_id: uuid.UUID, cnr: str) -> Case | None:
 
 def get_by_ref(
     s: Session, *, user_id: uuid.UUID, forum: str, forum_case_ref: str,
+    tribunal_kind: str | None = None,
 ) -> Case | None:
-    """Forum-neutral lookup by the universal (user_id, forum, forum_case_ref) key."""
-    stmt = select(Case).where(
+    """Forum-neutral lookup by the universal per-forum identity key.
+
+    For the generic ``tribunal`` forum the identity is
+    (user_id, forum, tribunal_kind, forum_case_ref) — many kinds can share a
+    forum_case_ref — so pass ``tribunal_kind`` to disambiguate (omitting it on a
+    tribunal ref can match multiple kinds and raise MultipleResultsFound). For
+    every other forum ``tribunal_kind`` is None and unused."""
+    conds = [
         Case.user_id == user_id,
         Case.forum == forum,
         Case.forum_case_ref == forum_case_ref,
-    )
-    return s.execute(stmt).scalar_one_or_none()
+    ]
+    if tribunal_kind is not None:
+        conds.append(Case.tribunal_kind == tribunal_kind)
+    return s.execute(select(Case).where(*conds)).scalar_one_or_none()
 
 
 def list_by_user(s: Session, *, user_id: uuid.UUID, limit: int = 200) -> list[Case]:
@@ -223,7 +234,7 @@ _UPDATABLE_FIELDS = frozenset((
     "last_refreshed_at", "last_change_at",
     "case_detail_json", "case_detail_md", "mini_case_detail_md",
     # Multi-forum columns (manual patch + Phase-2/3 adapter writes).
-    "forum", "forum_case_ref", "source", "filing_year",
+    "forum", "forum_case_ref", "source", "filing_year", "tribunal_kind",
 ))
 
 # Subset whose change should bump last_change_at (parity with _DIFFABLE_FIELDS).
@@ -381,6 +392,7 @@ def create_manual_case(
     user_id: uuid.UUID,
     forum: str,
     forum_case_ref: str | None = None,
+    tribunal_kind: str | None = None,
     title: str | None = None,
     court: str | None = None,
     case_number: str | None = None,
@@ -409,10 +421,20 @@ def create_manual_case(
     """
     if forum in _ECOURTS_FORUMS:
         raise ValueError("use upsert_case for eCourts forums")
+    # tribunal_kind is set IFF forum='tribunal' (mirrors cases_tribunal_kind_consistency).
+    # The specific kind VALUE is validated in the app layer (TribunalKind) — the
+    # model deliberately doesn't enumerate kinds in a CHECK, so new kinds need no
+    # migration; here we only enforce the presence/absence invariant.
+    if forum == "tribunal":
+        if not tribunal_kind:
+            raise ValueError("forum='tribunal' requires a tribunal_kind")
+    elif tribunal_kind is not None:
+        raise ValueError(f"forum={forum!r} must not carry a tribunal_kind")
     ref = forum_case_ref or f"m-{uuid.uuid4().hex}"
     _assert_valid_ref(forum, cnr=None, forum_case_ref=ref)
     detail = case_detail_json or {}
     fields: dict[str, Any] = {
+        "tribunal_kind": tribunal_kind,
         "title": title,
         "court": court,
         "case_number": case_number or ref,
@@ -429,7 +451,9 @@ def create_manual_case(
         "refresh_enabled": refresh_enabled,
         "updated_at": datetime.now(timezone.utc),
     }
-    existing = get_by_ref(s, user_id=user_id, forum=forum, forum_case_ref=ref)
+    existing = get_by_ref(
+        s, user_id=user_id, forum=forum, forum_case_ref=ref, tribunal_kind=tribunal_kind,
+    )
     if existing is not None:
         for k, v in fields.items():
             setattr(existing, k, v)
@@ -451,17 +475,22 @@ def create_manual_case(
 
 
 def update_fields_by_ref(
-    s: Session, *, user_id: uuid.UUID, forum: str, forum_case_ref: str, **cols: Any,
+    s: Session, *, user_id: uuid.UUID, forum: str, forum_case_ref: str,
+    tribunal_kind: str | None = None, **cols: Any,
 ) -> list[str]:
-    """Partial patch keyed on (user_id, forum, forum_case_ref) — no CNR assertion.
+    """Partial patch keyed on the per-forum identity — no CNR assertion.
 
     Sibling of update_fields for non-eCourts / manual cases. Same allow-list and
-    last_change_at bump semantics. Unknown column -> ValueError; missing row -> [].
+    last_change_at bump semantics. Pass ``tribunal_kind`` for tribunal cases (the
+    identity includes it). Unknown column -> ValueError; missing row -> [].
     """
     unknown = set(cols) - _UPDATABLE_FIELDS
     if unknown:
         raise ValueError(f"update_fields_by_ref: unknown column(s) {sorted(unknown)}")
-    row = get_by_ref(s, user_id=user_id, forum=forum, forum_case_ref=forum_case_ref)
+    row = get_by_ref(
+        s, user_id=user_id, forum=forum, forum_case_ref=forum_case_ref,
+        tribunal_kind=tribunal_kind,
+    )
     if row is None:
         return []
     changed: list[str] = []
@@ -479,14 +508,19 @@ def update_fields_by_ref(
 
 def delete_case_by_ref(
     s: Session, *, user_id: uuid.UUID, forum: str, forum_case_ref: str,
+    tribunal_kind: str | None = None,
 ) -> bool:
     """Delete a non-eCourts / manual Case row by its generic identity.
 
     Manual cases have a NULL cnr, so delete_case (cnr-keyed) can't reach them.
+    Pass ``tribunal_kind`` for tribunal cases (the identity includes it).
     CasePreferences is still cnr-keyed (generalized in Phase 1E); manual cases
     have no prefs rows, so there is nothing extra to clean up here yet.
     """
-    row = get_by_ref(s, user_id=user_id, forum=forum, forum_case_ref=forum_case_ref)
+    row = get_by_ref(
+        s, user_id=user_id, forum=forum, forum_case_ref=forum_case_ref,
+        tribunal_kind=tribunal_kind,
+    )
     if row is None:
         return False
     s.delete(row)

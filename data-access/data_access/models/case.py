@@ -107,6 +107,11 @@ class Case(Base):
 
     # eCourts sub-classifier (district/highcourt). NULL for non-eCourts forums.
     portal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Tribunal sub-classifier (nclt/nclat/cat/itat/…). Set IFF forum='tribunal';
+    # NULL for every other forum. The structural analog of `portal` for the
+    # generic tribunal family — read hot by capability + refresh routing, and
+    # part of the tribunal uniqueness key (see __table_args__).
+    tribunal_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     filing_year: Mapped[int | None] = mapped_column(Integer)
 
     court: Mapped[str | None] = mapped_column(Text)
@@ -177,9 +182,24 @@ class Case(Base):
             "cases_user_cnr_unique", "user_id", "cnr", unique=True,
             postgresql_where=text("cnr IS NOT NULL"),
         ),
-        # Universal per-forum identity uniqueness (all forums, including manual).
-        UniqueConstraint(
-            "user_id", "forum", "forum_case_ref", name="cases_user_forum_ref_unique",
+        # Universal per-forum identity uniqueness, SPLIT so a shared 'tribunal'
+        # forum (many kinds) can't weaken eCourts/consumer collision detection:
+        #   - non-tribunal rows key on (user, forum, ref)   [tribunal_kind IS NULL]
+        #   - tribunal rows key on    (user, forum, kind, ref) [tribunal_kind NOT NULL]
+        # Both dialect predicates set so the split holds on the SQLite test DB too
+        # (without sqlite_where, SQLite would index tribunal rows in the NULL index
+        # and collide two kinds sharing a ref).
+        Index(
+            "cases_user_forum_ref_unique", "user_id", "forum", "forum_case_ref",
+            unique=True,
+            postgresql_where=text("tribunal_kind IS NULL"),
+            sqlite_where=text("tribunal_kind IS NULL"),
+        ),
+        Index(
+            "cases_user_tribunal_ref_unique",
+            "user_id", "forum", "tribunal_kind", "forum_case_ref", unique=True,
+            postgresql_where=text("tribunal_kind IS NOT NULL"),
+            sqlite_where=text("tribunal_kind IS NOT NULL"),
         ),
         CheckConstraint(
             "portal IS NULL OR portal IN ('district', 'highcourt')",
@@ -187,12 +207,12 @@ class Case(Base):
         ),
         CheckConstraint(
             "forum IN ('ecourts_district', 'ecourts_highcourt', 'supreme_court', "
-            "'consumer', 'drt', 'arbitration')",
+            "'consumer', 'drt', 'arbitration', 'tribunal')",
             name="cases_forum_check",
         ),
         CheckConstraint(
             "source IN ('ecourts_auto', 'manual', 'ejagriti_auto', 'drt_auto', "
-            "'sc_auto')",
+            "'sc_auto', 'tribunal_auto')",
             name="cases_source_check",
         ),
         # eCourts forum and portal must stay consistent; non-eCourts forums ignore portal.
@@ -201,6 +221,12 @@ class Case(Base):
             "(forum = 'ecourts_highcourt' AND portal = 'highcourt') OR "
             "(forum NOT IN ('ecourts_district', 'ecourts_highcourt'))",
             name="cases_forum_portal_consistency",
+        ),
+        # tribunal_kind is set IFF the forum is the generic tribunal forum.
+        CheckConstraint(
+            "(forum = 'tribunal' AND tribunal_kind IS NOT NULL) OR "
+            "(forum <> 'tribunal' AND tribunal_kind IS NULL)",
+            name="cases_tribunal_kind_consistency",
         ),
         Index("cases_user_id_idx", "user_id"),
         Index(
