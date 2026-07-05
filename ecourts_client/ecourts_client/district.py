@@ -139,7 +139,13 @@ class DistrictCourtClient:
             {
                 "state_code": str(state_code),
                 "dist_code": str(district_code),
-                "court_code": str(court_code),
+                # v4.0: the DC dropdown listers take the establishment code under
+                # ``court_code_arr`` (the array/CSV param, as the search endpoints
+                # do). The singular ``court_code`` is rejected with
+                # ``error_ERROR_courtcode4`` -- it survives only on the
+                # single-court endpoints (cause-list / daily-business). See
+                # docs/RE_NOTES_v4.md.
+                "court_code_arr": str(court_code),
                 "language_flag": "english",
                 "bilingual_flag": "0",
             },
@@ -149,13 +155,17 @@ class DistrictCourtClient:
     def list_case_types(
         self, *, state_code: str, district_code: str, court_code: str
     ) -> list[CaseTypeRef]:
-        # eCourts v4.0 renamed caseNumberWebService.php -> caseTypesWebService.php.
+        # eCourts v4.0 renamed caseNumberWebService.php -> caseTypesWebService.php
+        # AND moved the court selector to ``court_code_arr`` (the array/CSV param).
+        # The singular ``court_code`` is rejected with ``error_ERROR_courtcode4``;
+        # the v4 app sends ``{state_code, dist_code, court_code_arr, bilingual_flag,
+        # language_flag}`` (disasm fetchCaseTypes payload). See docs/RE_NOTES_v4.md.
         resp = self._session.call(
             "caseTypesWebService.php",
             {
                 "state_code": str(state_code),
                 "dist_code": str(district_code),
-                "court_code": str(court_code),
+                "court_code_arr": str(court_code),
                 "language_flag": "english",
                 "bilingual_flag": "0",
             },
