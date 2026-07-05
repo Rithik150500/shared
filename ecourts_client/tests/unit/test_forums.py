@@ -42,12 +42,14 @@ def test_tribunal_registry_is_kind_keyed_and_backward_compatible():
     # Forum-only calls are unchanged (kind defaults to None).
     assert has_automated_adapter(Forum.CONSUMER) is True
     assert has_automated_adapter(Forum.TRIBUNAL) is False
-    # NCLAT is the first automated kind (T3 Wave-0); every OTHER kind stays manual.
-    assert has_automated_adapter(Forum.TRIBUNAL, kind=TribunalKind.NCLAT) is True
+    # T3 Wave-0 automated the captcha-free kinds; the rest stay manual.
+    _automated = {TribunalKind.NCLAT, TribunalKind.TDSAT, TribunalKind.DRT, TribunalKind.DRAT}
+    for k in _automated:
+        assert has_automated_adapter(Forum.TRIBUNAL, kind=k) is True
     assert all(
         not has_automated_adapter(Forum.TRIBUNAL, kind=k)
         for k in TribunalKind
-        if k is not TribunalKind.NCLAT
+        if k not in _automated
     )
     # DRT/DRAT live as tribunal kinds; the family is non-empty and includes them.
     assert {"drt", "drat", "nclt", "nclat", "cat", "itat"} <= {k.value for k in TribunalKind}

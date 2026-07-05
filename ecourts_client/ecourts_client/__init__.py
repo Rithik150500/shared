@@ -90,8 +90,12 @@ register_adapter(Forum.SUPREME_COURT, SupremeCourtClient)
 # (Forum.TRIBUNAL, kind) key so has_automated_adapter(TRIBUNAL, kind=…) flips
 # true only for shipped kinds (all others stay 'manual'). See
 # docs/spike-tribunal-transport.md.
-from ecourts_client.tribunal import NCLATClient  # noqa: E402
+from ecourts_client.tribunal import DRTClient, NCLATClient, TDSATClient  # noqa: E402
 register_adapter(Forum.TRIBUNAL, NCLATClient, kind=TribunalKind.NCLAT)
+register_adapter(Forum.TRIBUNAL, TDSATClient, kind=TribunalKind.TDSAT)
+# One client serves both DRT + DRAT (identical transport; sc/case-type ride the identifier).
+register_adapter(Forum.TRIBUNAL, DRTClient, kind=TribunalKind.DRT)
+register_adapter(Forum.TRIBUNAL, DRTClient, kind=TribunalKind.DRAT)
 
 __version__ = "0.1.0"
 
@@ -99,12 +103,13 @@ __all__ = [
     "Act", "BenchRef", "BlockedByGeoIP", "CNRMalformed", "CNRNotFound",
     "Case", "CaseStub", "CaseTypeRef", "CategoryDetails", "CauseList",
     "CauseListEntry", "CircuitOpen", "ConsumerClient", "CourtComplexRef", "CourtSiteDown",
-    "DailyBusiness", "DistrictCourtClient", "DistrictRef", "ECourtsClient",
+    "DRTClient", "DailyBusiness", "DistrictCourtClient", "DistrictRef", "ECourtsClient",
     "ECourtsConfig", "ECourtsError", "EcourtsError", "FIRDetails",
     "Forum", "ForumAdapter", "ForumCapabilities", "ForumNotAutomated",
     "HCBenchSitting", "HCCauseListIndex", "HCCauseListPDFRow",
     "HearingHistoryRow", "HighCourtClient", "IdentifierKind",
     "IdentifierMalformed", "JWTExpired", "NCLATClient", "ObjectionDetails",
+    "TDSATClient",
     "OrderRef", "PDFInvalid", "PDFNotFound", "Party", "PoliceStationRef",
     "RateLimited", "SchemaChanged", "StateRef", "SupremeCourtClient",
     "TribunalKind", "fetch_case",
