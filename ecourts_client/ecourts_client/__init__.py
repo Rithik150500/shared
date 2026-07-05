@@ -85,6 +85,14 @@ register_adapter(Forum.CONSUMER, ConsumerClient)
 from ecourts_client.supreme import SupremeCourtClient  # noqa: E402
 register_adapter(Forum.SUPREME_COURT, SupremeCourtClient)
 
+# Tribunals family — Phase T3, per-kind under Forum.TRIBUNAL. Wave-0 (no India
+# proxy, captcha-free) ships NCLAT first; each kind registers under its own
+# (Forum.TRIBUNAL, kind) key so has_automated_adapter(TRIBUNAL, kind=…) flips
+# true only for shipped kinds (all others stay 'manual'). See
+# docs/spike-tribunal-transport.md.
+from ecourts_client.tribunal import NCLATClient  # noqa: E402
+register_adapter(Forum.TRIBUNAL, NCLATClient, kind=TribunalKind.NCLAT)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -96,7 +104,7 @@ __all__ = [
     "Forum", "ForumAdapter", "ForumCapabilities", "ForumNotAutomated",
     "HCBenchSitting", "HCCauseListIndex", "HCCauseListPDFRow",
     "HearingHistoryRow", "HighCourtClient", "IdentifierKind",
-    "IdentifierMalformed", "JWTExpired", "ObjectionDetails",
+    "IdentifierMalformed", "JWTExpired", "NCLATClient", "ObjectionDetails",
     "OrderRef", "PDFInvalid", "PDFNotFound", "Party", "PoliceStationRef",
     "RateLimited", "SchemaChanged", "StateRef", "SupremeCourtClient",
     "TribunalKind", "fetch_case",
