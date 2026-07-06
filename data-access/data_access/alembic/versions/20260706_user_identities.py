@@ -1,7 +1,7 @@
 """multi-identity aliases: user_identities (phone/email alias -> account)
 
 Revision ID: 20260706_user_identities
-Revises: 20260701_multiforum_foundation
+Revises: 20260705_tribunal_family
 Create Date: 2026-07-06
 
 Adds ``user_identities`` — a phone/email identity that routes to a core users
@@ -10,8 +10,9 @@ second email that can OTP-login) and the intended future superset that
 user_external_identities (OAuth) folds into. Only verified_at IS NOT NULL rows
 route/authenticate; UNIQUE(kind, value) keeps a value on at most one account.
 
-down_revision chains onto 20260701_multiforum_foundation, the single data_access
-head per ``alembic heads``. Revision id is 24 chars (<= VARCHAR(32)). create_table
+down_revision chains onto 20260705_tribunal_family, the current single data_access
+head per ``alembic heads`` (after the tribunal-family migration, which itself
+chains onto 20260701_multiforum_foundation). Revision id is 24 chars (<= VARCHAR(32)). create_table
 is dialect-safe, but the SQLite unit-test path builds this from the model via
 create_all, not this migration.
 """
@@ -23,7 +24,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision = "20260706_user_identities"
-down_revision = "20260701_multiforum_foundation"
+down_revision = "20260705_tribunal_family"
 branch_labels = None
 depends_on = None
 
