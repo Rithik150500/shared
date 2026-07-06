@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from ..models import Case, Subscription, User, UserIdentity
@@ -89,14 +89,21 @@ def add_alias(
     # (c) Collision with another account (as primary OR alias) -> reclaim/refuse.
     colliding_id = primary_owner or (existing.user_id if existing else None)
     if colliding_id is not None and colliding_id != user_id:
-        if _owns_legal_data(session, colliding_id) or not reclaim_orphan:
+        owns_data = _owns_legal_data(session, colliding_id)
+        if owns_data or not reclaim_orphan:
             raise AliasConflictError(
                 f"{kind} {value!r} belongs to account {colliding_id} which cannot "
-                f"be reclaimed (owns_legal_data="
-                f"{_owns_legal_data(session, colliding_id)}, reclaim={reclaim_orphan})"
+                f"be reclaimed (owns_legal_data={owns_data}, reclaim={reclaim_orphan})"
             )
-        # Empty orphan: hard-delete it (CASCADE clears its munshi/nowlez/alias
-        # rows and frees the primary value), then fall through to insert.
+        # Empty orphan: free the contested value and hard-delete the account.
+        # Explicitly delete the orphan's identity rows FIRST so the reclaim does
+        # not depend on DB-level ON DELETE CASCADE (enforced on Postgres, but NOT
+        # on the SQLite unit-test path) to release the UNIQUE(kind, value) the
+        # INSERT below would otherwise collide with. Deleting the users row then
+        # removes the orphan (its munshi/nowlez rows cascade on Postgres; on
+        # SQLite they are harmless dangling rows with no unique collision).
+        session.execute(delete(UserIdentity).where(UserIdentity.user_id == colliding_id))
+        session.flush()
         orphan = session.get(User, colliding_id)
         if orphan is not None:
             session.delete(orphan)

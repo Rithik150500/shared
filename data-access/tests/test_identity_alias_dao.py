@@ -94,6 +94,26 @@ def test_add_alias_own_primary_is_noop(db_session):
     ) is None
 
 
+def test_add_alias_reclaims_orphan_owning_value_as_alias(db_session):
+    # The contested value is another (empty) account's ALIAS, not its primary.
+    # Reclaim must free that alias row so the new INSERT succeeds WITHOUT relying
+    # on DB-level cascade (the SQLite test fixture has FK enforcement off).
+    acct = _account(db_session, "+919953652710")
+    orphan = _account(db_session, "+919000000099")
+    identity_alias_dao.add_alias(
+        db_session, user_id=orphan.id, kind="email", value="shared@x.com", verified=True
+    )
+    orphan_id = orphan.id
+
+    row = identity_alias_dao.add_alias(
+        db_session, user_id=acct.id, kind="email", value="shared@x.com", verified=True
+    )
+    assert row.user_id == acct.id
+    assert db_session.get(User, orphan_id) is None  # empty orphan absorbed
+    hit = user_dao.resolve_verified_email_alias(db_session, "shared@x.com")
+    assert hit is not None and hit.id == acct.id
+
+
 def test_verify_and_remove_and_list(db_session):
     acct = _account(db_session, "+919953652710")
     row = identity_alias_dao.add_alias(
