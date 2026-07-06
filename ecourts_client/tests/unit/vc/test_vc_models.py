@@ -19,6 +19,18 @@ def test_normalize_designation_suffix_variants():
     assert normalize_designation("  District  Judge - 01  ") == canonical
 
 
+def test_normalize_designation_ampersand_and_punctuation():
+    # "&" vs "and" (directory vs eCourts) collapse to the same key.
+    assert (normalize_designation("Principal District & Sessions Judge")
+            == normalize_designation("Principal District and Sessions Judge"))
+    # Bracketing punctuation vs comma collapse to the same key (Commercial Courts).
+    assert (normalize_designation("District Judge (Commercial Court)-01")
+            == normalize_designation("District Judge, Commercial Court-01")
+            == "district judge commercial court-01")
+    # Abbreviation mismatches are NOT bridged (documented limitation).
+    assert normalize_designation("CJ(JD) cum JMIC") != normalize_designation("Civil Judge (Junior Division)")
+
+
 def test_normalize_designation_none_and_empty():
     assert normalize_designation(None) == ""
     assert normalize_designation("") == ""
