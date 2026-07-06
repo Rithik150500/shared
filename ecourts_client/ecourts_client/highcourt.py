@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import ClassVar
 
-from ecourts_client._session import Session
+from ecourts_client._session import Session, get_warm_session
 from ecourts_client.errors import CNRNotFound
 from ecourts_client.forums import Forum, ForumCapabilities, IdentifierKind
 from ecourts_client.models import (
@@ -61,7 +61,7 @@ class HighCourtClient:
     _session: Session = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._session = Session(scope="highcourt")
+        self._session = get_warm_session("highcourt")
 
     def fetch_case(self, cnr: str) -> Case:
         response = self._session.call("caseHistoryWebService.php", {"cino": cnr})

@@ -34,6 +34,7 @@ from ecourts_client.errors import (
     BlockedByGeoIP,
     CourtSiteDown,
     ECourtsError,
+    JWTExpired,
     RateLimited,
 )
 
@@ -99,6 +100,41 @@ def _get_rate_gate() -> _RateGate:
             if _rate_gate is None:
                 _rate_gate = _RateGate(ECourtsConfig().ecourts_min_request_interval_seconds)
     return _rate_gate
+
+
+# Warm session registry: one long-lived Session per scope, reused across every
+# fetch so the JWT is minted ~once per scope instead of once per operation (the
+# appReleaseWebService.php flood behind the post-pacing throttle). Mirrors the
+# _get_rate_gate singleton; the Session's own _lock makes concurrent mint/re-mint
+# safe (see Session._ensure_jwt).
+_warm_sessions: dict[Scope, Session] = {}
+_warm_sessions_lock = threading.Lock()
+
+
+def get_warm_session(scope: Scope) -> Session:
+    """Return the process-wide warm Session for ``scope``, created lazily.
+
+    Scope-keyed because a JWT minted against the DC service is invalid on HC.
+    Expiry is REACTIVE only (re-mint on 401, see Session.call). FAST-FOLLOW
+    EXTENSION POINT (not built): if a stale warm session is ever seen to fail
+    WITHOUT a clean 401, add a wall-clock TTL or evict-on-repeated-failure here
+    — this is the single place to bound a bad session's lifetime.
+    """
+    s = _warm_sessions.get(scope)
+    if s is None:
+        with _warm_sessions_lock:
+            s = _warm_sessions.get(scope)
+            if s is None:
+                s = Session(scope=scope)
+                _warm_sessions[scope] = s
+    return s
+
+
+def reset_warm_sessions() -> None:
+    """Clear the warm-session registry. Tests only — module-level state would
+    otherwise leak a minted JWT / _http between tests."""
+    with _warm_sessions_lock:
+        _warm_sessions.clear()
 
 
 logger = logging.getLogger(__name__)
@@ -191,10 +227,6 @@ _REQUEST_TIMEOUT = 30
 # they are retryable.
 
 
-class JWTExpired(ECourtsError):
-    """Two consecutive 401 responses; caller must mint a fresh JWT (call init again)."""
-
-
 Scope = Literal["district", "highcourt"]
 
 
@@ -216,6 +248,12 @@ class Session:
         self.uid = _UID
         self._http = requests.Session()
         self._http.headers.update({"User-Agent": _USER_AGENT})
+        # Warm sessions are shared across threads (asyncio.to_thread pool +
+        # casepilot concurrent ingest). This RLock serializes ONLY the JWT mint;
+        # _mint_gen converges concurrent 401s to a single re-mint. Invariant:
+        # self.jwt is written only in init(), under this lock, never lock-free.
+        self._lock = threading.RLock()
+        self._mint_gen = 0
 
     @property
     def uid_with_pkgname(self) -> str:
@@ -229,16 +267,38 @@ class Session:
         The response carries the HS256 JWT in ``token`` (same slot as v3). Sending
         the v3 shape (``version`` + ``<uuid>:<pkg>`` uid) makes the server return
         ``version_compatible:"S1", token:null``.
+
+        Serialized under ``self._lock`` and the SOLE writer of ``self.jwt`` — this
+        is what makes a shared warm Session thread-safe. Do NOT wrap the RateGate
+        sleep inside a second lock; ``_send`` gates itself and this stays deadlock-free.
         """
-        payload = {"appVersion": _APP_VERSION, "uid": self.uid}
-        body = self._send("appReleaseWebService.php", payload, with_bearer=False)
-        token = body.get("token")
-        if not token:
-            raise ECourtsError(
-                f"appReleaseWebService.php returned no token: {body!r}. "
-                "Check appVersion/uid (v4.0 wants appVersion + bare-bundle-id uid)."
-            )
-        self.jwt = token
+        with self._lock:
+            payload = {"appVersion": _APP_VERSION, "uid": self.uid}
+            body = self._send("appReleaseWebService.php", payload, with_bearer=False)
+            token = body.get("token")
+            if not token:
+                raise ECourtsError(
+                    f"appReleaseWebService.php returned no token: {body!r}. "
+                    "Check appVersion/uid (v4.0 wants appVersion + bare-bundle-id uid)."
+                )
+            self.jwt = token
+            self._mint_gen += 1
+
+    def _ensure_jwt(self) -> None:
+        """Mint the JWT if absent, double-checked under the lock so concurrent
+        cold callers on a shared warm session mint exactly once."""
+        if self.jwt is None:
+            with self._lock:
+                if self.jwt is None:
+                    self.init()
+
+    def _remint_on_401(self, gen_used: int) -> None:
+        """Re-mint after a 401, converging concurrent 401s: only the first thread
+        (whose request used the still-current generation) re-mints; the rest reuse
+        the freshly minted jwt."""
+        with self._lock:
+            if self._mint_gen == gen_used:
+                self.init()
 
     def call(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Encrypted-GET to <base>/<endpoint>.
@@ -247,19 +307,17 @@ class Session:
         has its own required fields per the JS source). Handles a single 401 retry
         with the package-name-suffixed uid; raises JWTExpired on a second 401.
         """
-        if self.jwt is None:
-            self.init()
+        self._ensure_jwt()
+        gen = self._mint_gen
 
         result = self._send(endpoint, payload, with_bearer=True)
 
         # v4.0: a 401 ("UnAuthorized" / "Not in session") means the JWT expired or
         # was rejected -> mint a fresh token via init() and retry once.
         if result.get("status") == "N" and str(result.get("status_code")) == "401":
-            self.jwt = None
-            self.init()
+            self._remint_on_401(gen)
             result = self._send(endpoint, payload, with_bearer=True)
             if result.get("status") == "N" and str(result.get("status_code")) == "401":
-                self.jwt = None
                 raise JWTExpired(f"Second 401 from {endpoint}; JWT must be re-minted")
 
         if result.get("status") == "N":
@@ -286,10 +344,11 @@ class Session:
 
         headers: dict[str, str] = {}
         if with_bearer:
-            if self.jwt is None:
+            tok = self.jwt  # snapshot once: never re-read self.jwt between the guard and use
+            if tok is None:
                 raise ECourtsError("attempt to send authenticated call without JWT")
             # v4.0: the JWT is sent RAW (v3 wrapped it via encrypt_request).
-            headers["Authorization"] = f"Bearer {self.jwt}"
+            headers["Authorization"] = f"Bearer {tok}"
 
         # A-5: no inner retry loop. Classify the failure and let the outer
         # ``with_retry`` decorator decide. Transport-level connection errors
@@ -368,6 +427,7 @@ class Session:
         except json.JSONDecodeError as e:
             raise ECourtsError(f"non-JSON response from {endpoint}: {plaintext[:200]!r}") from e
 
-        if "token" in parsed:
-            self.jwt = parsed["token"]
+        # NOTE: self.jwt is minted ONLY in init() under _lock (shared-Session
+        # invariant). We deliberately do NOT rotate jwt from data responses here;
+        # a stale token self-heals via the reactive 401 re-mint in call().
         return parsed

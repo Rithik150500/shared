@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import ClassVar
 
-from ecourts_client._session import Session
+from ecourts_client._session import Session, get_warm_session
 from ecourts_client.errors import CNRNotFound
 from ecourts_client.forums import Forum, ForumCapabilities, IdentifierKind
 from ecourts_client.models import (
@@ -50,7 +50,7 @@ from ecourts_client.parsers.dropdowns_extra import (
 )
 from ecourts_client.parsers.fir_search import parse_fir_search
 from ecourts_client.parsers.search import parse_case_number_search, parse_party_search
-from ecourts_client.pdf import fetch_order_pdf, fetch_pdf
+from ecourts_client.pdf import fetch_order_pdf
 
 
 @dataclass
@@ -69,7 +69,7 @@ class DistrictCourtClient:
     _session: Session = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._session = Session(scope="district")
+        self._session = get_warm_session("district")
 
     def fetch_case(self, cnr: str) -> Case:
         list_resp = self._session.call(
