@@ -50,8 +50,7 @@ def fetch_order_pdf(session, url: str) -> bytes:
     if url.startswith(_V4_ORDER_SCHEME):
         params = dict(parse_qsl(url[len(_V4_ORDER_SCHEME):]))
         params["bilingual_flag"] = "1"
-        if session.jwt is None:
-            session.init()
+        session._ensure_jwt()
         resp = session._send("display_pdf_new.php", params, with_bearer=True, method="POST")
         pdf_url = resp.get("pdf_url")
         if not pdf_url:
