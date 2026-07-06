@@ -17,6 +17,15 @@ def _fresh() -> Session:
     return Session(scope="district")
 
 
+def test_jwtexpired_is_unified_with_errors_module():
+    """De-dup guard: _session no longer defines its own JWTExpired class; it
+    re-exports ecourts_client.errors.JWTExpired, so a caller doing
+    `except errors.JWTExpired` catches what Session.call actually raises."""
+    from ecourts_client import _session, errors
+
+    assert _session.JWTExpired is errors.JWTExpired
+
+
 def test_concurrent_cold_callers_mint_exactly_once(monkeypatch):
     s = _fresh()
     mints = []

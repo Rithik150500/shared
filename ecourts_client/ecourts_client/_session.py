@@ -34,6 +34,7 @@ from ecourts_client.errors import (
     BlockedByGeoIP,
     CourtSiteDown,
     ECourtsError,
+    JWTExpired,
     RateLimited,
 )
 
@@ -224,10 +225,6 @@ _REQUEST_TIMEOUT = 30
 # This module continues to *classify* transport failures as ``CourtSiteDown``
 # (or ``RateLimited`` / ``BlockedByGeoIP``); the outer policy decides whether
 # they are retryable.
-
-
-class JWTExpired(ECourtsError):
-    """Two consecutive 401 responses; caller must mint a fresh JWT (call init again)."""
 
 
 Scope = Literal["district", "highcourt"]
