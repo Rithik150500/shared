@@ -50,7 +50,7 @@ from ecourts_client.parsers.dropdowns_extra import (
 )
 from ecourts_client.parsers.fir_search import parse_fir_search
 from ecourts_client.parsers.search import parse_case_number_search, parse_party_search
-from ecourts_client.pdf import fetch_order_pdf, fetch_pdf
+from ecourts_client.pdf import fetch_order_pdf
 
 
 @dataclass
