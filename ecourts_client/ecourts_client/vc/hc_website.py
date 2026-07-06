@@ -38,8 +38,12 @@ log = logging.getLogger(__name__)
 _UA = {"User-Agent": "Mozilla/5.0"}
 _TIMEOUT = 40
 
+# Apostrophe variants: the HC PDFs mix a straight ' with typographic ' ' ʼ ` in
+# "HON'BLE", so every apostrophe-bearing pattern must accept all of them or the
+# judge silently drops (verified: Delhi HC 07-08 dropped C31/C27/C04 on curly ').
+_APOS = "['‘’ʼ`]"
 _COURT_HDR = re.compile(r"COURT\s*NO\.?\s*[:.]?\s*(\d+[A-Z]?)", re.IGNORECASE)
-_JUDGE_LINE = re.compile(r"HON'?BLE.*?JUSTICE", re.IGNORECASE)
+_JUDGE_LINE = re.compile(rf"HON{_APOS}?BLE.*?JUSTICE", re.IGNORECASE)
 # Honorifics/titles stripped when normalizing a judge name to a comparable key.
 _TITLE = re.compile(r"HON'?BLE|JUSTICE|CHIEF|MRS?\.?|MS\.?|DR\.?|SMT\.?|THE", re.IGNORECASE)
 
@@ -50,11 +54,16 @@ def normalize_judge(text: str | None) -> str | None:
     Takes the first judge (before the first comma -> the presiding judge on a
     multi-judge bench), strips honorifics/titles, drops every non-letter, and
     upper-cases. "HON'BLE MR. JUSTICE C.HARI SHANKAR, HON'BLE ... VINOD KUMAR"
-    and "HON'BLE MR.JUSTICE C.HARI SHANKAR" both -> "CHARISHANKAR".
+    and "HON'BLE MR.JUSTICE C.HARI SHANKAR" both -> "CHARISHANKAR". Curly and
+    straight apostrophes collapse to the same key so the website PDF (typographic
+    ') and the eCourts roster (straight ') match.
     """
     if not text:
         return None
     first = text.split(",")[0]
+    # Drop apostrophe variants FIRST so "HON'BLE"/"HON'BLE" both become "HONBLE",
+    # which _TITLE's optional-apostrophe "HON'?BLE" then strips uniformly.
+    first = re.sub(_APOS, "", first)
     first = _TITLE.sub(" ", first)
     key = re.sub(r"[^A-Za-z]", "", first).upper()
     return key or None
