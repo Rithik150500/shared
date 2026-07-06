@@ -19,9 +19,17 @@ from sqlalchemy.dialects.postgresql import INET, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
+from .case import UUIDType as _RoundtripSafeUUIDType
 
 # SQLite-compatibility variants: Postgres types with String fallbacks for sqlite.
 # Lets consumers (e.g. Munshi tests) use in-memory SQLite for Base.metadata.create_all().
+#
+# NOTE: this plain with_variant() form only adjusts DDL — on a fresh SQLite read
+# (not served from the session identity map) the driver hands back a str, not a
+# uuid.UUID, which breaks identity-map matching for round-tripped rows (see
+# case.py's _UUIDType docstring for the full story). Existing classes below
+# still use this legacy form (unchanged, out of scope here); UserIdentity below
+# uses the roundtrip-safe `_RoundtripSafeUUIDType` instead.
 UUIDType = UUID(as_uuid=True).with_variant(String(36), "sqlite")
 INETType = INET().with_variant(String(45), "sqlite")
 
@@ -300,4 +308,47 @@ class UserExternalIdentity(Base):
             "user_id", "provider", name="user_external_identities_user_provider_key"
         ),
         Index("user_external_identities_user_id_idx", "user_id"),
+    )
+
+
+class UserIdentity(Base):
+    """A phone/email identity that routes to a core ``users`` row.
+
+    Phase-1 home for *alias* identities (a second phone recognised by the bot,
+    a second email that can OTP-login) and the intended future superset table
+    that ``user_external_identities`` (OAuth) folds into. A value belongs to at
+    most one account (``UNIQUE(kind, value)``); only ``verified_at IS NOT NULL``
+    rows route/authenticate. The primary identifiers stay on ``users.phone`` /
+    ``users.email`` — an alias value is never also a live primary elsewhere
+    (``identity_alias_dao.add_alias`` reclaims/refuses on collision).
+    """
+
+    __tablename__ = "user_identities"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _RoundtripSafeUUIDType,
+        primary_key=True,
+        default=uuid.uuid4,
+        # gen_random_uuid() omitted in the model (SQLite create_all chokes on the
+        # literal); set on the Postgres migration path only.
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        _RoundtripSafeUUIDType,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    added_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('phone', 'email')", name="user_identities_kind_check"),
+        UniqueConstraint("kind", "value", name="user_identities_kind_value_key"),
+        Index("user_identities_user_id_idx", "user_id"),
     )

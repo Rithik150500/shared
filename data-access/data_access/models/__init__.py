@@ -5,6 +5,7 @@ from .auth import (
     LoginRequest,
     OtpCode,
     UserExternalIdentity,
+    UserIdentity,
 )
 from .billing import (
     CaseBillingPeriod,
@@ -33,6 +34,7 @@ __all__ = [
     "LoginRequest",
     "EmailOtpCode",
     "UserExternalIdentity",
+    "UserIdentity",
     "AuditLog",
     "Case",
     "CaseOrder",
