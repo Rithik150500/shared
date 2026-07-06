@@ -16,6 +16,18 @@ def test_normalize_judge_presiding_and_format_invariant():
     assert normalize_judge(None) is None
 
 
+def test_normalize_judge_apostrophe_variants_collapse():
+    # The website PDF uses a curly apostrophe in HON'BLE; the eCourts roster a
+    # straight one. Both must reduce to the same key, or the judge join misses.
+    from ecourts_client.vc.hc_website import _JUDGE_LINE
+    curly = "HON’BLE MS.JUSTICE MADHU JAIN"
+    straight = "HON'BLE MS. JUSTICE MADHU JAIN"
+    assert normalize_judge(curly) == normalize_judge(straight) == "MADHUJAIN"
+    # and the judge-LINE detector must accept curly forms, else nothing extracts.
+    assert _JUDGE_LINE.search(curly)
+    assert _JUDGE_LINE.search("HON‘BLE MR. JUSTICE SAURABH BANERJEE")
+
+
 def test_court_to_judge_parses_blocks():
     text = (
         "COURT NO. 25\n"
