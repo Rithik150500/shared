@@ -101,6 +101,41 @@ def _get_rate_gate() -> _RateGate:
     return _rate_gate
 
 
+# Warm session registry: one long-lived Session per scope, reused across every
+# fetch so the JWT is minted ~once per scope instead of once per operation (the
+# appReleaseWebService.php flood behind the post-pacing throttle). Mirrors the
+# _get_rate_gate singleton; the Session's own _lock makes concurrent mint/re-mint
+# safe (see Session._ensure_jwt).
+_warm_sessions: dict[Scope, Session] = {}
+_warm_sessions_lock = threading.Lock()
+
+
+def get_warm_session(scope: Scope) -> Session:
+    """Return the process-wide warm Session for ``scope``, created lazily.
+
+    Scope-keyed because a JWT minted against the DC service is invalid on HC.
+    Expiry is REACTIVE only (re-mint on 401, see Session.call). FAST-FOLLOW
+    EXTENSION POINT (not built): if a stale warm session is ever seen to fail
+    WITHOUT a clean 401, add a wall-clock TTL or evict-on-repeated-failure here
+    — this is the single place to bound a bad session's lifetime.
+    """
+    s = _warm_sessions.get(scope)
+    if s is None:
+        with _warm_sessions_lock:
+            s = _warm_sessions.get(scope)
+            if s is None:
+                s = Session(scope=scope)
+                _warm_sessions[scope] = s
+    return s
+
+
+def reset_warm_sessions() -> None:
+    """Clear the warm-session registry. Tests only — module-level state would
+    otherwise leak a minted JWT / _http between tests."""
+    with _warm_sessions_lock:
+        _warm_sessions.clear()
+
+
 logger = logging.getLogger(__name__)
 
 # Throttle observability (audit finding: eCourts throttling was invisible --
