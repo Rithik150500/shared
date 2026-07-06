@@ -15,9 +15,10 @@ follow-ups (``supports_search``/``supports_pdf`` = False).
 """
 from __future__ import annotations
 
+import base64
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import Any, ClassVar
 
@@ -36,6 +37,15 @@ _TIMEOUT = 40
 # location code -> human bench label
 _BENCH = {"delhi": "New Delhi", "chennai": "Chennai"}
 _TOKEN_RE = re.compile(r'name=["\']csrf-token["\']\s+content=["\']([^"\']+)["\']', re.I)
+
+
+def _max_inline_default() -> int:
+    """Newest N order PDFs to inline per fetch (env-tunable; 0 = all). Bounded by
+    default so add-case stays fast + avoids the burst that trips gov throttling."""
+    try:
+        return max(0, int(os.environ.get("TRIBUNAL_MAX_INLINE_ORDERS", "3")))
+    except ValueError:
+        return 3
 
 
 def _split_identifier(identifier: str) -> tuple[str, str, str, str]:
@@ -84,6 +94,17 @@ def _title_from(parties: list[str], others: list[str]) -> str:
     if a and b:
         return f"{a} vs {b}"
     return a or b or ""
+
+
+def _order_meta(row: dict[str, Any]) -> tuple[date | None, str, str]:
+    """(order_date, stable order_id, order_type) from an order_history row.
+    order_type ('J'=Final Order/Judgement, 'D'=Daily Order, …) is required by the
+    view_order download to disambiguate multiple orders on the same date."""
+    od = _pdate(row.get("order_date"))
+    path = _clean(row.get("order_pdf_download"))
+    oid = os.path.basename(path) if path else (f"nclat-{od.isoformat()}" if od else "")
+    ot = _clean(row.get("order_type")) or "J"
+    return od, oid, ot
 
 
 def parse_view_details(data: dict[str, Any], *, location: str) -> Case:
@@ -135,13 +156,14 @@ def parse_view_details(data: dict[str, Any], *, location: str) -> Case:
                 HearingHistoryRow(hearing_date=hd, purpose=_clean(row.get("purpose")), judge=coram or "")
             )
 
+    # Order metadata only here (pure). The actual PDF is fetched by the client's
+    # _inline_orders via POST view_order (needs the session + filing_no); the
+    # direct order_pdf_download URL 404s, so it is NOT used as order_url.
     orders: list[OrderRef] = []
     for row in data.get("order_history") or []:
-        od = _pdate(row.get("order_date"))
-        path = _clean(row.get("order_pdf_download"))
-        if od and path:
-            url = path if path.startswith("http") else BASE_URL + path
-            orders.append(OrderRef(order_date=od, order_url=url, order_id=os.path.basename(path)))
+        od, oid, _ot = _order_meta(row)
+        if od and oid:
+            orders.append(OrderRef(order_date=od, order_url="", order_id=oid))
 
     return Case(
         cnr=ref,
@@ -165,6 +187,7 @@ class NCLATClient:
 
     scope: str = "tribunal_nclat"
     base_url: str = BASE_URL
+    max_inline_orders: int = field(default_factory=_max_inline_default)
     capabilities: ClassVar[ForumCapabilities] = ForumCapabilities(
         forum=Forum.TRIBUNAL,
         identifier_kind=IdentifierKind.TRIBUNAL_CASE_NO,
@@ -242,7 +265,64 @@ class NCLATClient:
         data = (detail or {}).get("data")
         if not data:
             raise CNRNotFound(cnr=f"nclat:{loc}:{ctype}:{cno}:{cyr}")
-        return parse_view_details(data, location=loc)
+        case = parse_view_details(data, location=loc)
+        return self._inline_orders(
+            case, data.get("order_history") or [], token=token, filing_no=filing_no, bench=loc
+        )
+
+    def _download_order_pdf(
+        self, token: str, filing_no: str, order_date_iso: str, bench: str, order_type: str
+    ) -> str | None:
+        """Fetch one order via ``POST /display-board/view_order`` → base64 PDF str,
+        or None. Urlencoded, SIX fields (confirmed live) — omitting ``order_type``
+        yields a "No documnt" page. Best-effort: any transport/non-PDF → None."""
+        try:
+            resp = self._http.post(
+                f"{self.base_url}/display-board/view_order",
+                data={
+                    "search_type": "view_order",
+                    "_token": token,
+                    "bench_name": bench,
+                    "filing_no": filing_no,
+                    "order_date": order_date_iso,
+                    "order_type": order_type,
+                },
+                timeout=_TIMEOUT,
+            )
+        except (requests.ConnectionError, requests.Timeout):
+            return None
+        if resp.status_code != 200:
+            return None
+        body = resp.content or b""
+        if not body.startswith(b"%PDF"):
+            return None  # e.g. the "No documnt" HTML for an order with no doc
+        return base64.b64encode(body).decode("ascii")
+
+    def _inline_orders(
+        self, case: Case, order_rows: list[dict[str, Any]], *, token: str, filing_no: str, bench: str
+    ) -> Case:
+        """Return a copy of ``case`` with the newest ``max_inline_orders`` order PDFs
+        inlined as ``OrderRef.inline_pdf_b64`` (0 => all), matched back to Case.orders
+        by order_id. ``order_rows`` (raw order_history) carries the ``order_type`` the
+        download needs. Uncapped orders keep metadata only. Best-effort — a
+        withheld/slow order never blocks the case."""
+        if not case.orders or not order_rows:
+            return case
+        metas = [m for m in (_order_meta(r) for r in order_rows) if m[0] and m[1]]
+        metas.sort(key=lambda m: m[0] or date.min, reverse=True)
+        take = metas if self.max_inline_orders == 0 else metas[: self.max_inline_orders]
+        inlined: dict[str, str] = {}
+        for od, oid, ot in take:
+            b64 = self._download_order_pdf(token, filing_no, od.isoformat(), bench, ot)  # type: ignore[union-attr]
+            if b64:
+                inlined[oid] = b64
+        if not inlined:
+            return case
+        new_orders = [
+            replace(o, inline_pdf_b64=inlined[o.order_id]) if o.order_id in inlined else o
+            for o in case.orders
+        ]
+        return replace(case, orders=new_orders)
 
     def fetch_pdf(self, url: str) -> bytes:
-        raise NotImplementedError("NCLAT order-PDF fetch is a follow-up")
+        raise NotImplementedError("NCLAT orders are inlined at fetch time (inline_pdf_b64)")

@@ -75,9 +75,60 @@ def test_parse_parties_history_orders():
     assert [p.name for p in res] == ["Mr. A B Resolution Professional", "Some Bank Ltd"]
     assert res[0].advocate == "Adv. R S"
     assert len(c.history) == 2 and c.history[1].purpose == "For Orders"
+    # parse_view_details yields order METADATA only (order_date + stable id); the
+    # PDF is inlined by the client's _inline_orders (I/O). The direct .pdf URL 404s
+    # so order_url is left empty (download goes via POST view_order).
     assert len(c.orders) == 1
-    assert c.orders[0].order_url == BASE_URL + _DATA["order_history"][0]["order_pdf_download"]
+    assert c.orders[0].order_date.isoformat() == "2023-01-13"
     assert c.orders[0].order_id == "abc123.pdf"
+    assert c.orders[0].order_url == ""
+    assert c.orders[0].inline_pdf_b64 is None
+
+
+def test_inline_orders_downloads_latest_n(monkeypatch):
+    import base64
+    from ecourts_client.tribunal.kinds.nclat import NCLATClient
+    client = NCLATClient()
+    client.max_inline_orders = 1
+    calls = []
+
+    def fake_post(url, data=None, timeout=None):
+        calls.append((url, dict(data or {})))
+
+        class _R:
+            status_code = 200
+            content = b"%PDF-1.4 fake order"
+        return _R()
+
+    monkeypatch.setattr(client._http, "post", fake_post)
+    base = parse_view_details(_DATA, location="delhi")
+    out = client._inline_orders(
+        base, _DATA["order_history"], token="tok", filing_no="9910110081912022", bench="delhi"
+    )
+    o = out.orders[0]
+    assert base64.b64decode(o.inline_pdf_b64).startswith(b"%PDF")
+    # posted to view_order (urlencoded) with all SIX fields incl. order_type + search_type
+    assert calls and calls[0][0].endswith("/display-board/view_order")
+    assert calls[0][1] == {
+        "search_type": "view_order", "_token": "tok", "bench_name": "delhi",
+        "filing_no": "9910110081912022", "order_date": "2023-01-13", "order_type": "J",
+    }
+
+
+def test_inline_orders_skips_non_pdf(monkeypatch):
+    from ecourts_client.tribunal.kinds.nclat import NCLATClient
+    client = NCLATClient()
+    client.max_inline_orders = 1
+
+    class _R:
+        status_code = 200
+        content = b"<html>No document</html>"
+    monkeypatch.setattr(client._http, "post", lambda *a, **k: _R())
+    out = client._inline_orders(
+        parse_view_details(_DATA, location="delhi"), _DATA["order_history"],
+        token="t", filing_no="f", bench="delhi",
+    )
+    assert out.orders[0].inline_pdf_b64 is None  # non-PDF response → not inlined
 
 
 def test_empty_detail_is_cnr_not_found():

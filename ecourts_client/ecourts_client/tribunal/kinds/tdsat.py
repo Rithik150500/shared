@@ -11,15 +11,17 @@ the numeric TDSAT code — 2=Telecom Petition, 4=Telecom Appeal, …).
 """
 from __future__ import annotations
 
+import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import date
 from typing import ClassVar
 
 import requests
 
 from ecourts_client.errors import CNRNotFound, CourtSiteDown, ECourtsError, RateLimited
 from ecourts_client.forums import Forum, ForumCapabilities, IdentifierKind, TribunalKind
-from ecourts_client.models import Case, HearingHistoryRow, Party
+from ecourts_client.models import Case, HearingHistoryRow, OrderRef, Party
 from ecourts_client.tribunal._html import (
     extract_after_dash,
     label_value_map,
@@ -31,6 +33,36 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://tdsat.gov.in/Delhi/services"
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 _TIMEOUT = 40
+# Order-sheet links in the proceeding table: `popsurety_pet_adv_name('<b64>')`,
+# where <b64> is the daily_order_view/orderp `filing_no` param for that order.
+_ORDER_LINK_RE = re.compile(r"popsurety_pet_adv_name\(['\"]([^'\"]+)['\"]\)")
+_DMY_RE = re.compile(r"\d{2}/\d{2}/\d{4}")
+
+
+def _max_inline_default() -> int:
+    """Newest N order texts to fetch per case (env-tunable; 0 = all)."""
+    try:
+        return max(0, int(os.environ.get("TRIBUNAL_MAX_INLINE_ORDERS", "3")))
+    except ValueError:
+        return 3
+
+
+def _extract_order_links(html: str) -> list[tuple[str | None, str]]:
+    """Distinct (order_date_str, b64_id) order sheets from the proceeding table.
+
+    The table's `<tr>`s are malformed (unclosed), so pair each order link with the
+    nearest PRECEDING `DD/MM/YYYY` in the raw HTML (its row's hearing date) and
+    de-dupe by the base64 id."""
+    out: list[tuple[str | None, str]] = []
+    seen: set[str] = set()
+    for m in _ORDER_LINK_RE.finditer(html):
+        b64 = m.group(1)
+        if b64 in seen:
+            continue
+        seen.add(b64)
+        dates = _DMY_RE.findall(html[: m.start()])
+        out.append((dates[-1] if dates else None, b64))
+    return out
 
 
 def _split_identifier(identifier: str) -> tuple[str, str, str]:
@@ -77,6 +109,20 @@ def parse_status_html(html: str, *, casetype: str, caseno: str, caseyear: str) -
         if hd:
             history.append(HearingHistoryRow(hearing_date=hd, purpose=row[2], judge=""))
 
+    # Order metadata only (pure). TDSAT has no order PDFs — the order text (HTML)
+    # is fetched by the client's _inline_order_text for the newest few.
+    orders: list[OrderRef] = []
+    for dstr, b64 in _extract_order_links(html):
+        od = parse_dmy(dstr)
+        if od:
+            orders.append(
+                OrderRef(
+                    order_date=od,
+                    order_url=f"{BASE_URL}/daily_order_view.php?filing_no={b64}",
+                    order_id=b64,
+                )
+            )
+
     title = f"{pet} vs {res}" if pet and res else (pet or res or ref or f"{casetype}/{caseno}/{caseyear}")
     return Case(
         cnr=(ref or f"{casetype}/{caseno}/{caseyear}").replace(" ", " ").strip(),
@@ -87,7 +133,7 @@ def parse_status_html(html: str, *, casetype: str, caseno: str, caseyear: str) -
         judge=None,
         parties=parties,
         history=history,
-        orders=[],
+        orders=orders,
         filing_date=parse_dmy(d.get("Date of Filing")),
     )
 
@@ -98,6 +144,7 @@ class TDSATClient:
 
     scope: str = "tribunal_tdsat"
     base_url: str = BASE_URL
+    max_inline_orders: int = field(default_factory=_max_inline_default)
     capabilities: ClassVar[ForumCapabilities] = ForumCapabilities(
         forum=Forum.TRIBUNAL,
         identifier_kind=IdentifierKind.TRIBUNAL_CASE_NO,
@@ -127,7 +174,41 @@ class TDSATClient:
             raise RateLimited("TDSAT returned 429")
         if resp.status_code >= 500:
             raise CourtSiteDown(f"TDSAT {resp.status_code}")
-        return parse_status_html(resp.text or "", casetype=casetype, caseno=caseno, caseyear=caseyear)
+        case = parse_status_html(resp.text or "", casetype=casetype, caseno=caseno, caseyear=caseyear)
+        return self._inline_order_text(case)
+
+    def _fetch_order_text(self, b64: str) -> str | None:
+        """GET orderp.php?filing_no=<b64> → the order-sheet text (TDSAT serves
+        orders as HTML, not PDF). Best-effort; capped. None on any error."""
+        try:
+            resp = self._http.get(
+                f"{self.base_url}/orderp.php", params={"filing_no": b64}, timeout=_TIMEOUT
+            )
+        except (requests.ConnectionError, requests.Timeout):
+            return None
+        if resp.status_code != 200:
+            return None
+        txt = re.sub(r"\s+", " ", BeautifulSoup(resp.text or "", "html.parser").get_text(" ", strip=True)).strip()
+        return txt[:8000] or None
+
+    def _inline_order_text(self, case: Case) -> Case:
+        """Fetch order text for the newest ``max_inline_orders`` orders (0 => all),
+        set it on ``OrderRef.order_text`` → the timeline shows the order content.
+        Uncapped orders keep metadata only. Best-effort."""
+        if not case.orders:
+            return case
+        by_recency = sorted(
+            range(len(case.orders)),
+            key=lambda i: case.orders[i].order_date or date.min,
+            reverse=True,
+        )
+        take = set(by_recency if self.max_inline_orders == 0 else by_recency[: self.max_inline_orders])
+        new_orders = list(case.orders)
+        for i in take:
+            t = self._fetch_order_text(new_orders[i].order_id)
+            if t:
+                new_orders[i] = replace(new_orders[i], order_text=t)
+        return replace(case, orders=new_orders)
 
     def fetch_pdf(self, url: str) -> bytes:
-        raise NotImplementedError("TDSAT order-PDF fetch is a follow-up (daily_order_view.php)")
+        raise NotImplementedError("TDSAT orders are HTML; text is inlined at fetch time (order_text)")

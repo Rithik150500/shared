@@ -25,7 +25,7 @@ _HTML = """
 <table>
 <tr><th>Bench No</th><th>Hearing Date</th><th>Purpose</th><th>Status</th><th>Order</th></tr>
 <tr><td>1</td><td>09/01/2023</td><td>For Preliminary Hearing</td><td>P</td><td>Adjourned</td></tr>
-<tr><td>1</td><td>24/02/2023</td><td>For Directions</td><td>P</td><td>Adjourned</td></tr>
+<tr><td>1</td><td>24/02/2023</td><td>For Directions</td><td>P</td><td><a href="javascript:popsurety_pet_adv_name('NjAzMzM=')">Order</a></td></tr>
 </table>
 </body></html>
 """
@@ -53,6 +53,29 @@ def test_parse_parties_and_history():
 def test_empty_page_is_cnr_not_found():
     with pytest.raises(CNRNotFound):
         parse_status_html("<html><body>no case here</body></html>", casetype="2", caseno="9", caseyear="2099")
+
+
+def test_parse_extracts_order_metadata():
+    c = parse_status_html(_HTML, casetype="2", caseno="1", caseyear="2023")
+    assert len(c.orders) == 1
+    o = c.orders[0]
+    assert o.order_id == "NjAzMzM="
+    assert o.order_date.isoformat() == "2023-02-24"  # nearest preceding hearing date
+    assert o.order_url.endswith("daily_order_view.php?filing_no=NjAzMzM=")
+    assert o.order_text is None  # parse is pure; text fetched by the client
+
+
+def test_inline_order_text(monkeypatch):
+    client = TDSATClient()
+    client.max_inline_orders = 3
+
+    class _R:
+        status_code = 200
+        text = "<html><body>ORDER SHEET. Petition allowed. Signed, Registrar.</body></html>"
+    monkeypatch.setattr(client._http, "get", lambda *a, **k: _R())
+    base = parse_status_html(_HTML, casetype="2", caseno="1", caseyear="2023")
+    out = client._inline_order_text(base)
+    assert "Petition allowed" in out.orders[0].order_text
 
 
 def test_split_identifier():
