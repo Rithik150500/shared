@@ -43,7 +43,7 @@ def test_tribunal_registry_is_kind_keyed_and_backward_compatible():
     assert has_automated_adapter(Forum.CONSUMER) is True
     assert has_automated_adapter(Forum.TRIBUNAL) is False
     # T3 Wave-0 automated the captcha-free kinds; the rest stay manual.
-    _automated = {TribunalKind.NCLAT, TribunalKind.TDSAT, TribunalKind.DRT, TribunalKind.DRAT}
+    _automated = {TribunalKind.NCLAT, TribunalKind.TDSAT, TribunalKind.DRT, TribunalKind.DRAT, TribunalKind.CAT}
     for k in _automated:
         assert has_automated_adapter(Forum.TRIBUNAL, kind=k) is True
     assert all(

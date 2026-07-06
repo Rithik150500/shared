@@ -150,9 +150,9 @@ def test_registry_per_kind():
     assert isinstance(a, NCLATClient)
     assert a.capabilities.tribunal_kind is TribunalKind.NCLAT
     assert a.capabilities.supports_fetch is True
-    # …but the bare tribunal forum + other kinds are NOT (still manual).
+    # …but the bare tribunal forum + not-yet-built kinds are NOT (still manual).
     assert has_automated_adapter(Forum.TRIBUNAL) is False
-    assert has_automated_adapter(Forum.TRIBUNAL, kind=TribunalKind.CAT) is False
+    assert has_automated_adapter(Forum.TRIBUNAL, kind=TribunalKind.NGT) is False
 
 
 def test_fetch_case_orchestration(monkeypatch):

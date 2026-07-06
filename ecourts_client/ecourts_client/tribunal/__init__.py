@@ -7,8 +7,9 @@ a ``ForumAdapter`` under ``tribunal/kinds/<kind>.py`` registered per-kind via
 ships NCLAT first; see ``docs/spike-tribunal-transport.md`` for the verified
 transport contracts.
 """
+from ecourts_client.tribunal.kinds.cat import CATClient
 from ecourts_client.tribunal.kinds.drt import DRTClient
 from ecourts_client.tribunal.kinds.nclat import NCLATClient
 from ecourts_client.tribunal.kinds.tdsat import TDSATClient
 
-__all__ = ["DRTClient", "NCLATClient", "TDSATClient"]
+__all__ = ["CATClient", "DRTClient", "NCLATClient", "TDSATClient"]
