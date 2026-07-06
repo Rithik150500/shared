@@ -400,3 +400,86 @@ def test_only_latest_invoice_status_matters(session: Session) -> None:
         cycle_end=datetime(2026, 4, 1, tzinfo=timezone.utc),
     )
     assert _run(is_user_eligible_for_munshi_billing(user_id, session)) is True
+
+
+# --- Phase 1 (unification): renewal-lag guard --------------------------------
+# A paid tier whose tier_expires_at has passed is STILL active while a PG
+# Subscription row for the user is status='active' (webhook for the next
+# cycle can lag hours behind the boundary). Exactly 'active' rescues.
+# Note: Razorpay's raw webhook/API vocabulary (e.g. "halted", "created",
+# "authenticated") is normalised by this package's webhook handlers before
+# it ever reaches `subscriptions.status` — see
+# `case_billing.nowlez.subscriptions` / `shared.webhook_router`
+# (subscription.halted -> status="past_due"). The `subscriptions` table's
+# CHECK constraint only allows the normalised vocabulary ('trialing',
+# 'active', 'past_due', 'cancelled', 'expired', 'suspended'), so the
+# non-rescuing case below is pinned against 'past_due' (the normalised
+# result of a halted webhook) rather than the raw Razorpay string.
+
+
+def _add_subscription(
+    session: Session,
+    user_id: uuid.UUID,
+    *,
+    status: str,
+    tier: str = "chambers",
+) -> None:
+    from data_access.models.billing import Subscription
+
+    session.add(
+        Subscription(
+            user_id=user_id,
+            tier=tier,
+            billing_cycle="monthly",
+            razorpay_subscription_id=f"sub_{uuid.uuid4().hex[:12]}",
+            status=status,
+        )
+    )
+    session.flush()
+
+
+def _mk_expired_chambers_user(
+    session: Session, *, sub_status: str | None = None,
+) -> uuid.UUID:
+    user_id = _make_user(session)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="chambers",
+        tier_expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    if sub_status is not None:
+        _add_subscription(session, user_id, status=sub_status, tier="chambers")
+    return user_id
+
+
+def test_expired_paid_tier_with_active_subscription_stays_entitled(
+    session: Session,
+) -> None:
+    user_id = _mk_expired_chambers_user(session, sub_status="active")
+    assert _run(effective_tier(user_id, session)) == "chambers"
+    assert _run(is_paying_nowlez_subscriber(user_id, session)) is True
+    assert _run(has_nowlez_access(user_id, session)) is True
+
+
+def test_expired_paid_tier_with_halted_subscription_downgrades(
+    session: Session,
+) -> None:
+    # "past_due" is the normalised status a subscription.halted webhook
+    # produces (see module note above) — halted deliberately does NOT
+    # rescue; it has its own grace flow.
+    user_id = _mk_expired_chambers_user(session, sub_status="past_due")
+    assert _run(effective_tier(user_id, session)) is None
+    assert _run(is_paying_nowlez_subscriber(user_id, session)) is False
+
+
+def test_expired_paid_tier_without_subscription_downgrades(
+    session: Session,
+) -> None:
+    user_id = _mk_expired_chambers_user(session, sub_status=None)
+    assert _run(effective_tier(user_id, session)) is None
+
+
+def test_munshi_billing_suppressed_during_renewal_lag(session: Session) -> None:
+    user_id = _mk_expired_chambers_user(session, sub_status="active")
+    _add_munshi_ext(session, user_id)
+    assert _run(is_user_eligible_for_munshi_billing(user_id, session)) is False

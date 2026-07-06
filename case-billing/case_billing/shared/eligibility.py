@@ -84,9 +84,34 @@ def _tier_is_expired(tier_expires_at: datetime | None) -> bool:
     return tier_expires_at <= datetime.now(timezone.utc)
 
 
-def _has_active_paid_tier(tier: str | None, tier_expires_at: datetime | None) -> bool:
-    """True iff ``tier`` is a paid tier that has not expired."""
-    return tier in _PAID_TIERS and not _tier_is_expired(tier_expires_at)
+async def _paid_tier_is_effectively_active(
+    tier: str | None,
+    tier_expires_at: datetime | None,
+    user_id: uuid.UUID,
+    session: Session,
+) -> bool:
+    """True iff ``tier`` is a paid tier that is active *for feature purposes*.
+
+    Active means: not timestamp-expired, OR timestamp-expired but rescued by
+    the renewal-lag guard — a PG ``subscriptions`` row with status exactly
+    ``'active'`` (unification Phase 1). Razorpay's next-cycle ``charged``
+    webhook can lag hours past the period boundary; a paying subscriber must
+    not lose access in that window. ``halted`` deliberately does NOT rescue
+    (it has its own grace flow), and ``created``/``authenticated`` still
+    downgrade. NULL expiry remains admin-unlimited via ``_tier_is_expired``.
+    """
+    if tier not in _PAID_TIERS:
+        return False
+    if not _tier_is_expired(tier_expires_at):
+        return True
+    from data_access.models.billing import Subscription
+
+    return session.execute(
+        select(Subscription.id)
+        .where(Subscription.user_id == user_id)
+        .where(Subscription.status == "active")
+        .limit(1)
+    ).scalar_one_or_none() is not None
 
 
 async def has_nowlez_access(user_id: uuid.UUID, session: Session) -> bool:
@@ -106,7 +131,7 @@ async def has_nowlez_access(user_id: uuid.UUID, session: Session) -> bool:
     if row is None:
         return False
     tier, trial_ends_at, tier_expires_at = row
-    if _has_active_paid_tier(tier, tier_expires_at):
+    if await _paid_tier_is_effectively_active(tier, tier_expires_at, user_id, session):
         return True
     if _trial_is_active(trial_ends_at):
         return True
@@ -132,7 +157,7 @@ async def is_paying_nowlez_subscriber(
     if row is None:
         return False
     tier, tier_expires_at = row
-    return _has_active_paid_tier(tier, tier_expires_at)
+    return await _paid_tier_is_effectively_active(tier, tier_expires_at, user_id, session)
 
 
 async def effective_tier(
@@ -160,7 +185,7 @@ async def effective_tier(
     if row is None:
         return None
     tier, trial_ends_at, tier_expires_at = row
-    if _has_active_paid_tier(tier, tier_expires_at):
+    if await _paid_tier_is_effectively_active(tier, tier_expires_at, user_id, session):
         return tier
     # Trial: NULL tier + active trial window → grant Chambers tier perks.
     if tier is None and _trial_is_active(trial_ends_at):
@@ -209,7 +234,7 @@ async def is_user_eligible_for_munshi_billing(
     ).first()
     if nowlez_row is not None:
         tier, trial_ends_at, tier_expires_at = nowlez_row
-        if _has_active_paid_tier(tier, tier_expires_at):
+        if await _paid_tier_is_effectively_active(tier, tier_expires_at, user_id, session):
             return False
         if _trial_is_active(trial_ends_at):
             return False
