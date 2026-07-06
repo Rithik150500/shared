@@ -87,6 +87,23 @@ def test_add_alias_refuses_data_owning_account(db_session):
     assert db_session.get(User, other.id) is not None  # nothing destroyed
 
 
+def test_add_alias_refuses_client_owning_account(db_session):
+    # A lawyer who has added CLIENTS (but no cases/subs) is a real account, not an
+    # empty orphan — reclaim must REFUSE, never CASCADE-delete their client records.
+    from data_access.models import Client
+
+    acct = _account(db_session, "+919953652710")
+    other, _ = user_dao.get_or_create_by_phone(db_session, phone="8882271502")
+    db_session.add(Client(id="abc123def4567890", user_id=other.id, name="A Client"))
+    db_session.flush()
+
+    with pytest.raises(AliasConflictError):
+        identity_alias_dao.add_alias(
+            db_session, user_id=acct.id, kind="phone", value="8882271502", verified=True
+        )
+    assert db_session.get(User, other.id) is not None  # not destroyed
+
+
 def test_add_alias_own_primary_is_noop(db_session):
     acct = _account(db_session, "+919953652710")
     assert identity_alias_dao.add_alias(

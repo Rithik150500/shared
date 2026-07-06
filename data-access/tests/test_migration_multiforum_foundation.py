@@ -29,7 +29,9 @@ def _script_dir() -> ScriptDirectory:
 
 
 def test_single_head_after_new_migration():
-    assert _script_dir().get_heads() == [NEW_REVISION]
+    # Assert a single clean head (no multi-head fork), without hardcoding which
+    # revision is newest — later migrations legitimately advance the head.
+    assert len(_script_dir().get_heads()) == 1
 
 
 def test_new_revision_chains_onto_recorded_head():

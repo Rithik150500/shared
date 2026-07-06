@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
-from ..models import Case, Subscription, User, UserIdentity
+from ..models import Case, Client, Subscription, User, UserIdentity
 from ..phone import normalize_phone
 
 
@@ -39,18 +39,22 @@ def _alias_row(session: Session, kind: str, value: str) -> UserIdentity | None:
     ).scalar_one_or_none()
 
 
-def _owns_legal_data(session: Session, user_id: uuid.UUID) -> bool:
-    """True iff the account owns cases or subscriptions — the irreplaceable data
-    that makes it NOT a reclaimable empty orphan. A users_munshi bot-state row
-    alone is transient and does NOT count (unlike merge_users, which guards on
-    munshi because it hard-deletes on a different code path)."""
+def _owns_user_data(session: Session, user_id: uuid.UUID) -> bool:
+    """True iff the account owns real user data — cases, subscriptions, OR clients
+    — which makes it NOT a reclaimable empty orphan. A ``users_munshi`` bot-state
+    row alone is transient and does NOT count (a bot-spawned orphan has only that).
+    Clients are counted deliberately: a lawyer who has added clients but not yet a
+    case is a real account, and reclaiming it would CASCADE-delete those clients."""
     cases = session.execute(
         select(func.count()).select_from(Case).where(Case.user_id == user_id)
     ).scalar_one()
     subs = session.execute(
         select(func.count()).select_from(Subscription).where(Subscription.user_id == user_id)
     ).scalar_one()
-    return bool(cases or subs)
+    clients = session.execute(
+        select(func.count()).select_from(Client).where(Client.user_id == user_id)
+    ).scalar_one()
+    return bool(cases or subs or clients)
 
 
 def add_alias(
@@ -89,11 +93,11 @@ def add_alias(
     # (c) Collision with another account (as primary OR alias) -> reclaim/refuse.
     colliding_id = primary_owner or (existing.user_id if existing else None)
     if colliding_id is not None and colliding_id != user_id:
-        owns_data = _owns_legal_data(session, colliding_id)
+        owns_data = _owns_user_data(session, colliding_id)
         if owns_data or not reclaim_orphan:
             raise AliasConflictError(
                 f"{kind} {value!r} belongs to account {colliding_id} which cannot "
-                f"be reclaimed (owns_legal_data={owns_data}, reclaim={reclaim_orphan})"
+                f"be reclaimed (owns_user_data={owns_data}, reclaim={reclaim_orphan})"
             )
         # Empty orphan: free the contested value and hard-delete the account.
         # Explicitly delete the orphan's identity rows FIRST so the reclaim does
