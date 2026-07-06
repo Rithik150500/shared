@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from ..models import User, UserExternalIdentity, UserMunshi, UserNowlez
+from ..models import User, UserExternalIdentity, UserIdentity, UserMunshi, UserNowlez
 from ..phone import normalize_phone
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -24,6 +24,35 @@ class MergeUnsafeError(ValueError):
     merge_conflict requiring human resolution."""
 
 
+def _resolve_verified_phone_alias(session: Session, phone: str) -> User | None:
+    """Owner of ``phone`` as a VERIFIED phone alias, else None. ``phone`` must be
+    E.164-normalized by the caller."""
+    return session.execute(
+        select(User)
+        .join(UserIdentity, UserIdentity.user_id == User.id)
+        .where(
+            UserIdentity.kind == "phone",
+            UserIdentity.value == phone,
+            UserIdentity.verified_at.is_not(None),
+        )
+    ).scalar_one_or_none()
+
+
+def resolve_verified_email_alias(session: Session, email: str) -> User | None:
+    """Owner of ``email`` as a VERIFIED email alias, else None. Canonicalizes the
+    input (strip + lowercase) so callers may pass a raw address."""
+    email = email.strip().lower()
+    return session.execute(
+        select(User)
+        .join(UserIdentity, UserIdentity.user_id == User.id)
+        .where(
+            UserIdentity.kind == "email",
+            UserIdentity.value == email,
+            UserIdentity.verified_at.is_not(None),
+        )
+    ).scalar_one_or_none()
+
+
 def get_or_create_by_phone(
     session: Session, *, phone: str, locale: str = "en"
 ) -> tuple[User, bool]:
@@ -34,6 +63,14 @@ def get_or_create_by_phone(
     # Canonicalize to E.164 so the web/OTP path (bare 10-digit) and the WhatsApp
     # webhook (+91...) converge on one users row instead of splitting identity.
     phone = normalize_phone(phone)
+    # A VERIFIED phone alias routes inbound/OTP to its OWNING account instead of
+    # spawning a fresh user (closes the WhatsApp orphan-user footgun). Safe to
+    # check before the insert: add_alias guarantees an alias value is never also a
+    # live users.phone primary, so this and the ON CONFLICT path are mutually
+    # exclusive.
+    alias_owner = _resolve_verified_phone_alias(session, phone)
+    if alias_owner is not None:
+        return alias_owner, False
     dialect = session.get_bind().dialect.name
     insert_fn = pg_insert if dialect == "postgresql" else sqlite_insert
     stmt = (
