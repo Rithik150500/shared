@@ -48,10 +48,22 @@ def test_parse_core_fields():
     assert c.cnr == "Company Appeal(AT)(Ins) 1/2023"
     assert c.title == "ACME DEVELOPERS PRIVATE LIMITED vs Mr. A B Resolution Professional & Ors."
     assert c.court == "National Company Law Appellate Tribunal, New Delhi"
-    assert c.stage == "For Admission (Fresh Case)"
-    assert c.next_hearing_date.isoformat() == "2023-01-13"
+    # status="D" (Disposed): show the disposal status, not the stale last-hearing
+    # stage NCLAT keeps echoing in next_hearing_details; and no upcoming hearing.
+    assert c.stage == "Disposed"
+    assert c.next_hearing_date is None
     assert c.filing_date.isoformat() == "2022-12-14"
     assert "Justice A B" in c.judge and c.judge.endswith("Technical))")  # trailing comma/space stripped
+
+
+def test_pending_case_shows_current_stage():
+    import copy
+    data = copy.deepcopy(_DATA)
+    data["case_details"][0]["status"] = "P"
+    c = parse_view_details(data, location="delhi")
+    # Pending: the current stage_of_case is most informative; next hearing kept.
+    assert c.stage == "For Admission (Fresh Case)"
+    assert c.next_hearing_date.isoformat() == "2023-01-13"
 
 
 def test_parse_parties_history_orders():

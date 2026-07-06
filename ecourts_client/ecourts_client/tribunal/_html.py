@@ -56,6 +56,40 @@ def extract_after_dash(text: str, label: str) -> str | None:
     return v or None
 
 
+def date_anchored_rows(soup: BeautifulSoup, header_kw: str) -> list[tuple[str, str, str]]:
+    """Extract ``(before, date, after)`` triples from the proceeding ``<table>``
+    whose header contains ``header_kw``, anchoring on each cell that IS a bare
+    ``DD/MM/YYYY`` date.
+
+    Robust to the NIC pages (e.g. DRT ``Misdetailreport.php``) whose proceeding
+    ``<tr>`` tags are NOT closed — BeautifulSoup then over-nests the cells so a
+    per-``<tr>`` sweep collapses every row into one giant row. Reading the table's
+    ``<td>``s in document order and keying off the date cell sidesteps that: for
+    a ``[court, date, purpose]`` layout the date sits between its court and
+    purpose. Header cells and trailer sections (no bare date) are skipped; exact
+    duplicate triples are de-duped.
+    """
+    header = soup.find(string=re.compile(re.escape(header_kw), re.I))
+    if header is None:
+        return []
+    table = header.find_parent("table")
+    if not isinstance(table, Tag):
+        return []
+    cells = [re.sub(r"\s+", " ", c.get_text(" ", strip=True)) for c in table.find_all("td")]
+    out: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for i, c in enumerate(cells):
+        if not _DMY.fullmatch(c.strip()):
+            continue  # only a cell that IS a date anchors a row
+        before = cells[i - 1] if i >= 1 else ""
+        after = cells[i + 1] if i + 1 < len(cells) else ""
+        key = (before, c.strip(), after)
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
 def proceeding_table_rows(soup: BeautifulSoup, header_kw: str, ncols: int) -> list[list[str]]:
     """Return the data rows of the proceeding ``<table>`` whose header contains
     ``header_kw`` (e.g. 'Hearing Date' / 'Causelist Date'), as ``ncols``-cell lists.

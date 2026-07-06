@@ -27,10 +27,10 @@ from ecourts_client.errors import CNRNotFound, CourtSiteDown, ECourtsError, Rate
 from ecourts_client.forums import Forum, ForumCapabilities, IdentifierKind, TribunalKind
 from ecourts_client.models import Case, HearingHistoryRow, Party
 from ecourts_client.tribunal._html import (
+    date_anchored_rows,
     extract_after_dash,
     label_value_map,
     parse_dmy,
-    proceeding_table_rows,
 )
 
 BASE_URL = "https://cis.drt.gov.in/drtlive"
@@ -67,12 +67,14 @@ def parse_detail_html(html: str, *, sc: str) -> Case:
     is_drat = sc.lower().endswith("drat")
     court = ("Debt Recovery Appellate Tribunal" if is_drat else "Debt Recovery Tribunal") + f" ({sc})"
 
+    # The DRT proceeding table's <tr> tags are unclosed (malformed HTML), so a
+    # per-row sweep collapses; anchor on each DD/MM/YYYY cell instead. Layout is
+    # [Court Name, Causelist Date, Purpose] → (court, date, purpose).
     history: list[HearingHistoryRow] = []
-    for row in proceeding_table_rows(soup, "Causelist Date", 3):
-        # [Court Name, Causelist Date, Purpose]
-        hd = parse_dmy(row[1])
+    for before, dstr, purpose in date_anchored_rows(soup, "Causelist Date"):
+        hd = parse_dmy(dstr)
         if hd:
-            history.append(HearingHistoryRow(hearing_date=hd, purpose=row[2], judge=row[0]))
+            history.append(HearingHistoryRow(hearing_date=hd, purpose=purpose, judge=before))
 
     title = f"{pet} vs {res}" if pet and res else (pet or res or ref)
     return Case(

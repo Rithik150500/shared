@@ -120,7 +120,12 @@ def parse_view_details(data: dict[str, Any], *, location: str) -> Case:
     coram = _clean(nxt.get("coram")) or None
     stage_of_case = _clean(nxt.get("stage_of_case"))
     status_label = {"D": "Disposed", "P": "Pending"}.get(status, status or "")
-    stage = stage_of_case or status_label
+    disposed = status == "D"
+    # Disposed cases: show the disposal status — NCLAT keeps carrying the last
+    # hearing's stage_of_case in next_hearing_details even after disposal, so
+    # preferring it would mislabel a closed case as e.g. "For Admission". Pending
+    # cases: the current stage_of_case is the most informative, fall back to "Pending".
+    stage = status_label if disposed else (stage_of_case or status_label)
 
     history: list[HearingHistoryRow] = []
     for row in data.get("case_history") or []:
@@ -143,7 +148,9 @@ def parse_view_details(data: dict[str, Any], *, location: str) -> Case:
         title=_title_from(applicants, respondents) or ref,
         court=f"National Company Law Appellate Tribunal, {_BENCH.get(location, location)}",
         stage=stage,
-        next_hearing_date=_pdate(nxt.get("hearing_date")),
+        # A disposed case has no upcoming hearing — NCLAT still echoes the last
+        # hearing date in next_hearing_details, so null it when disposed.
+        next_hearing_date=None if disposed else _pdate(nxt.get("hearing_date")),
         judge=coram,
         parties=parties,
         history=history,

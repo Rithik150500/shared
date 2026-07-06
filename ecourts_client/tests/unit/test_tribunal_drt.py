@@ -24,9 +24,9 @@ _DETAIL = """
 <div>PETITIONER/APPLICANT DETAIL Petitioner Name   -EXAMPLE BANK OF INDIA Petitioner/Applicant Address: SOME ADDRESS Additional Party:</div>
 <div>RESPONDENTS/DEFENDENT DETAILS Respondent Name   -M/S EXAMPLE STEEL ROLLS Respondent/Defendent Address: ANOTHER ADDRESS</div>
 <table>
-<tr><th>Court Name</th><th>Causelist Date</th><th>Purpose</th></tr>
-<tr><td>PO</td><td>16/04/2026</td><td>MISCELLANEOUS</td></tr>
-<tr><td>Registrar</td><td>16/02/2026</td><td>Pleading Stage</td></tr>
+<tr><td>Court Name</td><td>Causelist Date</td><td>Purpose</td></tr>
+<tr><td>PO</td><td>16/04/2026</td><td>MISCELLANEOUS</td>
+<tr><td>Registrar</td><td>16/02/2026</td><td>Pleading Stage</td>
 </table>
 </body></html>
 """
