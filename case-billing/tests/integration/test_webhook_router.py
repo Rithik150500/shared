@@ -496,6 +496,117 @@ def test_subscription_charged_terminal_intro_and_renewal_template(
     assert sender.call_args.kwargs["template"] == "nowlez_renewal_success_v1"
 
 
+# ---------- unification P1/S2: users_nowlez tier stamping -------------------
+
+
+def test_activated_stamps_users_nowlez_tier_and_buffered_expiry(
+    session: Session,
+) -> None:
+    """subscription.activated must stamp users_nowlez.tier + a grace-buffered
+    tier_expires_at (period_end + NOWLEZ_RENEWAL_GRACE_DAYS, default 3) so PG
+    entitlement truth is self-consistent regardless of which app hosts the
+    webhook (unification P1/S2)."""
+    user_id, sub_id = _make_subscription_with_user(
+        session,
+        rzp_sub_id="sub_stamp_act",
+        status="trialing",
+        tier="counsel",
+        intro_promo_state="pre_first_payment",
+    )
+    current_end = 1717278400
+
+    raw, sig = _wrap_event(
+        "subscription.activated",
+        subscription={
+            "id": "sub_stamp_act",
+            "status": "active",
+            "current_start": 1714600000,
+            "current_end": current_end,
+            "notes": {"product": "nowlez", "user_id": str(user_id)},
+        },
+    )
+    result = _run(
+        handle_unified_webhook(
+            raw_body=raw, signature=sig, secret=WEBHOOK_SECRET,
+            session=session, razorpay_client=_fake_razorpay_client(),
+            send_template_fn=AsyncMock(),
+        )
+    )
+    session.flush()
+
+    assert result.status == STATUS_PROCESSED
+
+    from data_access.models.user import UserNowlez
+    nowlez = session.execute(
+        select(UserNowlez).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+    assert nowlez.tier == "counsel"
+    # SQLite strips tzinfo on the round-trip (naive == UTC by write
+    # contract, same coercion as case_billing.shared.eligibility); coerce
+    # before comparing so this test is DB-portable (Postgres preserves
+    # tzinfo natively).
+    expires_at = nowlez.tier_expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    assert expires_at == datetime.fromtimestamp(
+        current_end, tz=timezone.utc
+    ) + timedelta(days=3)
+
+
+def test_charged_restamps_tier_expiry(session: Session) -> None:
+    """subscription.charged (renewal) must re-stamp tier_expires_at against
+    the subscription's (already-renewed) period_end, buffered by the grace
+    period. ``_handle_subscription_charged`` doesn't itself parse
+    current_start/current_end from the payload — Razorpay's Subscriptions
+    API updates ``period_end`` via the activated flow / out-of-band — so the
+    test sets ``sub.period_end`` directly to model "a later period already
+    on the row" before the charged event fires."""
+    from data_access.models.billing import Subscription
+
+    user_id, sub_id = _make_subscription_with_user(
+        session,
+        rzp_sub_id="sub_stamp_chrg",
+        status="active",
+        tier="chambers",
+        intro_promo_state="in_intro",
+    )
+    later_period_end = datetime.fromtimestamp(1719958400, tz=timezone.utc)
+    sub = session.execute(
+        select(Subscription).where(Subscription.id == sub_id)
+    ).scalar_one()
+    sub.period_end = later_period_end
+    session.flush()
+
+    raw, sig = _wrap_event(
+        "subscription.charged",
+        subscription={
+            "id": "sub_stamp_chrg",
+            "notes": {"product": "nowlez"},
+        },
+    )
+    result = _run(
+        handle_unified_webhook(
+            raw_body=raw, signature=sig, secret=WEBHOOK_SECRET,
+            session=session, razorpay_client=_fake_razorpay_client(),
+            send_template_fn=AsyncMock(),
+        )
+    )
+    session.flush()
+
+    assert result.status == STATUS_PROCESSED
+
+    from data_access.models.user import UserNowlez
+    nowlez = session.execute(
+        select(UserNowlez).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+    assert nowlez.tier == "chambers"
+    # SQLite strips tzinfo on the round-trip; see coercion note above.
+    expires_at = nowlez.tier_expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    assert expires_at == later_period_end + timedelta(days=3)
+
+
 # ---------- subscription.cancelled ------------------------------------------
 
 
@@ -526,6 +637,36 @@ def test_subscription_cancelled_flips_status(
         select(Subscription).where(Subscription.id == sub_id)
     ).scalar_one()
     assert sub.status == "cancelled"
+
+
+def test_cancelled_clears_users_nowlez_tier(session: Session) -> None:
+    """subscription.cancelled must clear users_nowlez.tier/tier_expires_at —
+    the user is no longer entitled once Nowlez cancels (unification P1/S2)."""
+    user_id, sub_id = _make_subscription_with_user(
+        session, rzp_sub_id="sub_cancel_stamp", status="active", tier="advocate",
+    )
+
+    raw, sig = _wrap_event(
+        "subscription.cancelled",
+        subscription={"id": "sub_cancel_stamp"},
+    )
+    result = _run(
+        handle_unified_webhook(
+            raw_body=raw, signature=sig, secret=WEBHOOK_SECRET,
+            session=session, razorpay_client=_fake_razorpay_client(),
+            send_template_fn=AsyncMock(),
+        )
+    )
+    session.flush()
+
+    assert result.status == STATUS_PROCESSED
+
+    from data_access.models.user import UserNowlez
+    nowlez = session.execute(
+        select(UserNowlez).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+    assert nowlez.tier is None
+    assert nowlez.tier_expires_at is None
 
 
 # ---------- invoice.paid -----------------------------------------------------
