@@ -554,13 +554,17 @@ def test_activated_stamps_users_nowlez_tier_and_buffered_expiry(
 
 
 def test_charged_restamps_tier_expiry(session: Session) -> None:
-    """subscription.charged (renewal) must re-stamp tier_expires_at against
-    the subscription's (already-renewed) period_end, buffered by the grace
-    period. ``_handle_subscription_charged`` doesn't itself parse
-    current_start/current_end from the payload — Razorpay's Subscriptions
-    API updates ``period_end`` via the activated flow / out-of-band — so the
-    test sets ``sub.period_end`` directly to model "a later period already
-    on the row" before the charged event fires."""
+    """subscription.charged (renewal) must roll the NEW cycle's
+    current_start/current_end from the webhook payload onto the
+    subscriptions row BEFORE stamping tier truth. Razorpay fires
+    ``charged`` on every renewal with fresh period bounds — unlike
+    ``activated``, which only fires once at subscription start — so
+    the handler must parse them itself rather than trusting whatever
+    period_end already happens to be on the row.
+
+    The row starts with an OLD period_end; the charged payload carries
+    a LATER current_end. Both ``sub.period_end`` and
+    ``users_nowlez.tier_expires_at`` must reflect the new (later) date."""
     from data_access.models.billing import Subscription
 
     user_id, sub_id = _make_subscription_with_user(
@@ -570,11 +574,13 @@ def test_charged_restamps_tier_expiry(session: Session) -> None:
         tier="chambers",
         intro_promo_state="in_intro",
     )
-    later_period_end = datetime.fromtimestamp(1719958400, tz=timezone.utc)
+    old_period_end = datetime.fromtimestamp(1717280000, tz=timezone.utc)
+    new_period_end_ts = 1719958400
+    new_period_end = datetime.fromtimestamp(new_period_end_ts, tz=timezone.utc)
     sub = session.execute(
         select(Subscription).where(Subscription.id == sub_id)
     ).scalar_one()
-    sub.period_end = later_period_end
+    sub.period_end = old_period_end
     session.flush()
 
     raw, sig = _wrap_event(
@@ -582,6 +588,8 @@ def test_charged_restamps_tier_expiry(session: Session) -> None:
         subscription={
             "id": "sub_stamp_chrg",
             "notes": {"product": "nowlez"},
+            "current_start": 1717280000,
+            "current_end": new_period_end_ts,
         },
     )
     result = _run(
@@ -595,16 +603,24 @@ def test_charged_restamps_tier_expiry(session: Session) -> None:
 
     assert result.status == STATUS_PROCESSED
 
+    sub = session.execute(
+        select(Subscription).where(Subscription.id == sub_id)
+    ).scalar_one()
+    # SQLite strips tzinfo on the round-trip; see coercion note above.
+    period_end = sub.period_end
+    if period_end is not None and period_end.tzinfo is None:
+        period_end = period_end.replace(tzinfo=timezone.utc)
+    assert period_end == new_period_end
+
     from data_access.models.user import UserNowlez
     nowlez = session.execute(
         select(UserNowlez).where(UserNowlez.user_id == user_id)
     ).scalar_one()
     assert nowlez.tier == "chambers"
-    # SQLite strips tzinfo on the round-trip; see coercion note above.
     expires_at = nowlez.tier_expires_at
     if expires_at is not None and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
-    assert expires_at == later_period_end + timedelta(days=3)
+    assert expires_at == new_period_end + timedelta(days=3)
 
 
 # ---------- subscription.cancelled ------------------------------------------

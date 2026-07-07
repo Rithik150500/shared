@@ -520,6 +520,8 @@ async def _handle_subscription_charged(
          on the referrer side.
     3. Send ``nowlez_renewal_success_v1``.
     """
+    from datetime import datetime, timezone
+
     from data_access.models.billing import Referral, Subscription
     from data_access.models.user import User
 
@@ -547,10 +549,22 @@ async def _handle_subscription_charged(
         "user_id": str(sub.user_id),
     }
 
-    # Unification P1/S2: stamp tier truth onto users_nowlez. (This handler
-    # doesn't itself parse current_start/current_end off the payload — Razorpay
-    # updates period_end via the activated flow / out-of-band — so we re-stamp
-    # against whatever period_end already lives on the row.)
+    # Renewal: subscription.charged carries the NEW cycle's period bounds —
+    # roll them onto the row BEFORE stamping tier truth, so the grace-buffered
+    # users_nowlez.tier_expires_at extends on every renewal (P1/S2).
+    current_start = sub_payload.get("current_start")
+    current_end = sub_payload.get("current_end")
+    if current_start is not None:
+        sub.period_start = datetime.fromtimestamp(
+            int(current_start), tz=timezone.utc,
+        )
+    if current_end is not None:
+        sub.period_end = datetime.fromtimestamp(
+            int(current_end), tz=timezone.utc,
+        )
+    session.flush()
+
+    # Unification P1/S2: stamp tier truth onto users_nowlez.
     _stamp_nowlez_tier(session, sub.user_id, sub.tier, sub.period_end)
     details["tier_stamped"] = sub.tier
 
