@@ -60,8 +60,11 @@ def make_key(scope: str, court_complex_code: str, court_no: str) -> VCRoomKey:
     return (scope.strip().lower(), court_complex_code.strip().lower(), str(court_no).strip().lower())
 
 
-# Regex to normalise spacing around a trailing "-NN" suffix (e.g. "- 01", " - 01").
-_SUFFIX_RE = re.compile(r"\s*-\s*(\d+)$")
+# Normalise a dash-then-number ANYWHERE (not just trailing), across hyphen and
+# typographic en/em dashes: "District Judge- 01" / "District Judge - 01" /
+# "District Judge – 2" all -> "district judge-2". eCourts uses a tight hyphen
+# ("District Judge-2") where directories use a spaced en-dash ("District Judge – 2").
+_SUFFIX_RE = re.compile(r"\s*[-–—]\s*(\d+)")
 # Bracketing/separator punctuation the eCourts and directory vocabularies disagree
 # on (e.g. "(Commercial Court)" vs ", Commercial Court"). Note: the "-" of a "-NN"
 # suffix is deliberately NOT here so _SUFFIX_RE can still normalise it.

@@ -42,6 +42,15 @@ def test_normalize_designation_abbreviations():
     assert normalize_designation("CJ(JD) cum JMIC") != normalize_designation("Civil Judge (Junior Division)")
 
 
+def test_normalize_designation_endash_and_midstring_number():
+    # en-dash + spaces (directory) vs tight hyphen (eCourts), mid-string number.
+    assert (normalize_designation("District Judge – 2 and Additional Sessions Judge, Pune")
+            == normalize_designation("DISTRICT JUDGE-2 AND ADDL. SESSIONS JUDGE, Pune"))
+    # trailing "-NN" variants still normalise (regression on the generalised rule).
+    assert normalize_designation("District Judge - 01") == "district judge-01"
+    assert normalize_designation("District Judge– 3") == "district judge-3"
+
+
 def test_normalize_designation_none_and_empty():
     assert normalize_designation(None) == ""
     assert normalize_designation("") == ""
