@@ -27,7 +27,18 @@ def test_normalize_designation_ampersand_and_punctuation():
     assert (normalize_designation("District Judge (Commercial Court)-01")
             == normalize_designation("District Judge, Commercial Court-01")
             == "district judge commercial court-01")
-    # Abbreviation mismatches are NOT bridged (documented limitation).
+
+
+def test_normalize_designation_abbreviations():
+    # Unambiguous abbreviations expand so eCourts (abbreviated) == directory (spelled out).
+    assert (normalize_designation("16th Joint CJSD and Addl CJM, Pune")
+            == normalize_designation(
+                "16th Joint Civil Judge, Senior Division and Additional "
+                "Chief Judicial Magistrate, Pune"))
+    assert normalize_designation("CJ(SD) cum ACJM") == normalize_designation(
+        "Civil Judge (Senior Division) cum Additional Chief Judicial Magistrate")
+    # A compound "X cum Y" still differs from bare "X" via normalize alone — the
+    # provider's cum-split (not normalize) is what makes the bare role resolve.
     assert normalize_designation("CJ(JD) cum JMIC") != normalize_designation("Civil Judge (Junior Division)")
 
 

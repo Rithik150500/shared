@@ -1,8 +1,13 @@
 from __future__ import annotations
 import logging
+import re
 from ecourts_client.vc.models import VCAccess, VCLinkType, VCRoomKey, VCVendor, make_key, normalize_designation
 
 log = logging.getLogger(__name__)
+
+# A compound officer holds >1 role ("Civil Judge (JD) cum JMIC"); a case may be
+# listed under just one role, so we index each "cum"-separated part too.
+_CUM_RE = re.compile(r"\bcum\b", re.IGNORECASE)
 
 
 def _access_from_row(row: dict) -> VCAccess | None:
@@ -41,6 +46,9 @@ class CuratedMapProvider:
     @classmethod
     def from_rows(cls, rows: list[dict]) -> "CuratedMapProvider":
         rooms: dict[VCRoomKey, VCAccess] = {}
+        compound: list[tuple[str, str, VCAccess, str]] = []  # (scope, complex, access, desg)
+        # Pass 1: court_no + FULL designation keys (a full designation is the most
+        # specific match and must win over any compound-role part indexed later).
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -52,6 +60,15 @@ class CuratedMapProvider:
                 rooms[make_key(scope, complex_, str(row["court_no"]))] = access
             desg = row.get("designation")
             if desg:
-                rooms[(scope.strip().lower(), complex_.strip().lower(),
-                       "desg:" + normalize_designation(str(desg)))] = access
+                sl, cl = scope.strip().lower(), complex_.strip().lower()
+                rooms[(sl, cl, "desg:" + normalize_designation(str(desg)))] = access
+                if _CUM_RE.search(str(desg)):
+                    compound.append((sl, cl, access, str(desg)))
+        # Pass 2: index each "cum"-separated role of a compound designation, WITHOUT
+        # overwriting any full-designation key from pass 1 (setdefault).
+        for sl, cl, access, desg in compound:
+            for part in _CUM_RE.split(desg):
+                nk = normalize_designation(part)
+                if nk:
+                    rooms.setdefault((sl, cl, "desg:" + nk), access)
         return cls(rooms)

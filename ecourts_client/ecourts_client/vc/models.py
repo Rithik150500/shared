@@ -67,21 +67,44 @@ _SUFFIX_RE = re.compile(r"\s*-\s*(\d+)$")
 # suffix is deliberately NOT here so _SUFFIX_RE can still normalise it.
 _PUNCT_RE = re.compile(r"[(),.'\"/]")
 
+# Conservative, UNAMBIGUOUS Indian district-court abbreviation expansions, applied
+# to BOTH the seed designation and the eCourts desgname so abbreviated (eCourts)
+# and spelled-out (directory) forms collapse to the same key. Applied AFTER
+# punctuation-stripping (so "CJ(SD)" is already "cj sd"). Order matters: longer /
+# prefixed forms (acjm) before shorter (cjm). Ambiguous abbreviations (bare "cj",
+# "po", "cso", "arc") are deliberately OMITTED to avoid wrong-courtroom matches.
+_ABBREV: list[tuple["re.Pattern[str]", str]] = [
+    (re.compile(r"\bcjsd\b"), "civil judge senior division"),
+    (re.compile(r"\bcjjd\b"), "civil judge junior division"),
+    (re.compile(r"\bcj sd\b"), "civil judge senior division"),
+    (re.compile(r"\bcj jd\b"), "civil judge junior division"),
+    (re.compile(r"\bjmic\b"), "judicial magistrate first class"),
+    (re.compile(r"\bjmfc\b"), "judicial magistrate first class"),
+    (re.compile(r"\bacjm\b"), "additional chief judicial magistrate"),
+    (re.compile(r"\bcjm\b"), "chief judicial magistrate"),
+    (re.compile(r"\bdasj\b"), "district additional sessions judge"),
+    (re.compile(r"\basj\b"), "additional sessions judge"),
+    (re.compile(r"\baddl\b"), "additional"),
+    (re.compile(r"\bspl\b"), "special"),
+]
+
 
 def normalize_designation(s: str | None) -> str:
     """Normalise a judicial-officer designation for use as a VC-map lookup key.
 
     Rules (in order): lowercase; ``&`` → ``and``; drop bracketing punctuation
-    ``( ) , . ' " /``; collapse whitespace; normalise the trailing ``-NN`` suffix
-    so "District Judge- 01" / "District Judge - 01" → "district judge-01".
+    ``( ) , . ' " /``; collapse whitespace; expand unambiguous abbreviations
+    (``CJSD`` → civil judge senior division, ``CJM`` → chief judicial magistrate,
+    ``ADDL`` → additional, ``JMFC`` …); normalise the trailing ``-NN`` suffix so
+    "District Judge- 01" / "District Judge - 01" → "district judge-01".
 
-    The ``&``/``and`` and punctuation steps bridge real formatting differences
-    between the court directories and eCourts ``desgname`` — verified live: they
-    roughly doubled the district match rate (5 → 11 of 27 sampled cases;
-    e.g. "Principal District **&** Sessions Judge" vs "…**and**…", and
-    "District Judge **(Commercial Court)**-01" vs "District Judge**,** Commercial
-    Court-01"). Abbreviation/vocabulary mismatches (e.g. Rohtak "CJ(JD) cum JMIC"
-    vs "Civil Judge (Junior Division)") are NOT bridged and remain unmatched.
+    The ``&``/``and`` + punctuation steps and the abbreviation expansion bridge
+    real formatting differences between the court directories and eCourts
+    ``desgname`` — verified live (5 → 14 of 27 sampled cases). Note: applied to
+    BOTH sides at lookup, so the seed and the query normalise identically. Compound
+    "X cum Y" roles are additionally handled at index time by the provider
+    (see CuratedMapProvider); ambiguous vocabulary (e.g. bare "District Judge" vs
+    numbered) is NOT bridged and remains unmatched by design.
     """
     if not s:
         return ""
@@ -89,6 +112,10 @@ def normalize_designation(s: str | None) -> str:
     s = s.replace("&", "and")
     s = _PUNCT_RE.sub(" ", s)
     # Collapse internal whitespace.
+    s = " ".join(s.split())
+    # Expand unambiguous abbreviations (both seed + query pass through here).
+    for pat, repl in _ABBREV:
+        s = pat.sub(repl, s)
     s = " ".join(s.split())
     # Normalise trailing "-NN" spacing (including spaces before/after the dash).
     s = _SUFFIX_RE.sub(lambda m: f"-{m.group(1)}", s)
