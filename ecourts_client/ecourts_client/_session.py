@@ -115,6 +115,25 @@ def _get_rate_gate() -> _RateGate:
     return _rate_gate
 
 
+def _penalize_rate_gate() -> None:
+    """On a 405, tell the active gate to back off. No-op unless the Redis limiter
+    is active (a plain _RateGate has no shared state to widen). FULLY GUARDED: this
+    runs at the 405 site immediately before ``raise RateLimited``, so a lazy limiter
+    construction or attribute error here must NEVER escape and mask the RateLimited.
+
+    Note the back-off is multiplicative PER 405 PER process: in a real IP-throttle
+    burst every in-flight call on every process 405s, so the shared interval
+    saturates to ``max_interval`` near-instantly (intended hard collective back-off;
+    the interval key's TTL auto-resets it to base once the throttle clears)."""
+    try:
+        gate = _get_rate_gate()
+        penalize = getattr(gate, "penalize", None)
+        if penalize is not None:
+            penalize()
+    except Exception:  # noqa: BLE001 -- back-off is best-effort; never break transport
+        pass
+
+
 # Warm session registry: one long-lived Session per scope, reused across every
 # fetch so the JWT is minted ~once per scope instead of once per operation (the
 # appReleaseWebService.php flood behind the post-pacing throttle). Mirrors the
@@ -405,6 +424,7 @@ class Session:
             # trips after the failure threshold, backing the whole process off
             # until it clears.
             _log_throttle("throttle_405", endpoint, 405)
+            _penalize_rate_gate()
             raise RateLimited(f"eCourts returned 405 (burst throttle) for {endpoint}")
         if 500 <= resp.status_code < 600:
             _log_throttle("http_5xx", endpoint, resp.status_code)
