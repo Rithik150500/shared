@@ -9,8 +9,32 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from ..models import User, UserExternalIdentity, UserIdentity, UserMunshi, UserNowlez
+from ..models import (
+    AuditLog,
+    Case,
+    CaseBillingPeriod,
+    CasePreferences,
+    Client,
+    LoginRequest,
+    MunshiInvoice,
+    MunshiUpsellEvent,
+    NotificationNowlez,
+    PendingTeamInvite,
+    Referral,
+    Subscription,
+    Team,
+    TeamMember,
+    User,
+    UserExternalIdentity,
+    UserIdentity,
+    UserMunshi,
+    UserNowlez,
+    WhatsAppDeliveryLog,
+)
+from ..models.auth import AuthSession
+from ..models.whatsapp import MessageLog
 from ..phone import normalize_phone
+from . import audit_dao
 
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -22,6 +46,59 @@ class MergeUnsafeError(ValueError):
     ondelete=CASCADE). The merge is refused rather than silently destroying
     data; the caller (D4 ``link_email_to_phone_account``) treats this as a
     merge_conflict requiring human resolution."""
+
+
+class MergeConflictError(ValueError):
+    """Raised by ``merge_users(repoint=True)`` when both the survivor and the
+    absorbed account own a genuinely ambiguous 1:1 identity — today this is
+    only ``users_munshi`` (both have a distinct Munshi bot identity; there is
+    no safe way to pick a winner automatically). Distinct from
+    ``MergeUnsafeError``: this is raised only in repoint mode, after the
+    caller has already opted into moving data, and it means "even repoint
+    mode can't resolve this without a human." ``plan_merge_repoint`` flags the
+    same condition in its ``conflicts`` list so a dry-run surfaces it before
+    the CLI ever calls ``merge_users(repoint=True)``."""
+
+
+# Tables that FK users.id with ondelete=CASCADE and are safely re-pointed by
+# a plain ``UPDATE ... SET user_id = :survivor WHERE user_id = :absorbed``.
+# (table_name, model, user_id-column-name) — table_name is also the dict key
+# in plan_merge_repoint's returned counts and the audit metadata.
+_CLEAN_REPOINT_TABLES: tuple[tuple[str, type, str], ...] = (
+    ("cases", Case, "user_id"),
+    ("clients", Client, "user_id"),
+    ("subscriptions", Subscription, "user_id"),
+    ("munshi_invoices", MunshiInvoice, "user_id"),
+    ("case_billing_periods", CaseBillingPeriod, "user_id"),
+    ("case_preferences", CasePreferences, "user_id"),
+    ("notifications_nowlez", NotificationNowlez, "user_id"),
+    ("munshi_upsell_events", MunshiUpsellEvent, "user_id"),
+    ("whatsapp_delivery_log", WhatsAppDeliveryLog, "user_id"),
+    ("teams", Team, "owner_id"),
+    ("team_members", TeamMember, "user_id"),
+)
+
+# referrals has TWO independent FKs to users.id — both must be re-pointed.
+_REFERRAL_FK_COLUMNS: tuple[str, ...] = ("referrer_user_id", "referred_user_id")
+
+# Ephemeral tables: DELETE the absorbed's rows rather than re-point (the user
+# simply re-authenticates under the survivor).
+_EPHEMERAL_TABLES: tuple[tuple[str, type, str], ...] = (
+    ("auth_sessions", AuthSession, "user_id"),
+    ("login_requests", LoginRequest, "user_id"),
+)
+
+# SET NULL tables: re-point for attribution continuity. Never blocks the
+# absorbed-row delete (the FK already tolerates NULL), so this is purely a
+# "don't lose the paper trail" nicety, done best-effort inside the same
+# transaction.
+_SET_NULL_REPOINT_TABLES: tuple[tuple[str, type, str], ...] = (
+    ("audit_log", AuditLog, "user_id"),
+    ("audit_log", AuditLog, "actor_id"),
+    ("message_log", MessageLog, "user_id"),
+    ("team_members", TeamMember, "invited_by"),
+    ("pending_team_invites", PendingTeamInvite, "invited_by"),
+)
 
 
 def _resolve_verified_phone_alias(session: Session, phone: str) -> User | None:
@@ -278,41 +355,405 @@ def link_google_identity(
     return (result.rowcount or 0) > 0
 
 
-def merge_users(session: Session, *, survivor_id: uuid.UUID, absorbed_id: uuid.UUID) -> None:
+def _count_child_rows(session: Session, survivor_id: uuid.UUID, absorbed_id: uuid.UUID) -> dict:
+    """Shared by plan_merge_repoint (dry-run) and merge_users' refuse-guard:
+    per-table counts of absorbed-owned rows, plus the conflicts list. Reads
+    only — never writes."""
+    counts: dict[str, int] = {}
+    for table_name, model, col in _CLEAN_REPOINT_TABLES:
+        counts[table_name] = session.execute(
+            select(func.count()).select_from(model).where(getattr(model, col) == absorbed_id)
+        ).scalar_one()
+
+    # referrals: absorbed may appear as referrer AND/OR referred; count is the
+    # number of DISTINCT rows touched (a row could theoretically hit both
+    # columns only if absorbed referred itself, which the app never creates,
+    # but we count rows not FK-hits to keep the number meaningful).
+    referral_ids = set(
+        session.execute(
+            select(Referral.id).where(
+                (Referral.referrer_user_id == absorbed_id)
+                | (Referral.referred_user_id == absorbed_id)
+            )
+        ).scalars().all()
+    )
+    counts["referrals"] = len(referral_ids)
+
+    conflicts: list[dict] = []
+
+    survivor_has_munshi = session.get(UserMunshi, survivor_id) is not None
+    absorbed_has_munshi = session.get(UserMunshi, absorbed_id) is not None
+    counts["users_munshi"] = 1 if absorbed_has_munshi else 0
+    if survivor_has_munshi and absorbed_has_munshi:
+        conflicts.append(
+            {
+                "table": "users_munshi",
+                "reason": "both survivor and absorbed own a distinct Munshi bot "
+                "identity; automatic re-point would silently pick a winner",
+            }
+        )
+
+    # user_external_identities: rows that would collide on (provider, sub).
+    absorbed_ext = session.execute(
+        select(UserExternalIdentity).where(UserExternalIdentity.user_id == absorbed_id)
+    ).scalars().all()
+    ext_move = 0
+    ext_drop = 0
+    for row in absorbed_ext:
+        collides = session.execute(
+            select(func.count())
+            .select_from(UserExternalIdentity)
+            .where(
+                UserExternalIdentity.user_id == survivor_id,
+                UserExternalIdentity.provider == row.provider,
+                UserExternalIdentity.provider_sub == row.provider_sub,
+            )
+        ).scalar_one()
+        if collides:
+            ext_drop += 1
+        else:
+            ext_move += 1
+    counts["user_external_identities"] = ext_move
+    if ext_drop:
+        counts["user_external_identities_dropped_dupes"] = ext_drop
+
+    # user_identities: rows that would collide on (kind, value).
+    absorbed_idents = session.execute(
+        select(UserIdentity).where(UserIdentity.user_id == absorbed_id)
+    ).scalars().all()
+    ident_move = 0
+    ident_drop = 0
+    for row in absorbed_idents:
+        collides = session.execute(
+            select(func.count())
+            .select_from(UserIdentity)
+            .where(
+                UserIdentity.user_id == survivor_id,
+                UserIdentity.kind == row.kind,
+                UserIdentity.value == row.value,
+            )
+        ).scalar_one()
+        if collides:
+            ident_drop += 1
+        else:
+            ident_move += 1
+    counts["user_identities"] = ident_move
+    if ident_drop:
+        counts["user_identities_dropped_dupes"] = ident_drop
+
+    # users_nowlez: existing merge_users semantics — re-pointed only if the
+    # survivor has none; otherwise the absorbed's extension is dropped
+    # (CASCADE-deleted along with the absorbed row). Not a "conflict" — this
+    # is long-standing, deliberate, non-blocking behavior.
+    counts["users_nowlez"] = (
+        1
+        if session.get(UserNowlez, absorbed_id) is not None
+        and session.get(UserNowlez, survivor_id) is None
+        else 0
+    )
+
+    return {"counts": counts, "conflicts": conflicts}
+
+
+def plan_merge_repoint(session: Session, *, survivor_id: uuid.UUID, absorbed_id: uuid.UUID) -> dict:
+    """Dry-run planner for ``merge_users(repoint=True)``. Returns per-table
+    counts of rows that WOULD move from ``absorbed_id`` to ``survivor_id``,
+    plus a ``conflicts`` list flagging any genuinely ambiguous 1:1 state (see
+    ``MergeConflictError``). Writes NOTHING — this is read-only and safe to
+    call speculatively (e.g. to print a CLI dry-run preview).
+
+    The returned dict is ``{**per_table_counts, "conflicts": [...]}`` so CLI
+    callers can iterate everything except the "conflicts" key as a table.
+    """
+    result = _count_child_rows(session, survivor_id, absorbed_id)
+    return {**result["counts"], "conflicts": result["conflicts"]}
+
+
+def _repoint_clean_tables(session: Session, survivor_id: uuid.UUID, absorbed_id: uuid.UUID) -> dict:
+    """UPDATE every clean-repoint CASCADE child table's user_id (or owner_id
+    for teams) from absorbed->survivor. Returns the per-table row counts
+    actually moved (for the audit event)."""
+    moved: dict[str, int] = {}
+    for table_name, model, col in _CLEAN_REPOINT_TABLES:
+        result = session.execute(
+            update(model).where(getattr(model, col) == absorbed_id).values(**{col: survivor_id})
+        )
+        moved[table_name] = moved.get(table_name, 0) + (result.rowcount or 0)
+
+    referral_moved = 0
+    for col in _REFERRAL_FK_COLUMNS:
+        result = session.execute(
+            update(Referral).where(getattr(Referral, col) == absorbed_id).values(**{col: survivor_id})
+        )
+        referral_moved += result.rowcount or 0
+    moved["referrals"] = referral_moved
+    session.flush()
+    return moved
+
+
+def _delete_ephemeral_tables(session: Session, absorbed_id: uuid.UUID) -> dict:
+    """DELETE (not re-point) the absorbed's ephemeral rows — the user simply
+    re-authenticates under the survivor. Returns per-table deleted counts."""
+    from sqlalchemy import delete
+
+    deleted: dict[str, int] = {}
+    for table_name, model, col in _EPHEMERAL_TABLES:
+        result = session.execute(delete(model).where(getattr(model, col) == absorbed_id))
+        deleted[table_name] = result.rowcount or 0
+    session.flush()
+    return deleted
+
+
+def _repoint_set_null_tables(session: Session, survivor_id: uuid.UUID, absorbed_id: uuid.UUID) -> dict:
+    """Best-effort re-point of SET NULL attribution columns (audit_log,
+    message_log, team_members.invited_by, pending_team_invites.invited_by) so
+    the paper trail survives the merge. Never blocks the delete — these
+    columns already tolerate NULL — this is purely for continuity."""
+    moved: dict[str, int] = {}
+    for table_name, model, col in _SET_NULL_REPOINT_TABLES:
+        result = session.execute(
+            update(model).where(getattr(model, col) == absorbed_id).values(**{col: survivor_id})
+        )
+        key = f"{table_name}.{col}"
+        moved[key] = result.rowcount or 0
+    session.flush()
+    return moved
+
+
+def _repoint_munshi_extension(session: Session, survivor_id: uuid.UUID, absorbed_id: uuid.UUID) -> bool:
+    """Re-point users_munshi absorbed->survivor iff only the absorbed has one.
+    Raises MergeConflictError if BOTH have one (caller has already checked
+    this isn't the case in the common path, but this is the authoritative,
+    race-safe check done inside the transaction). Returns True iff a row was
+    moved."""
+    survivor_has = session.get(UserMunshi, survivor_id) is not None
+    absorbed_has = session.get(UserMunshi, absorbed_id) is not None
+    if survivor_has and absorbed_has:
+        raise MergeConflictError(
+            f"cannot repoint-merge user {absorbed_id} into {survivor_id}: both "
+            "accounts own a distinct users_munshi (Munshi bot) identity — "
+            "genuine ambiguity, refusing to guess a winner"
+        )
+    if absorbed_has and not survivor_has:
+        session.execute(
+            update(UserMunshi).where(UserMunshi.user_id == absorbed_id).values(user_id=survivor_id)
+        )
+        session.flush()
+        return True
+    return False
+
+
+def _repoint_identity_tables_dropping_dupes(
+    session: Session, survivor_id: uuid.UUID, absorbed_id: uuid.UUID
+) -> dict:
+    """user_external_identities (UNIQUE provider+sub) and user_identities
+    (UNIQUE kind+value): re-point rows that don't collide with something the
+    survivor already owns; DELETE the absorbed's row when it does collide
+    (the survivor already has that identity — the absorbed's copy is a inert
+    duplicate, never a distinct fact worth preserving). Never violates the
+    unique constraint because colliding rows are deleted, not updated.
+
+    NOTE on staleness: these are Core UPDATE/DELETE statements, which mutate
+    rows at the SQL level without refreshing any ORM objects already in the
+    session's identity map. ``merge_users`` calls ``session.expire_all()``
+    after every repoint helper (including this one) runs, so callers never
+    observe stale attributes — see that call site's comment for why a
+    narrower per-row ``session.expire()`` is not sufficient on these
+    particular tables (their PK column isn't the roundtrip-safe UUID
+    TypeDecorator, so a freshly-SELECTed row can fail to dedupe against an
+    already-loaded object for the same primary key).
+    """
+    from sqlalchemy import delete
+
+    moved = {"user_external_identities": 0, "user_identities": 0}
+    dropped = {"user_external_identities": 0, "user_identities": 0}
+
+    absorbed_ext = session.execute(
+        select(UserExternalIdentity).where(UserExternalIdentity.user_id == absorbed_id)
+    ).scalars().all()
+    for row in absorbed_ext:
+        collides = session.execute(
+            select(func.count())
+            .select_from(UserExternalIdentity)
+            .where(
+                UserExternalIdentity.user_id == survivor_id,
+                UserExternalIdentity.provider == row.provider,
+                UserExternalIdentity.provider_sub == row.provider_sub,
+            )
+        ).scalar_one()
+        if collides:
+            session.execute(delete(UserExternalIdentity).where(UserExternalIdentity.id == row.id))
+            dropped["user_external_identities"] += 1
+        else:
+            session.execute(
+                update(UserExternalIdentity)
+                .where(UserExternalIdentity.id == row.id)
+                .values(user_id=survivor_id)
+            )
+            moved["user_external_identities"] += 1
+
+    absorbed_idents = session.execute(
+        select(UserIdentity).where(UserIdentity.user_id == absorbed_id)
+    ).scalars().all()
+    for row in absorbed_idents:
+        collides = session.execute(
+            select(func.count())
+            .select_from(UserIdentity)
+            .where(
+                UserIdentity.user_id == survivor_id,
+                UserIdentity.kind == row.kind,
+                UserIdentity.value == row.value,
+            )
+        ).scalar_one()
+        if collides:
+            session.execute(delete(UserIdentity).where(UserIdentity.id == row.id))
+            dropped["user_identities"] += 1
+        else:
+            session.execute(
+                update(UserIdentity).where(UserIdentity.id == row.id).values(user_id=survivor_id)
+            )
+            moved["user_identities"] += 1
+
+    session.flush()
+    return {"moved": moved, "dropped": dropped}
+
+
+def merge_users(
+    session: Session,
+    *,
+    survivor_id: uuid.UUID,
+    absorbed_id: uuid.UUID,
+    repoint: bool = False,
+) -> None:
     """D4 auto-merge: fold the absorbed user into the survivor. Survivor is the
-    canonical row (caller passes the older created_at as survivor). Never drops
+    canonical row (caller passes the older created_at as survivor).
+
+    ``repoint=False`` (the default, UNCHANGED behavior): never drops
     case/billing rows — only re-points the nowlez extension and copies the
-    email/email_verified anchor, then deletes the absorbed users row (its
-    leftover extension is removed by the ondelete=CASCADE FK)."""
+    email/email_verified anchor, then deletes the absorbed users row. Raises
+    ``MergeUnsafeError`` if the absorbed owns cases/subscriptions/a munshi
+    identity (the hard-delete's ondelete=CASCADE would destroy them). This is
+    the only mode the login-time auto-merge (``link_email_to_phone_account``)
+    ever calls.
+
+    ``repoint=True`` (Phase-2 sub-project D, admin-CLI-only, NEVER called
+    automatically from login): instead of refusing, MOVES every CASCADE
+    child table's rows from absorbed->survivor in this one transaction
+    (all-or-nothing — a mid-move exception leaves NOTHING changed, since
+    nothing here commits/rollbacks its own transaction; the caller's
+    transaction boundary governs atomicity), then runs the same anchor/
+    extension logic and deletes the now-childless absorbed row. Raises
+    ``MergeConflictError`` (distinct from MergeUnsafeError) if both accounts
+    own a users_munshi identity — a genuine ambiguity even repoint mode
+    won't guess through. Logs an ``account.merge_repointed`` audit event
+    with the per-table moved-counts.
+    """
     survivor = session.get(User, survivor_id)
     absorbed = session.get(User, absorbed_id)
     if survivor is None or absorbed is None or survivor_id == absorbed_id:
         return
 
-    # SAFETY GUARD (D4): the absorbed row is hard-deleted below, and cases,
-    # billing subscriptions, and the munshi (bot) identity all FK users.id with
-    # ondelete=CASCADE. Refuse to merge — never silently destroy — an absorbed
-    # account that owns any of that irreplaceable data (this also covers the
-    # "survivor=older happens to be the data-light row" case). The caller treats
-    # MergeUnsafeError as a merge_conflict requiring human resolution.
-    from ..models import Case, Subscription
+    if not repoint:
+        # SAFETY GUARD (D4): the absorbed row is hard-deleted below, and cases,
+        # billing subscriptions, and the munshi (bot) identity all FK users.id
+        # with ondelete=CASCADE. Refuse to merge — never silently destroy — an
+        # absorbed account that owns any of that irreplaceable data (this also
+        # covers the "survivor=older happens to be the data-light row" case).
+        # The caller treats MergeUnsafeError as a merge_conflict requiring
+        # human resolution.
+        absorbed_cases = session.execute(
+            select(func.count()).select_from(Case).where(Case.user_id == absorbed_id)
+        ).scalar_one()
+        absorbed_subs = session.execute(
+            select(func.count())
+            .select_from(Subscription)
+            .where(Subscription.user_id == absorbed_id)
+        ).scalar_one()
+        absorbed_has_munshi = session.get(UserMunshi, absorbed_id) is not None
+        if absorbed_cases or absorbed_subs or absorbed_has_munshi:
+            raise MergeUnsafeError(
+                f"refusing to merge user {absorbed_id}: absorbed account owns child "
+                f"data (cases={absorbed_cases}, subscriptions={absorbed_subs}, "
+                f"munshi={absorbed_has_munshi}) that ondelete=CASCADE would destroy"
+            )
+        _merge_anchors_and_delete(session, survivor, absorbed, survivor_id, absorbed_id)
+        return
 
-    absorbed_cases = session.execute(
-        select(func.count()).select_from(Case).where(Case.user_id == absorbed_id)
-    ).scalar_one()
-    absorbed_subs = session.execute(
-        select(func.count())
-        .select_from(Subscription)
-        .where(Subscription.user_id == absorbed_id)
-    ).scalar_one()
-    absorbed_has_munshi = session.get(UserMunshi, absorbed_id) is not None
-    if absorbed_cases or absorbed_subs or absorbed_has_munshi:
-        raise MergeUnsafeError(
-            f"refusing to merge user {absorbed_id}: absorbed account owns child "
-            f"data (cases={absorbed_cases}, subscriptions={absorbed_subs}, "
-            f"munshi={absorbed_has_munshi}) that ondelete=CASCADE would destroy"
+    # REPOINT MODE: everything from here — the child-table moves, the
+    # existing anchor/extension fold, and the absorbed-row delete — runs
+    # inside ONE SAVEPOINT (session.begin_nested()) so a mid-move exception
+    # rolls back ALL of it, leaving the session exactly as the caller found
+    # it. A plain try/except without a SAVEPOINT is not enough here: on
+    # SQLAlchemy, an exception raised after a flush() does not by itself undo
+    # that flush unless something calls rollback()/nested-rollback, and a
+    # bare session.rollback() would ALSO discard whatever unrelated work the
+    # caller had pending before calling merge_users. begin_nested() scopes
+    # the rollback to exactly this operation.
+    with session.begin_nested():
+        # Hard conflict check runs FIRST so we fail fast before touching any
+        # other table (cheap correctness: no point moving 10 tables' worth of
+        # rows only to discover the munshi identity can't be resolved).
+        _repoint_munshi_extension(session, survivor_id, absorbed_id)
+        moved_counts: dict = {}
+        moved_counts.update(_repoint_clean_tables(session, survivor_id, absorbed_id))
+        ident_result = _repoint_identity_tables_dropping_dupes(session, survivor_id, absorbed_id)
+        moved_counts.update(ident_result["moved"])
+        moved_counts["_dropped_duplicates"] = ident_result["dropped"]
+        moved_counts["_ephemeral_deleted"] = _delete_ephemeral_tables(session, absorbed_id)
+        moved_counts["_set_null_repointed"] = _repoint_set_null_tables(session, survivor_id, absorbed_id)
+
+        # The Core UPDATE statements above (in _repoint_clean_tables /
+        # _repoint_identity_tables_dropping_dupes / _repoint_set_null_tables)
+        # mutate rows at the SQL level without the ORM's unit-of-work knowing
+        # to refresh already-loaded Python objects. Worse, on the
+        # with_variant(String(36), "sqlite") columns used by several of these
+        # models (not the roundtrip-safe TypeDecorator Case/CasePreferences
+        # use), a fresh SELECT's row can even fail to dedupe against an
+        # already-identity-mapped object for the SAME primary key (str vs.
+        # uuid.UUID PK values hash differently), so per-row session.expire()
+        # calls on the freshly-selected row are not sufficient — a caller
+        # holding an earlier reference (e.g. a test fixture, or another
+        # in-flight request in the same session) would still see stale data.
+        # expire_all() is the blunt, always-correct fix: every ORM object in
+        # the identity map is marked stale and will re-SELECT on next access.
+        session.expire_all()
+
+        _merge_anchors_and_delete(session, survivor, absorbed, survivor_id, absorbed_id)
+
+        # Audit deltas: the pre-repoint audit_dao.log_event calls were one-way
+        # (merge happened, no record of what moved). Carry the per-table
+        # moved-counts so the repoint is auditable / reversible-by-inspection
+        # even though we don't build a full undo tool this phase. Logged
+        # INSIDE the savepoint so a rollback also undoes the audit row —
+        # we never want an audit entry describing a move that didn't happen.
+        audit_dao.log_event(
+            session,
+            event_type="account.merge_repointed",
+            source="system",
+            user_id=survivor_id,
+            actor_id=None,
+            metadata={
+                "survivor_id": str(survivor_id),
+                "absorbed_id": str(absorbed_id),
+                "counts": moved_counts,
+            },
         )
+        session.flush()
 
+
+def _merge_anchors_and_delete(
+    session: Session,
+    survivor: User,
+    absorbed: User,
+    survivor_id: uuid.UUID,
+    absorbed_id: uuid.UUID,
+) -> None:
+    """Shared tail of merge_users for both modes: fold the email/phone
+    anchors and the nowlez extension onto the survivor, then delete the
+    (now-childless, in repoint mode) absorbed row. Unchanged logic from the
+    original repoint=False-only implementation — extracted verbatim so
+    repoint=True can run it inside the same SAVEPOINT as the child-table
+    moves."""
     # Fold the email anchor onto the survivor if it doesn't already have one.
     # Use Core UPDATE statements to avoid mixed UUID/str ORM identity-map sort
     # errors on SQLite (where the ON CONFLICT re-SELECT returns str PKs while
