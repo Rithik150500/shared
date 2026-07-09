@@ -8,6 +8,7 @@ from __future__ import annotations
 import sentry_sdk
 
 from case_billing.config import BillingConfig
+from case_billing.limits import NOWLEZ_FREE_TIER_CASE_CAP
 from case_billing.errors import (
     BillingError,
     InvoiceNotFound,
@@ -27,6 +28,7 @@ __version__ = "0.1.0"
 __all__ = [
     "__version__",
     "BillingConfig",
+    "NOWLEZ_FREE_TIER_CASE_CAP",
     "BillingError",
     "InvoiceNotFound",
     "RazorpayApiError",
