@@ -7,7 +7,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from data_access.models.case import Case
@@ -87,6 +87,24 @@ def _assert_valid_ref(forum: str, *, cnr: str | None, forum_case_ref: str) -> No
                 f"Invalid forum_case_ref {forum_case_ref!r}: "
                 f"must match {_REF_REGEX.pattern}",
             )
+def count_active_cases_for_user(s: Session, *, user_id: uuid.UUID) -> int:
+    """Return the number of refresh-enabled cases the user owns in the shared
+    cases table.
+
+    This is the single source of truth for the per-user "active case" count
+    behind BOTH surfaces' tier caps (the casepilot web tier limit + the bot's
+    Munshi/free cap), so the two agree on one UNIFIED number rather than each
+    counting its own store. ``refresh_enabled IS TRUE`` is the canonical
+    "still tracked" predicate: cnr-not-found tombstones and manually paused /
+    manual rows drop out — matching the bot's long-standing ``_count_active_cases``.
+    """
+    return int(
+        s.execute(
+            select(func.count(Case.id))
+            .where(Case.user_id == user_id)
+            .where(Case.refresh_enabled.is_(True))
+        ).scalar_one()
+    )
 
 
 def upsert_case(
