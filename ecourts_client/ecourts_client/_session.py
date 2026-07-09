@@ -98,7 +98,20 @@ def _get_rate_gate() -> _RateGate:
     if _rate_gate is None:
         with _rate_gate_lock:
             if _rate_gate is None:
-                _rate_gate = _RateGate(ECourtsConfig().ecourts_min_request_interval_seconds)
+                cfg = ECourtsConfig()
+                if cfg.ecourts_use_redis_limiter:
+                    # Import here (not module-top) so a consumer without the redis
+                    # wheel is never coupled to it at import; the limiter itself
+                    # lazy-imports redis and fails open to a _RateGate.
+                    from ecourts_client.resilience.redis_limiter import RedisRateLimiter
+                    _rate_gate = RedisRateLimiter(
+                        cfg.ecourts_min_request_interval_seconds,
+                        widen_factor=cfg.ecourts_redis_limiter_widen_factor,
+                        max_interval=cfg.ecourts_redis_limiter_max_interval_seconds,
+                        penalty_ttl_seconds=cfg.ecourts_redis_limiter_penalty_ttl_seconds,
+                    )
+                else:
+                    _rate_gate = _RateGate(cfg.ecourts_min_request_interval_seconds)
     return _rate_gate
 
 

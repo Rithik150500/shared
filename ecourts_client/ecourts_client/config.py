@@ -33,3 +33,14 @@ class ECourtsConfig(BaseSettings):
     # rely on the reactive circuit breaker + the 405->RateLimited classification,
     # and enable this via ECOURTS_MIN_REQUEST_INTERVAL_SECONDS if throttling recurs).
     ecourts_min_request_interval_seconds: float = 0.0
+
+    # Tier-2 distributed rate limiter (ECOURTS_USE_REDIS_LIMITER). When ON, the
+    # _get_rate_gate() factory returns a Redis-backed GCRA limiter that caps the
+    # AGGREGATE egress rate across all processes on the one IP (the per-process
+    # interval above becomes the limiter's base + fail-open floor). Default OFF:
+    # behavior is byte-identical to the per-process _RateGate. See
+    # resilience/redis_limiter.py + docs/audit-finding-ecourts-ipwide-throttle.md.
+    ecourts_use_redis_limiter: bool = False
+    ecourts_redis_limiter_widen_factor: float = 2.0        # AIMD multiplier on a 405
+    ecourts_redis_limiter_max_interval_seconds: float = 8.0
+    ecourts_redis_limiter_penalty_ttl_seconds: int = 300   # widened interval auto-resets after this
