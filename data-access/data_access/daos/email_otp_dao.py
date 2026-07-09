@@ -108,6 +108,22 @@ def mark_used(session: Session, otp_id: uuid.UUID) -> int:
     return result.rowcount
 
 
+def invalidate_unused_for_email(session: Session, email: str) -> int:
+    """Mark every still-unused OTP row for this email as used (superseded).
+
+    Issuing a new code calls this first so exactly ONE code is ever live for an
+    email, and a re-request cannot mint a fresh per-row attempt budget (which
+    otherwise defeats the OTP_MAX_ATTEMPTS lockout). Returns rowcount.
+    """
+    result = session.execute(
+        update(EmailOtpCode)
+        .where(EmailOtpCode.email == email, EmailOtpCode.used_at.is_(None))
+        .values(used_at=func.now())
+    )
+    session.flush()
+    return result.rowcount or 0
+
+
 def count_within(session: Session, email: str, minutes: int) -> int:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
     return session.execute(

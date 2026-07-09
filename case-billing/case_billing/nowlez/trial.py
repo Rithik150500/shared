@@ -71,10 +71,14 @@ async def create_trial_for_new_signup(
     place ``users_nowlez.trial_started_at``/``trial_ends_at`` get
     written on signup.
 
-    Idempotency: if a ``users_nowlez`` row already exists for the user
-    we DO NOT overwrite ``trial_ends_at`` (resetting the trial would
-    let users farm extensions by re-running signup). Likewise we DO NOT
-    re-send the template on the second call.
+    Idempotency: we skip (no trial change, no template) when the row
+    already has ``trial_started_at`` set (a trial was granted — resetting
+    would let users farm extensions) OR ``tier`` set (paid /
+    free-after-lapse / admin). A BARE row (tier=NULL,
+    trial_started_at=NULL) — created by the identity mint path
+    (``ensure_nowlez_extension``) for Munshi-bot-first users and every OTP
+    signup — is UPGRADED into a trial in place, so those users still get
+    their 30 days.
 
     Args:
         user_id: The just-created user's primary key.
@@ -91,7 +95,45 @@ async def create_trial_for_new_signup(
         select(UserNowlez).where(UserNowlez.user_id == user_id)
     ).scalar_one_or_none()
     if existing is not None:
-        # Already has a Nowlez extension — leave the trial untouched.
+        # A row existing is NOT proof of a prior trial. The identity mint path
+        # (ensure_nowlez_extension) creates a BARE row (tier=NULL,
+        # trial_started_at=NULL) — for Munshi-bot-first users on their first web
+        # sign-in, and in fact for every OTP signup, since identity commits that
+        # row in a SEPARATE session BEFORE this function runs. Only skip if a
+        # trial was already granted (trial_started_at set — anti-farming) OR a
+        # tier was already picked/assigned (paid / free-after-lapse / admin).
+        # Otherwise UPGRADE the bare row into a trial in place so bot-first (and
+        # fresh-web) users still get their 30 days.
+        if existing.trial_started_at is not None or existing.tier is not None:
+            return
+        now = datetime.now(timezone.utc)
+        existing.trial_started_at = now
+        existing.trial_ends_at = now + timedelta(days=NOWLEZ_TRIAL_DURATION_DAYS)
+        if name and not existing.name:
+            existing.name = name
+        session.add(
+            AuditLog(
+                event_type="nowlez.trial_started",
+                user_id=user_id,
+                source="nowlez",
+                metadata_={
+                    "trial_days": NOWLEZ_TRIAL_DURATION_DAYS,
+                    "via": "existing_row_upgrade",
+                },
+            )
+        )
+        session.flush()
+        phone = session.execute(
+            select(User.phone).where(User.id == user_id)
+        ).scalar_one_or_none()
+        if phone:
+            await send_template_fn(
+                to=phone,
+                template="nowlez_trial_started_v1",
+                variables={"name": name, "trial_days": NOWLEZ_TRIAL_DURATION_DAYS},
+                brand="nowlez",
+            )
+        billing_nowlez_trials_started_total.inc()
         return
 
     now = datetime.now(timezone.utc)

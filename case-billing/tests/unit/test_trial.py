@@ -107,6 +107,95 @@ def test_create_trial_is_idempotent_for_existing_row(session: Session) -> None:
     assert second.trial_ends_at == first_ends
 
 
+def test_create_trial_upgrades_bare_existing_row(session: Session) -> None:
+    """A bare identity-created row (tier=NULL, trial_started_at=NULL) — the
+    Munshi-bot-first / OTP-signup shape from ensure_nowlez_extension — is
+    UPGRADED into a 30-day trial in place (the reported gap)."""
+    from data_access.models.user import UserNowlez
+    user_id = _make_user(session)
+    session.add(UserNowlez(
+        user_id=user_id, name="", tier=None,
+        trial_started_at=None, trial_ends_at=None,
+    ))
+    session.flush()
+    sender = AsyncMock()
+
+    _run(create_trial_for_new_signup(
+        user_id=user_id, name="Bot User", session=session, send_template_fn=sender,
+    ))
+    session.flush()
+
+    row = session.execute(
+        select(UserNowlez).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+    assert row.tier is None
+    assert row.trial_started_at is not None
+    assert row.trial_ends_at is not None
+    delta = row.trial_ends_at - row.trial_started_at
+    assert abs(delta - timedelta(days=30)) < timedelta(hours=1)
+    assert row.name == "Bot User"  # bare "" name backfilled
+    sender.assert_called_once()
+    assert sender.call_args.kwargs["template"] == "nowlez_trial_started_v1"
+
+
+def test_create_trial_skips_bare_row_when_tier_set(session: Session) -> None:
+    """A row with a tier already set (paid / free-after-lapse / admin) is NOT
+    trialed, even when trial_started_at is NULL."""
+    from data_access.models.user import UserNowlez
+    user_id = _make_user(session)
+    session.add(UserNowlez(
+        user_id=user_id, name="Paid", tier="chambers",
+        trial_started_at=None, trial_ends_at=None,
+    ))
+    session.flush()
+    sender = AsyncMock()
+
+    _run(create_trial_for_new_signup(
+        user_id=user_id, name="Paid", session=session, send_template_fn=sender,
+    ))
+    session.flush()
+
+    row = session.execute(
+        select(UserNowlez).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+    assert row.tier == "chambers"
+    assert row.trial_started_at is None
+    assert row.trial_ends_at is None
+    sender.assert_not_called()
+
+
+def test_create_trial_bare_row_upgrade_is_idempotent(session: Session) -> None:
+    """Upgrading a bare row twice grants the trial exactly once (anti-farming):
+    the second call sees trial_started_at set and skips — no re-send, no shift."""
+    from data_access.models.user import UserNowlez
+    user_id = _make_user(session)
+    session.add(UserNowlez(
+        user_id=user_id, name="", tier=None,
+        trial_started_at=None, trial_ends_at=None,
+    ))
+    session.flush()
+    sender = AsyncMock()
+
+    _run(create_trial_for_new_signup(
+        user_id=user_id, name="U", session=session, send_template_fn=sender,
+    ))
+    session.flush()
+    first_ends = session.execute(
+        select(UserNowlez.trial_ends_at).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+
+    _run(create_trial_for_new_signup(
+        user_id=user_id, name="U", session=session, send_template_fn=sender,
+    ))
+    session.flush()
+    second_ends = session.execute(
+        select(UserNowlez.trial_ends_at).where(UserNowlez.user_id == user_id)
+    ).scalar_one()
+
+    assert second_ends == first_ends   # trial window not shifted
+    sender.assert_called_once()        # welcome template sent exactly once
+
+
 # --- is_in_trial ----------------------------------------------------------
 
 

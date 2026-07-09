@@ -88,6 +88,7 @@ def _add_nowlez_ext(
     *,
     tier: str | None,
     trial_ends_at: datetime | None = None,
+    tier_expires_at: datetime | None = None,
     name: str = "Test User",
 ) -> None:
     from data_access.models.user import UserNowlez
@@ -98,6 +99,7 @@ def _add_nowlez_ext(
             name=name,
             tier=tier,
             trial_ends_at=trial_ends_at,
+            tier_expires_at=tier_expires_at,
         )
     )
     session.flush()
@@ -222,6 +224,60 @@ def test_effective_tier_after_trial_expired_with_no_tier(session: Session) -> No
     assert _run(effective_tier(user_id, session)) is None
 
 
+# ---------- paid-tier expiry (tier_expires_at) -----------------------------
+# A paid tier whose tier_expires_at is in the past is no longer entitled —
+# matches casepilot's usage.is_tier_expired (which downgrades to free). A NULL
+# expiry means non-expiring (real Razorpay subs leave it NULL); a future
+# expiry is still active.
+
+
+def test_effective_tier_none_when_paid_tier_expired(session: Session) -> None:
+    user_id = _make_user(session)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="chambers",
+        tier_expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    assert _run(effective_tier(user_id, session)) is None
+
+
+def test_effective_tier_returns_tier_when_expiry_in_future(session: Session) -> None:
+    user_id = _make_user(session)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="chambers",
+        tier_expires_at=datetime.now(timezone.utc) + timedelta(days=10),
+    )
+    assert _run(effective_tier(user_id, session)) == "chambers"
+
+
+def test_effective_tier_returns_tier_when_expiry_null(session: Session) -> None:
+    """NULL expiry = non-expiring paid subscription (Razorpay subs)."""
+    user_id = _make_user(session)
+    _add_nowlez_ext(session, user_id, tier="counsel", tier_expires_at=None)
+    assert _run(effective_tier(user_id, session)) == "counsel"
+
+
+def test_is_paying_nowlez_subscriber_false_when_paid_tier_expired(session: Session) -> None:
+    user_id = _make_user(session)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="advocate",
+        tier_expires_at=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+    assert _run(is_paying_nowlez_subscriber(user_id, session)) is False
+
+
+def test_has_nowlez_access_false_when_paid_tier_expired(session: Session) -> None:
+    user_id = _make_user(session)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="chambers",
+        tier_expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    assert _run(has_nowlez_access(user_id, session)) is False
+
+
 # ---------- is_user_eligible_for_munshi_billing — all seven states ---------
 
 
@@ -256,6 +312,23 @@ def test_state_4_both_active_paid_nowlez_suppresses_munshi(session: Session) -> 
     # Even though munshi extension exists, the paid Nowlez tier suppresses
     # Munshi billing.
     assert _run(is_user_eligible_for_munshi_billing(user_id, session)) is False
+
+
+def test_expired_paid_nowlez_does_not_suppress_munshi(session: Session) -> None:
+    """An *expired* paid Nowlez grant no longer suppresses Munshi billing.
+
+    Deliberate behaviour change (Fix B): expired grants stop counting as
+    paying, so the Munshi cron resumes invoicing — consistent with
+    is_paying_nowlez_subscriber/effective_tier honouring tier_expires_at.
+    """
+    user_id = _make_user(session)
+    _add_munshi_ext(session, user_id)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="chambers",
+        tier_expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    assert _run(is_user_eligible_for_munshi_billing(user_id, session)) is True
 
 
 def test_state_5_munshi_during_nowlez_trial_is_not_eligible(session: Session) -> None:
@@ -327,3 +400,86 @@ def test_only_latest_invoice_status_matters(session: Session) -> None:
         cycle_end=datetime(2026, 4, 1, tzinfo=timezone.utc),
     )
     assert _run(is_user_eligible_for_munshi_billing(user_id, session)) is True
+
+
+# --- Phase 1 (unification): renewal-lag guard --------------------------------
+# A paid tier whose tier_expires_at has passed is STILL active while a PG
+# Subscription row for the user is status='active' (webhook for the next
+# cycle can lag hours behind the boundary). Exactly 'active' rescues.
+# Note: Razorpay's raw webhook/API vocabulary (e.g. "halted", "created",
+# "authenticated") is normalised by this package's webhook handlers before
+# it ever reaches `subscriptions.status` — see
+# `case_billing.nowlez.subscriptions` / `shared.webhook_router`
+# (subscription.halted -> status="past_due"). The `subscriptions` table's
+# CHECK constraint only allows the normalised vocabulary ('trialing',
+# 'active', 'past_due', 'cancelled', 'expired', 'suspended'), so the
+# non-rescuing case below is pinned against 'past_due' (the normalised
+# result of a halted webhook) rather than the raw Razorpay string.
+
+
+def _add_subscription(
+    session: Session,
+    user_id: uuid.UUID,
+    *,
+    status: str,
+    tier: str = "chambers",
+) -> None:
+    from data_access.models.billing import Subscription
+
+    session.add(
+        Subscription(
+            user_id=user_id,
+            tier=tier,
+            billing_cycle="monthly",
+            razorpay_subscription_id=f"sub_{uuid.uuid4().hex[:12]}",
+            status=status,
+        )
+    )
+    session.flush()
+
+
+def _mk_expired_chambers_user(
+    session: Session, *, sub_status: str | None = None,
+) -> uuid.UUID:
+    user_id = _make_user(session)
+    _add_nowlez_ext(
+        session, user_id,
+        tier="chambers",
+        tier_expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    if sub_status is not None:
+        _add_subscription(session, user_id, status=sub_status, tier="chambers")
+    return user_id
+
+
+def test_expired_paid_tier_with_active_subscription_stays_entitled(
+    session: Session,
+) -> None:
+    user_id = _mk_expired_chambers_user(session, sub_status="active")
+    assert _run(effective_tier(user_id, session)) == "chambers"
+    assert _run(is_paying_nowlez_subscriber(user_id, session)) is True
+    assert _run(has_nowlez_access(user_id, session)) is True
+
+
+def test_expired_paid_tier_with_halted_subscription_downgrades(
+    session: Session,
+) -> None:
+    # "past_due" is the normalised status a subscription.halted webhook
+    # produces (see module note above) — halted deliberately does NOT
+    # rescue; it has its own grace flow.
+    user_id = _mk_expired_chambers_user(session, sub_status="past_due")
+    assert _run(effective_tier(user_id, session)) is None
+    assert _run(is_paying_nowlez_subscriber(user_id, session)) is False
+
+
+def test_expired_paid_tier_without_subscription_downgrades(
+    session: Session,
+) -> None:
+    user_id = _mk_expired_chambers_user(session, sub_status=None)
+    assert _run(effective_tier(user_id, session)) is None
+
+
+def test_munshi_billing_suppressed_during_renewal_lag(session: Session) -> None:
+    user_id = _mk_expired_chambers_user(session, sub_status="active")
+    _add_munshi_ext(session, user_id)
+    assert _run(is_user_eligible_for_munshi_billing(user_id, session)) is False

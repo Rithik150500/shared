@@ -56,6 +56,64 @@ def _trial_is_active(trial_ends_at: datetime | None) -> bool:
     return trial_ends_at > datetime.now(timezone.utc)
 
 
+def _tier_is_expired(tier_expires_at: datetime | None) -> bool:
+    """Return True iff a paid tier's ``users_nowlez.tier_expires_at`` is past.
+
+    Semantics mirror casepilot exactly so both engines agree on when a
+    paid grant has lapsed:
+
+    * NULL expiry → never expires (casepilot ``auth.py``
+      ``_check_and_downgrade_expired_tier`` calls this "admin-granted
+      unlimited"; ``usage.is_tier_expired`` returns False).
+    * past expiry → expired. The boundary is ``<=`` to match casepilot's
+      ``usage.is_tier_expired`` (``now >= expires``) and ``auth.py``
+      (active iff ``expires > now``).
+
+    Scope note: this concerns the *shared* ``users_nowlez`` column, which
+    only the 2026-06-04 legacy backfill ever populated (the shared billing
+    package never writes it; live Razorpay state in this table is carried
+    by ``tier`` + ``razorpay_subscription_id``). casepilot's *local*
+    ``app.db`` billing does set a period-end ``tier_expires_at`` — a
+    separate store this predicate does not read. Same naive→UTC coercion
+    as :func:`_trial_is_active`.
+    """
+    if tier_expires_at is None:
+        return False
+    if tier_expires_at.tzinfo is None:
+        tier_expires_at = tier_expires_at.replace(tzinfo=timezone.utc)
+    return tier_expires_at <= datetime.now(timezone.utc)
+
+
+async def _paid_tier_is_effectively_active(
+    tier: str | None,
+    tier_expires_at: datetime | None,
+    user_id: uuid.UUID,
+    session: Session,
+) -> bool:
+    """True iff ``tier`` is a paid tier that is active *for feature purposes*.
+
+    Active means: not timestamp-expired, OR timestamp-expired but rescued by
+    the renewal-lag guard — a PG ``subscriptions`` row with status exactly
+    ``'active'`` (unification Phase 1). Razorpay's next-cycle ``charged``
+    webhook can lag hours past the period boundary; a paying subscriber must
+    not lose access in that window. ``halted`` deliberately does NOT rescue
+    (it has its own grace flow), and ``created``/``authenticated`` still
+    downgrade. NULL expiry remains admin-unlimited via ``_tier_is_expired``.
+    """
+    if tier not in _PAID_TIERS:
+        return False
+    if not _tier_is_expired(tier_expires_at):
+        return True
+    from data_access.models.billing import Subscription
+
+    return session.execute(
+        select(Subscription.id)
+        .where(Subscription.user_id == user_id)
+        .where(Subscription.status == "active")
+        .limit(1)
+    ).scalar_one_or_none() is not None
+
+
 async def has_nowlez_access(user_id: uuid.UUID, session: Session) -> bool:
     """Return True iff the user has *any* form of active Nowlez access.
 
@@ -66,14 +124,14 @@ async def has_nowlez_access(user_id: uuid.UUID, session: Session) -> bool:
     from data_access.models.user import UserNowlez
 
     row = session.execute(
-        select(UserNowlez.tier, UserNowlez.trial_ends_at).where(
-            UserNowlez.user_id == user_id
-        )
+        select(
+            UserNowlez.tier, UserNowlez.trial_ends_at, UserNowlez.tier_expires_at
+        ).where(UserNowlez.user_id == user_id)
     ).first()
     if row is None:
         return False
-    tier, trial_ends_at = row
-    if tier in _PAID_TIERS:
+    tier, trial_ends_at, tier_expires_at = row
+    if await _paid_tier_is_effectively_active(tier, tier_expires_at, user_id, session):
         return True
     if _trial_is_active(trial_ends_at):
         return True
@@ -86,14 +144,20 @@ async def is_paying_nowlez_subscriber(
     """Return True iff the user holds one of the three paid Nowlez tiers.
 
     A NULL tier (trial user or never selected) or the legacy ``'free'``
-    tier both return False.
+    tier both return False. A paid tier whose ``tier_expires_at`` is in
+    the past also returns False — an expired grant is no longer paying.
     """
     from data_access.models.user import UserNowlez
 
-    tier = session.execute(
-        select(UserNowlez.tier).where(UserNowlez.user_id == user_id)
-    ).scalar_one_or_none()
-    return tier in _PAID_TIERS
+    row = session.execute(
+        select(UserNowlez.tier, UserNowlez.tier_expires_at).where(
+            UserNowlez.user_id == user_id
+        )
+    ).first()
+    if row is None:
+        return False
+    tier, tier_expires_at = row
+    return await _paid_tier_is_effectively_active(tier, tier_expires_at, user_id, session)
 
 
 async def effective_tier(
@@ -105,18 +169,23 @@ async def effective_tier(
     future), the function returns ``'chambers'`` because trial users get
     full Chambers perks for feature gating. After the trial expires
     with no tier selected, returns None (no access).
+
+    A paid tier whose ``tier_expires_at`` is in the past is treated as
+    expired (returns None), matching casepilot's ``usage.is_tier_expired``
+    downgrade-to-free behaviour. See :func:`_tier_is_expired` for the
+    NULL/boundary semantics and the users_nowlez-vs-app.db scope note.
     """
     from data_access.models.user import UserNowlez
 
     row = session.execute(
-        select(UserNowlez.tier, UserNowlez.trial_ends_at).where(
-            UserNowlez.user_id == user_id
-        )
+        select(
+            UserNowlez.tier, UserNowlez.trial_ends_at, UserNowlez.tier_expires_at
+        ).where(UserNowlez.user_id == user_id)
     ).first()
     if row is None:
         return None
-    tier, trial_ends_at = row
-    if tier in _PAID_TIERS:
+    tier, trial_ends_at, tier_expires_at = row
+    if await _paid_tier_is_effectively_active(tier, tier_expires_at, user_id, session):
         return tier
     # Trial: NULL tier + active trial window → grant Chambers tier perks.
     if tier is None and _trial_is_active(trial_ends_at):
@@ -155,15 +224,17 @@ async def is_user_eligible_for_munshi_billing(
     if has_munshi is None:
         return False
 
-    # 3/4. Nowlez paying or in-trial → suppress Munshi.
+    # 3/4. Nowlez paying or in-trial → suppress Munshi. An *expired* paid
+    # grant (tier_expires_at in the past) no longer suppresses Munshi —
+    # Munshi billing resumes, consistent with is_paying_nowlez_subscriber.
     nowlez_row = session.execute(
-        select(UserNowlez.tier, UserNowlez.trial_ends_at).where(
-            UserNowlez.user_id == user_id
-        )
+        select(
+            UserNowlez.tier, UserNowlez.trial_ends_at, UserNowlez.tier_expires_at
+        ).where(UserNowlez.user_id == user_id)
     ).first()
     if nowlez_row is not None:
-        tier, trial_ends_at = nowlez_row
-        if tier in _PAID_TIERS:
+        tier, trial_ends_at, tier_expires_at = nowlez_row
+        if await _paid_tier_is_effectively_active(tier, tier_expires_at, user_id, session):
             return False
         if _trial_is_active(trial_ends_at):
             return False

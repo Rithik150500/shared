@@ -55,7 +55,7 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from case_billing.errors import WebhookSignatureInvalid
+from case_billing.errors import WebhookHandlerError, WebhookSignatureInvalid
 from case_billing.razorpay_client.webhooks import (
     parse_webhook_event,
     verify_webhook_signature,
@@ -105,6 +105,37 @@ _DEFERRED_EVENTS: frozenset[str] = frozenset({
     "payment.authorized",
     "order.paid",
 })
+
+
+def _renewal_grace_days() -> int:
+    """Grace buffer applied to users_nowlez.tier_expires_at past the true
+    period end (mirrors casepilot's RAZORPAY_PAYMENT_GRACE_DAYS default)."""
+    import os
+    try:
+        return int(os.environ.get("NOWLEZ_RENEWAL_GRACE_DAYS", "3") or 3)
+    except ValueError:
+        return 3
+
+
+def _stamp_nowlez_tier(session, user_id, tier, period_end) -> None:
+    """Unification P1/S2: tier truth lives on users_nowlez — stamp the
+    entitlement whenever the subscription state changes, so PG is
+    self-consistent no matter which app hosts the webhook. Best-effort:
+    a missing extension row is skipped (subscriber rows always have one)."""
+    from datetime import timedelta
+
+    from data_access.models.user import UserNowlez
+
+    ext = session.get(UserNowlez, user_id)
+    if ext is None:
+        logger.warning("users_nowlez missing for subscriber %s; tier not stamped", user_id)
+        return
+    ext.tier = tier
+    if tier is None or period_end is None:
+        ext.tier_expires_at = None
+    else:
+        ext.tier_expires_at = period_end + timedelta(days=_renewal_grace_days())
+    session.flush()
 
 
 @dataclass
@@ -202,6 +233,22 @@ async def handle_unified_webhook(
     result.event_id = event.id
     result.event_type = event.event
     result.product = product
+
+    # A handler error must NOT be recorded as processed: record_event_processed
+    # writes the idempotency row, which makes the Razorpay retry short-circuit as
+    # already_processed, so a transient failure is never reconciled and a paid
+    # customer is silently never activated (audit: webhook-handler-error-recorded-
+    # as-processed). Leave the event UNrecorded and raise so the calling route
+    # returns a non-2xx and Razorpay retries on its own (finite) schedule.
+    if result.status == STATUS_HANDLER_ERROR:
+        logger.error(
+            "Razorpay webhook handler error for %s (%s) — not recording; "
+            "surfacing the failure so Razorpay retries",
+            result.event_type, event.id,
+        )
+        raise WebhookHandlerError(
+            f"handler error for {result.event_type} ({event.id})"
+        )
 
     # Persist the idempotency + audit row. If the row already exists
     # (concurrent worker raced us) record_event_processed returns
@@ -437,6 +484,10 @@ async def _handle_subscription_activated(
     record_upgrade_conversion(session, user_id=user_id, tier=sub.tier)
     session.flush()
 
+    # Unification P1/S2: stamp tier truth onto users_nowlez.
+    _stamp_nowlez_tier(session, user_id, sub.tier, sub.period_end)
+    details["tier_stamped"] = sub.tier
+
     # 5. Send welcome template.
     phone = session.execute(
         select(User.phone).where(User.id == user_id)
@@ -469,6 +520,8 @@ async def _handle_subscription_charged(
          on the referrer side.
     3. Send ``nowlez_renewal_success_v1``.
     """
+    from datetime import datetime, timezone
+
     from data_access.models.billing import Referral, Subscription
     from data_access.models.user import User
 
@@ -495,6 +548,25 @@ async def _handle_subscription_charged(
         "subscription_id": str(sub.id),
         "user_id": str(sub.user_id),
     }
+
+    # Renewal: subscription.charged carries the NEW cycle's period bounds —
+    # roll them onto the row BEFORE stamping tier truth, so the grace-buffered
+    # users_nowlez.tier_expires_at extends on every renewal (P1/S2).
+    current_start = sub_payload.get("current_start")
+    current_end = sub_payload.get("current_end")
+    if current_start is not None:
+        sub.period_start = datetime.fromtimestamp(
+            int(current_start), tz=timezone.utc,
+        )
+    if current_end is not None:
+        sub.period_end = datetime.fromtimestamp(
+            int(current_end), tz=timezone.utc,
+        )
+    session.flush()
+
+    # Unification P1/S2: stamp tier truth onto users_nowlez.
+    _stamp_nowlez_tier(session, sub.user_id, sub.tier, sub.period_end)
+    details["tier_stamped"] = sub.tier
 
     # 1. Intro promo terminal transition.
     if sub.intro_promo_state == "in_intro":
@@ -576,6 +648,10 @@ async def _handle_subscription_terminated(
     if sub.status not in ("cancelled", "expired"):
         sub.status = "cancelled"
         session.flush()
+
+    # Unification P1/S2: the user is no longer entitled — clear tier truth.
+    _stamp_nowlez_tier(session, sub.user_id, None, None)
+    details["tier_stamped"] = None
 
     # If the user still has refresh-enabled cases, hand them off to
     # Munshi so service continues. fallback_to_munshi is idempotent.

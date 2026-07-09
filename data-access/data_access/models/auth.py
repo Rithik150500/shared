@@ -11,6 +11,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -44,6 +45,20 @@ class AuthSession(Base):
         nullable=False,
     )
     refresh_token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # Rotation lineage: every refresh issues a new row sharing the original
+    # login's family_id, so a detected token-reuse can revoke the whole family.
+    # Defaults to a fresh uuid per row (a new login starts its own family); the
+    # rotation path passes the parent's family_id explicitly.
+    family_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType, nullable=False, default=uuid.uuid4
+    )
+    # Successor pointer set when this row is rotated away. NULL on a live row and
+    # on an explicitly-revoked (logout / password-change) row — that NULL is how
+    # reuse-detection distinguishes a rotated token (replay = theft) from a
+    # logged-out one (replay = plain invalid, no alarm). Deliberately NOT a FK:
+    # a self-referential CASCADE on a users.id-cascading table is needless
+    # complexity for an internal pointer we control (cf. legacy_sqlite_id).
+    replaced_by: Mapped[uuid.UUID | None] = mapped_column(UUIDType, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -66,6 +81,8 @@ class AuthSession(Base):
             "expires_at",
             postgresql_where=text("revoked_at IS NULL"),
         ),
+        # Family-revoke (reuse-detection) lookups by family_id.
+        Index("auth_sessions_family_id_idx", "family_id"),
     )
 
 
@@ -227,4 +244,60 @@ class EmailOtpCode(Base):
             "expires_at",
             postgresql_where=text("used_at IS NULL"),
         ),
+    )
+
+
+class UserExternalIdentity(Base):
+    """Federated (OAuth/OIDC) identity linked to a core ``users`` row.
+
+    A dedicated table (rather than a ``users_nowlez.google_sub`` column) mirrors
+    how the repo separates auth artifacts (otp_codes / email_otp_codes /
+    login_requests) and generalizes to additional providers later.
+
+    The provider ``sub`` (Google's stable subject id) is the authoritative
+    anchor — emails can change/be reassigned, the ``sub`` does not — so login
+    resolves on ``(provider, provider_sub)`` first and falls back to the verified
+    email. ``email`` here is the provider-asserted address at link time, kept for
+    audit/support only; ``users.email`` remains the canonical identity email.
+    """
+
+    __tablename__ = "user_external_identities"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType,
+        primary_key=True,
+        default=uuid.uuid4,
+        # gen_random_uuid() omitted in the model (SQLite create_all chokes on the
+        # literal); set on the Postgres migration path only — same as every other
+        # model/migration pair in this package.
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(String(254), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('google')",
+            name="user_external_identities_provider_check",
+        ),
+        # One account per (provider, sub) — the stable login anchor.
+        UniqueConstraint(
+            "provider", "provider_sub", name="user_external_identities_provider_sub_key"
+        ),
+        # At most one identity per provider per user (a user links one Google acct).
+        UniqueConstraint(
+            "user_id", "provider", name="user_external_identities_user_provider_key"
+        ),
+        Index("user_external_identities_user_id_idx", "user_id"),
     )
