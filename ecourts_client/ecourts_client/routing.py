@@ -3,7 +3,12 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from ecourts_client.errors import CNRMalformed
+from ecourts_client.errors import CNRMalformed, IdentifierMalformed
+from ecourts_client.forums import (
+    FORUM_IDENTIFIER_KIND,
+    Forum,
+    IdentifierKind,
+)
 
 
 CnrScope = Literal["district", "highcourt"]
@@ -39,7 +44,13 @@ def validate_cnr_shape(cnr: str) -> None:
     if not isinstance(cnr, str) or not CNR_REGEX.match(cnr):
         raise CNRMalformed(cnr=cnr, reason="failed regex [A-Z]{2}[A-Z]{2}[A-Z0-9]{12}")
     state = cnr[:2]
-    if state not in STATE_CODES:
+    court_type = cnr[2:4]
+    # High Court CNRs carry an HC-specific 2-letter code in the state slot that
+    # is not always a geographic state (e.g. 'PH' = Punjab & Haryana HC, 'GA'
+    # shared by Gauhati HC). Only enforce the geographic-state whitelist for
+    # District Court CNRs; HC CNRs are validated by shape + the 'HC' court-type
+    # segment (the search that produced the CNR already scoped the establishment).
+    if court_type not in HC_ESTABLISHMENT_CODES and state not in STATE_CODES:
         raise CNRMalformed(cnr=cnr, reason=f"unknown state code '{state}'")
 
 
@@ -50,3 +61,37 @@ def classify_cnr(cnr: str) -> CnrScope:
     if court_type in HC_ESTABLISHMENT_CODES:
         return "highcourt"
     return "district"
+
+
+def forum_for_cnr(cnr: str) -> Forum:
+    """Map a CNR to its eCourts Forum (ecourts_district / ecourts_highcourt).
+
+    Back-compat bridge from the CNR-first world to the forum-first one: the
+    legacy ``fetch_case(cnr)`` path stays on ``classify_cnr``; this lets the new
+    forum-aware layer derive the canonical Forum for an eCourts CNR.
+    """
+    return (
+        Forum.ECOURTS_HIGHCOURT
+        if classify_cnr(cnr) == "highcourt"
+        else Forum.ECOURTS_DISTRICT
+    )
+
+
+def validate_identifier(forum: Forum, identifier: str) -> None:
+    """Validate an identifier against its forum's expected kind.
+
+    eCourts forums delegate to ``validate_cnr_shape`` (raising ``CNRMalformed``),
+    preserving the exact legacy CNR safety. Manual forums (arbitration) accept
+    any opaque ref. Other automated forums get a light non-empty check here;
+    their per-forum adapters do the stricter, format-specific validation.
+    """
+    kind = FORUM_IDENTIFIER_KIND[forum]
+    if kind is IdentifierKind.CNR:
+        validate_cnr_shape(identifier)
+        return
+    if kind is IdentifierKind.MANUAL:
+        return
+    if not isinstance(identifier, str) or not identifier.strip():
+        raise IdentifierMalformed(
+            forum=forum.value, identifier=identifier, reason="empty identifier"
+        )

@@ -42,6 +42,12 @@ class OrderRef:
     order_date: date
     order_url: str
     order_id: str
+    # Some forums (e-Jagriti/Consumer) return the order PDF INLINE as base64 on
+    # the case row rather than as a fetchable URL. When set, callers should
+    # decode + store it directly (no second fetch) and MUST strip it before
+    # persisting the Case JSON so the case blob doesn't balloon. None for
+    # URL-based forums (eCourts).
+    inline_pdf_b64: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +161,7 @@ class HCCauseListPDFRow:
     raw_text: str  # full multi-line text of the row, in reading order
     parties: str = ""
     advocates: str = ""
+    court_no: str | None = None  # "COURT NO. NN" header this row sits under; None when the PDF has no such header
 
 
 @dataclass(frozen=True)
@@ -238,6 +245,16 @@ class Case:
     # Filing date from the case-detail API (`date_of_filing`). Optional/last so
     # existing positional callers keep working. Powers the "Filed" timeline event.
     filing_date: date | None = None
+    # Routing facts to LOCATE this case's cause list (district). court_no +
+    # case_no are top-level in the caseHistory response (verified live:
+    # court_no='75'); numeric state/district/court_code come from order rows.
+    # Optional/last so positional callers keep working; serialised into
+    # snapshots via to_json/from_json so cached Cases retain routing facts.
+    case_no: str | None = None
+    court_no: str | None = None
+    state_code: str | None = None
+    district_code: str | None = None
+    court_code: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=_json_default, sort_keys=True)
@@ -288,4 +305,9 @@ def _case_from_dict(d: dict) -> Case:
         objections=objections,
         category=category,
         filing_date=_date(d.get("filing_date")),
+        case_no=d.get("case_no"),
+        court_no=d.get("court_no"),
+        state_code=d.get("state_code"),
+        district_code=d.get("district_code"),
+        court_code=d.get("court_code"),
     )

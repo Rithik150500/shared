@@ -19,9 +19,45 @@ junk bytes by scanning forward for the magic header. We do the same.
 """
 from __future__ import annotations
 
+from urllib.parse import parse_qsl, urlencode
+
 import requests
 
 from ecourts_client.errors import PDFInvalid, PDFNotFound
+
+
+# eCourts v4.0 order PDFs are obtained in TWO steps: POST ``display_pdf_new.php``
+# (encrypted params on the query string) returns
+# ``{"pdf_url": "https://csc.ecourts.gov.in/.../<hash>.pdf"}``, then GET that
+# signed alias URL. The second URL is unreachable without the first call, so the
+# parser encodes the order's params behind this scheme and ``fetch_order_pdf``
+# resolves it through the authenticated Session.
+_V4_ORDER_SCHEME = "displaypdf:"
+_V4_ORDER_FIELDS = ("filename", "caseno", "cCode", "appFlag", "state_cd", "dist_cd", "court_code")
+
+
+def encode_v4_order(row: dict) -> str:
+    """Encode a v4 order dict into a ``displaypdf:`` order_url for fetch_order_pdf."""
+    return _V4_ORDER_SCHEME + urlencode({k: str(row.get(k, "")) for k in _V4_ORDER_FIELDS})
+
+
+def fetch_order_pdf(session, url: str) -> bytes:
+    """Fetch an order PDF via the authenticated ``session``.
+
+    v4 orders (``displaypdf:`` scheme) POST ``display_pdf_new.php`` for a signed
+    ``pdf_url`` then GET it; legacy v3 orders are a direct signed GET.
+    """
+    if url.startswith(_V4_ORDER_SCHEME):
+        params = dict(parse_qsl(url[len(_V4_ORDER_SCHEME):]))
+        params["bilingual_flag"] = "1"
+        if session.jwt is None:
+            session.init()
+        resp = session._send("display_pdf_new.php", params, with_bearer=True, method="POST")
+        pdf_url = resp.get("pdf_url")
+        if not pdf_url:
+            raise PDFNotFound(f"display_pdf_new.php returned no pdf_url: {resp!r}")
+        return fetch_pdf(session._http, pdf_url)
+    return fetch_pdf(session._http, url)
 
 
 # Allow up to this many leading bytes before the %PDF- magic header. Real

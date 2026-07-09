@@ -43,6 +43,52 @@ def _assert_valid_cnr(cnr: str) -> None:
         )
 
 
+# --- Multi-forum support -------------------------------------------------
+# Forums served by the eCourts adapters — the only forums that carry a 16-char
+# CNR. Every other forum keys on forum_case_ref alone and has a NULL cnr/portal.
+_ECOURTS_FORUMS = frozenset(("ecourts_district", "ecourts_highcourt"))
+
+# Sources an automated adapter can refresh. Manual rows are excluded from
+# get_due_for_refresh so the scheduler never fetches them (and never calls
+# portal_class_from_cnr on their NULL cnr).
+_AUTO_SOURCES = frozenset(
+    ("ecourts_auto", "ejagriti_auto", "drt_auto", "sc_auto", "tribunal_auto")
+)
+
+# forum_case_ref for non-eCourts forums. Real Indian case numbers are messy —
+# e.g. "SLP(C) 12345/2026", "O.A. No. 77 of 2025", "CC/512/2024" — so allow
+# letters, digits, spaces and the punctuation those formats use: / - . , ( ) &
+_REF_REGEX = re.compile(r"^[A-Za-z0-9/\-.,()&\s]{1,128}$")
+
+
+def _ecourts_forum_for_cnr(cnr: str) -> str:
+    """Map a CNR to its eCourts forum value (district/highcourt) via classify_cnr."""
+    return "ecourts_highcourt" if classify_cnr(cnr) == "highcourt" else "ecourts_district"
+
+
+def _assert_valid_ref(forum: str, *, cnr: str | None, forum_case_ref: str) -> None:
+    """Validate identity for any forum without weakening the eCourts CNR check.
+
+    eCourts forums require a valid 16-char CNR and forum_case_ref == cnr (so the
+    partial-cnr and (forum, ref) unique keys stay aligned). Non-eCourts forums
+    must NOT carry a CNR and take a permissive free-form ref.
+    """
+    if forum in _ECOURTS_FORUMS:
+        if cnr is None:
+            raise ValueError(f"forum={forum!r} requires a CNR")
+        _assert_valid_cnr(cnr)
+        if forum_case_ref != cnr:
+            raise ValueError("eCourts forum_case_ref must equal cnr")
+    else:
+        if cnr is not None:
+            raise ValueError(f"forum={forum!r} must not carry a CNR")
+        if not isinstance(forum_case_ref, str) or not _REF_REGEX.match(forum_case_ref):
+            raise ValueError(
+                f"Invalid forum_case_ref {forum_case_ref!r}: "
+                f"must match {_REF_REGEX.pattern}",
+            )
+
+
 def upsert_case(
     s: Session,
     *,
@@ -60,6 +106,9 @@ def upsert_case(
     payload = _case_to_row_payload(case_data)
     payload["user_id"] = user_id
     payload["cnr"] = cnr
+    # eCourts identity: forum_case_ref mirrors the authoritative cnr param
+    # (payload already carries forum/source from _case_to_row_payload).
+    payload["forum_case_ref"] = cnr
     payload["client_id"] = client_id
     payload["refresh_enabled"] = refresh_enabled
     payload["notes"] = notes
@@ -81,6 +130,27 @@ def get_by_cnr(s: Session, *, user_id: uuid.UUID, cnr: str) -> Case | None:
     return s.execute(stmt).scalar_one_or_none()
 
 
+def get_by_ref(
+    s: Session, *, user_id: uuid.UUID, forum: str, forum_case_ref: str,
+    tribunal_kind: str | None = None,
+) -> Case | None:
+    """Forum-neutral lookup by the universal per-forum identity key.
+
+    For the generic ``tribunal`` forum the identity is
+    (user_id, forum, tribunal_kind, forum_case_ref) — many kinds can share a
+    forum_case_ref — so pass ``tribunal_kind`` to disambiguate (omitting it on a
+    tribunal ref can match multiple kinds and raise MultipleResultsFound). For
+    every other forum ``tribunal_kind`` is None and unused."""
+    conds = [
+        Case.user_id == user_id,
+        Case.forum == forum,
+        Case.forum_case_ref == forum_case_ref,
+    ]
+    if tribunal_kind is not None:
+        conds.append(Case.tribunal_kind == tribunal_kind)
+    return s.execute(select(Case).where(*conds)).scalar_one_or_none()
+
+
 def list_by_user(s: Session, *, user_id: uuid.UUID, limit: int = 200) -> list[Case]:
     stmt = (
         select(Case)
@@ -96,10 +166,26 @@ def exists(s: Session, *, user_id: uuid.UUID, cnr: str) -> bool:
 
 
 def get_due_for_refresh(s: Session, *, limit: int = 100) -> list[Case]:
-    """Cases needing refresh, ordered NULLS FIRST then oldest first."""
+    """Cases needing refresh, ordered NULLS FIRST then oldest first.
+
+    Multi-forum: returns rows with an automated `source` (which excludes manual /
+    arbitration rows regardless of refresh_enabled). eCourts auto rows carry a
+    CNR; non-eCourts auto rows (ejagriti_auto/drt_auto/sc_auto) carry cnr=NULL and
+    a forum_case_ref instead.
+
+    ⚠️ DEPLOY ORDER: this used to also require ``cnr IS NOT NULL`` so the
+    scheduler could safely call ``portal_class_from_cnr(case.cnr)``. That guard
+    is now lifted, so the scheduler MUST forum-branch (route cnr=NULL rows to the
+    forum-aware refresh) BEFORE this relaxed DAO reaches it — i.e. ship the
+    casepilot scheduler branch first, then bump the shared pin. See
+    ``casepilot/backend/scheduler.py`` ``_refresh_one``.
+    """
     stmt = (
         select(Case)
-        .where(Case.refresh_enabled.is_(True))
+        .where(
+            Case.refresh_enabled.is_(True),
+            Case.source.in_(_AUTO_SOURCES),
+        )
         .order_by(Case.last_refreshed_at.asc().nullsfirst())
         .limit(limit)
     )
@@ -147,6 +233,8 @@ _UPDATABLE_FIELDS = frozenset((
     "judge", "court", "portal", "refresh_enabled", "notes",
     "last_refreshed_at", "last_change_at",
     "case_detail_json", "case_detail_md", "mini_case_detail_md",
+    # Multi-forum columns (manual patch + Phase-2/3 adapter writes).
+    "forum", "forum_case_ref", "source", "filing_year", "tribunal_kind",
 ))
 
 # Subset whose change should bump last_change_at (parity with _DIFFABLE_FIELDS).
@@ -198,6 +286,9 @@ def mark_cnr_not_found(s: Session, *, user_id: uuid.UUID, cnr: str) -> Case:
         user_id=user_id,
         cnr=cnr,
         portal=classify_cnr(cnr),
+        forum=_ecourts_forum_for_cnr(cnr),
+        forum_case_ref=cnr,
+        source="ecourts_auto",
         refresh_enabled=False,
         raw_response={"cnr_not_found": True},
     )
@@ -295,7 +386,150 @@ def delete_case(s: Session, *, user_id: uuid.UUID, cnr: str) -> bool:
     return True
 
 
+def create_manual_case(
+    s: Session,
+    *,
+    user_id: uuid.UUID,
+    forum: str,
+    forum_case_ref: str | None = None,
+    tribunal_kind: str | None = None,
+    title: str | None = None,
+    court: str | None = None,
+    case_number: str | None = None,
+    filing_year: int | None = None,
+    stage: str | None = None,
+    case_status: str | None = None,
+    next_hearing_date: datetime | None = None,
+    judge: str | None = None,
+    client_id: str | None = None,
+    notes: str | None = None,
+    case_detail_json: dict[str, Any] | None = None,
+    source: str = "manual",
+    refresh_enabled: bool = False,
+) -> Case:
+    """Create-or-update a non-eCourts case with no eCourts CNR fetch.
+
+    Defaults to a MANUAL tracker (source='manual', refresh_enabled=False →
+    excluded from get_due_for_refresh). Automated non-eCourts adapters (Phase-2/3:
+    consumer/drt/sc) pass source='<forum>_auto' + refresh_enabled=True so the
+    scheduler polls them via get_due_for_refresh. Identity is
+    (user_id, forum, forum_case_ref); when the user has no official number a
+    synthetic 'm-<uuid4hex>' ref is minted so the (forum, ref) unique key still
+    has teeth. `case_detail_json` should follow the scraper-flat schema the
+    calendar/timeline extractor already reads (filing_date / next_hearing_date /
+    decision_date / hearing_history[] / interim_orders[] / final_orders[]).
+    """
+    if forum in _ECOURTS_FORUMS:
+        raise ValueError("use upsert_case for eCourts forums")
+    # tribunal_kind is set IFF forum='tribunal' (mirrors cases_tribunal_kind_consistency).
+    # The specific kind VALUE is validated in the app layer (TribunalKind) — the
+    # model deliberately doesn't enumerate kinds in a CHECK, so new kinds need no
+    # migration; here we only enforce the presence/absence invariant.
+    if forum == "tribunal":
+        if not tribunal_kind:
+            raise ValueError("forum='tribunal' requires a tribunal_kind")
+    elif tribunal_kind is not None:
+        raise ValueError(f"forum={forum!r} must not carry a tribunal_kind")
+    ref = forum_case_ref or f"m-{uuid.uuid4().hex}"
+    _assert_valid_ref(forum, cnr=None, forum_case_ref=ref)
+    detail = case_detail_json or {}
+    fields: dict[str, Any] = {
+        "tribunal_kind": tribunal_kind,
+        "title": title,
+        "court": court,
+        "case_number": case_number or ref,
+        "filing_year": filing_year,
+        "stage": stage,
+        "case_status": case_status,
+        "next_hearing_date": next_hearing_date,
+        "judge": judge,
+        "notes": notes,
+        "case_detail_json": detail,
+        "parties": detail.get("parties", []),
+        "history": detail.get("hearing_history", []),
+        "source": source,
+        "refresh_enabled": refresh_enabled,
+        "updated_at": datetime.now(timezone.utc),
+    }
+    existing = get_by_ref(
+        s, user_id=user_id, forum=forum, forum_case_ref=ref, tribunal_kind=tribunal_kind,
+    )
+    if existing is not None:
+        for k, v in fields.items():
+            setattr(existing, k, v)
+        s.flush()
+        return existing
+    row = Case(
+        user_id=user_id,
+        cnr=None,
+        portal=None,
+        forum=forum,
+        forum_case_ref=ref,
+        client_id=client_id,
+        raw_response={},
+        **fields,
+    )
+    s.add(row)
+    s.flush()
+    return row
+
+
+def update_fields_by_ref(
+    s: Session, *, user_id: uuid.UUID, forum: str, forum_case_ref: str,
+    tribunal_kind: str | None = None, **cols: Any,
+) -> list[str]:
+    """Partial patch keyed on the per-forum identity — no CNR assertion.
+
+    Sibling of update_fields for non-eCourts / manual cases. Same allow-list and
+    last_change_at bump semantics. Pass ``tribunal_kind`` for tribunal cases (the
+    identity includes it). Unknown column -> ValueError; missing row -> [].
+    """
+    unknown = set(cols) - _UPDATABLE_FIELDS
+    if unknown:
+        raise ValueError(f"update_fields_by_ref: unknown column(s) {sorted(unknown)}")
+    row = get_by_ref(
+        s, user_id=user_id, forum=forum, forum_case_ref=forum_case_ref,
+        tribunal_kind=tribunal_kind,
+    )
+    if row is None:
+        return []
+    changed: list[str] = []
+    for k, v in cols.items():
+        if getattr(row, k) != v:
+            setattr(row, k, v)
+            changed.append(k)
+    if any(c in _UPDATABLE_DIFFABLE for c in changed):
+        row.last_change_at = datetime.now(timezone.utc)
+    if changed:
+        row.updated_at = datetime.now(timezone.utc)
+    s.flush()
+    return changed
+
+
+def delete_case_by_ref(
+    s: Session, *, user_id: uuid.UUID, forum: str, forum_case_ref: str,
+    tribunal_kind: str | None = None,
+) -> bool:
+    """Delete a non-eCourts / manual Case row by its generic identity.
+
+    Manual cases have a NULL cnr, so delete_case (cnr-keyed) can't reach them.
+    Pass ``tribunal_kind`` for tribunal cases (the identity includes it).
+    CasePreferences is still cnr-keyed (generalized in Phase 1E); manual cases
+    have no prefs rows, so there is nothing extra to clean up here yet.
+    """
+    row = get_by_ref(
+        s, user_id=user_id, forum=forum, forum_case_ref=forum_case_ref,
+        tribunal_kind=tribunal_kind,
+    )
+    if row is None:
+        return False
+    s.delete(row)
+    s.flush()
+    return True
+
+
 def _case_to_row_payload(c: DataCase) -> dict[str, Any]:
+    portal = classify_cnr(c.cnr)
     return {
         "title": c.title,
         "court": c.court,
@@ -303,7 +537,12 @@ def _case_to_row_payload(c: DataCase) -> dict[str, Any]:
         "case_status": c.stage,
         "next_hearing_date": _to_dt(c.next_hearing_date),
         "judge": c.judge,
-        "portal": classify_cnr(c.cnr),
+        "portal": portal,
+        # Multi-forum: eCourts writes are always an eCourts forum, auto source,
+        # with forum_case_ref == cnr (upsert_case overrides ref with its cnr param).
+        "forum": "ecourts_highcourt" if portal == "highcourt" else "ecourts_district",
+        "source": "ecourts_auto",
+        "forum_case_ref": c.cnr,
         "parties": [asdict(p) for p in c.parties],
         "acts": [asdict(a) for a in c.acts],
         "history": [_dataclass_with_dates(h) for h in c.history],

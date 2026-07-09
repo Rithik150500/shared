@@ -556,6 +556,19 @@ def _resolve_verified_email_and_mint(
     collides with an existing second-factor account and no matching second signal
     is present.
     """
+    # A VERIFIED email alias is itself proof-of-control for its owning account:
+    # route the login straight to the owner and mint, bypassing the primary-email
+    # verification / second-factor step-up matrix below.
+    alias_owner = user_dao.resolve_verified_email_alias(session, email)
+    if alias_owner is not None:
+        if brand == "nowlez":
+            user_dao.ensure_nowlez_extension(session, alias_owner.id, name=name or "")
+        return _mint_login_response(
+            session, user=alias_owner, brand=brand, name=name,
+            user_agent=user_agent, ip_address=ip_address,
+            event_type=login_event, audit_metadata={"channel": channel, "via": "alias"},
+        )
+
     existing = user_dao.get_by_email(session, email)
     if existing is None:
         # Clean new signup: create email-only user, mark verified, mint.

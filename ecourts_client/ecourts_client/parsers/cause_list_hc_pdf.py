@@ -51,6 +51,11 @@ _SR_NO_HEADER_RE = re.compile(
 # Row-start markers: digit possibly followed by ')' or '.' (e.g. "1", "1)", "1.")
 _ROW_START_RE = re.compile(r"^\d+[)\.]?$")
 
+# Matches the "COURT NO. NN" / "COURT NO. 137A" header lines printed above each
+# court block in Delhi HC (and some other HC) cause-list PDFs. Group 1 is the
+# court number string (digits + optional trailing letter, e.g. "26", "137A").
+_COURT_HDR_RE = re.compile(r"COURT\s*NO\.?\s*([0-9]+[A-Z]?)", re.IGNORECASE)
+
 # A case_number is already complete when it ends in "/<number>/<year>" (the form
 # the CNR back-resolver's parse_pdf_case_number reads, e.g. "WP(C)/188/2026").
 _FULL_CASE_NUMBER_RE = re.compile(r"/\s*\d+\s*/\s*\d{4}\s*$")
@@ -113,6 +118,12 @@ def _rebuild_case_number_from_column(bundle: dict[str, Any]) -> str:
     if not ctype:
         return ""
     return f"{ctype}/{match.group(2)}/{match.group(3)}"
+
+
+def _court_no_from_line(line_text: str) -> str | None:
+    """Return the court number from a 'COURT NO. NN' header line, else None."""
+    m = _COURT_HDR_RE.search(line_text)
+    return m.group(1) if m else None
 
 
 def parse_hc_cause_list_pdf(pdf_bytes: bytes) -> list[HCCauseListPDFRow]:
@@ -215,6 +226,7 @@ def _walk_page(
 
     sorted_ys = sorted(full_by_y.keys())  # iterate the FULL page so section markers fire
     current_section = "DEFAULT"
+    current_court_no: str | None = None
     bundles: list[dict[str, Any]] = []
     current_bundle: dict[str, Any] | None = None
     sr_counter = starting_sr
@@ -240,6 +252,14 @@ def _walk_page(
         if in_trailer:
             continue
 
+        # Court header? (e.g. "COURT NO. 26  HON'BLE MS. JUSTICE X")
+        # Must be checked BEFORE section-marker detection so it is consumed as a
+        # non-data header and never starts/appends a data bundle.
+        chdr = _court_no_from_line(line_text)
+        if chdr is not None:
+            current_court_no = chdr
+            continue
+
         # Section marker? Track the section regardless of where it appears on the page.
         for marker in _SECTION_MARKERS:
             if marker in upper:
@@ -261,6 +281,7 @@ def _walk_page(
             current_bundle = {
                 "sr_no": sr_counter,
                 "section": current_section,
+                "court_no": current_court_no,
                 "lines": [line_text],
                 "words": list(line_words),
             }
@@ -319,4 +340,5 @@ def _bundle_to_row(bundle: dict[str, Any]) -> HCCauseListPDFRow:
         raw_text=raw_text,
         parties="",       # left empty -- structured column split is unreliable across benches
         advocates="",
+        court_no=bundle.get("court_no"),
     )

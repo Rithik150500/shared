@@ -23,7 +23,7 @@ from ecourts_client.resilience.circuit_breaker import _CircuitRegistry
 from ecourts_client.resilience.semaphore import _SemaphoreRegistry
 
 
-_DC_BASE = "https://app.ecourts.gov.in/ecourt_mobile_DC/"
+_DC_BASE = "https://app.ecourts.gov.in/services_DC_4.0/"  # eCourts mobile API v4.0 (2026-07-02)
 
 
 @pytest.fixture(autouse=True)

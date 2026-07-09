@@ -20,9 +20,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import date
+from typing import ClassVar
 
 from ecourts_client._session import Session
 from ecourts_client.errors import CNRNotFound
+from ecourts_client.forums import Forum, ForumCapabilities, IdentifierKind
 from ecourts_client.models import (
     Case,
     CaseStub,
@@ -48,12 +50,22 @@ from ecourts_client.parsers.dropdowns_extra import (
 )
 from ecourts_client.parsers.fir_search import parse_fir_search
 from ecourts_client.parsers.search import parse_case_number_search, parse_party_search
-from ecourts_client.pdf import fetch_pdf
+from ecourts_client.pdf import fetch_order_pdf, fetch_pdf
 
 
 @dataclass
 class DistrictCourtClient:
     scope: str = "district"
+    # Multi-forum adapter contract (see forums.ForumAdapter). ClassVar so it
+    # isn't a dataclass field; fetch_case/fetch_pdf below satisfy the Protocol.
+    capabilities: ClassVar[ForumCapabilities] = ForumCapabilities(
+        forum=Forum.ECOURTS_DISTRICT,
+        identifier_kind=IdentifierKind.CNR,
+        supports_fetch=True,
+        supports_search=True,
+        supports_pdf=True,
+        is_manual=False,
+    )
     _session: Session = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -72,9 +84,11 @@ class DistrictCourtClient:
         case_number = list_resp.get("case_number")
 
         if case_number:
+            # eCourts v4.0: caseHistoryWebService keys on ``cino`` (the v3 ``cinum``
+            # now returns ``error_ERROR_State_code1``). See docs/RE_NOTES_v4.md.
             history_resp = self._session.call(
                 "caseHistoryWebService.php",
-                {"cinum": cnr, "language_flag": "english", "bilingual_flag": "0"},
+                {"cino": cnr, "language_flag": "english", "bilingual_flag": "0"},
             )
         else:
             history_resp = self._session.call(
@@ -88,7 +102,7 @@ class DistrictCourtClient:
         return parse_case_history(history_resp, cnr=cnr)
 
     def fetch_pdf(self, url: str) -> bytes:
-        return fetch_pdf(self._session._http, url)
+        return fetch_order_pdf(self._session, url)
 
     # --- dropdown listers -------------------------------------------------
 
@@ -135,8 +149,9 @@ class DistrictCourtClient:
     def list_case_types(
         self, *, state_code: str, district_code: str, court_code: str
     ) -> list[CaseTypeRef]:
+        # eCourts v4.0 renamed caseNumberWebService.php -> caseTypesWebService.php.
         resp = self._session.call(
-            "caseNumberWebService.php",
+            "caseTypesWebService.php",
             {
                 "state_code": str(state_code),
                 "dist_code": str(district_code),
@@ -164,8 +179,9 @@ class DistrictCourtClient:
         njdg_est_codes within the selected complex (e.g. '1' for a single complex)."""
         if pending_disposed not in {"Pending", "Disposed", "Both"}:
             raise ValueError(f"pending_disposed must be Pending|Disposed|Both, got {pending_disposed!r}")
+        # eCourts v4.0 renamed showDataWebService.php -> searchByPartyName.php.
         resp = self._session.call(
-            "showDataWebService.php",
+            "searchByPartyName.php",
             {
                 "state_code": str(state_code),
                 "dist_code": str(district_code),

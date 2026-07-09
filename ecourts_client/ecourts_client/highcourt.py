@@ -16,9 +16,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import date
+from typing import ClassVar
 
 from ecourts_client._session import Session
 from ecourts_client.errors import CNRNotFound
+from ecourts_client.forums import Forum, ForumCapabilities, IdentifierKind
 from ecourts_client.models import (
     BenchRef,
     Case,
@@ -40,12 +42,22 @@ from ecourts_client.parsers.daily_business import parse_daily_business
 from ecourts_client.parsers.dropdowns import parse_states
 from ecourts_client.parsers.dropdowns_extra import parse_case_types, parse_hc_benches
 from ecourts_client.parsers.search import parse_case_number_search, parse_party_search
-from ecourts_client.pdf import fetch_pdf
+from ecourts_client.pdf import fetch_order_pdf, fetch_pdf
 
 
 @dataclass
 class HighCourtClient:
     scope: str = "highcourt"
+    # Multi-forum adapter contract (see forums.ForumAdapter). ClassVar so it
+    # isn't a dataclass field; fetch_case/fetch_pdf below satisfy the Protocol.
+    capabilities: ClassVar[ForumCapabilities] = ForumCapabilities(
+        forum=Forum.ECOURTS_HIGHCOURT,
+        identifier_kind=IdentifierKind.CNR,
+        supports_fetch=True,
+        supports_search=True,
+        supports_pdf=True,
+        is_manual=False,
+    )
     _session: Session = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -60,7 +72,7 @@ class HighCourtClient:
         return parse_case_history(response, cnr=cnr)
 
     def fetch_pdf(self, url: str) -> bytes:
-        return fetch_pdf(self._session._http, url)
+        return fetch_order_pdf(self._session, url)
 
     def list_states(self) -> list[StateRef]:
         resp = self._session.call(
@@ -128,6 +140,19 @@ class HighCourtClient:
         pdf_bytes = fetch_pdf(self._session._http, pdf_url)
         return parse_hc_cause_list_pdf(pdf_bytes)
 
+    def fetch_cause_list_pdf_rows_with_vc(
+        self, *, pdf_url: str
+    ) -> tuple[list[HCCauseListPDFRow], dict]:
+        """Download the HC cause-list PDF ONCE; return (parsed rows, court_no->VCAccess).
+
+        The VC map keys on the 'COURT NO. NN' header; callers join to rows by
+        row.court_no.  A single download avoids a throttle-risky second fetch.
+        """
+        from ecourts_client.vc.inline import harvest_vc_links_from_pdf
+
+        pdf_bytes = fetch_pdf(self._session._http, pdf_url)
+        return parse_hc_cause_list_pdf(pdf_bytes), harvest_vc_links_from_pdf(pdf_bytes)
+
     def list_hc_benches(self, state_code: str) -> list[BenchRef]:
         """HC bench list. Reuses districtWebService.php with action_code='benches' --
         the response key is still `districts` but the rows are benches."""
@@ -150,8 +175,11 @@ class HighCourtClient:
         Used by `bot.causelist.case_type_cache` to build the abbrev -> numeric
         code map that the CNR back-resolver needs.
         """
+        # eCourts v4.0 renamed the case-types endpoint caseNumberWebService.php
+        # -> caseTypesWebService.php (same {case_types:[{case_type:"code~name#…"}]}
+        # response, parsed by parse_case_types). See docs/RE_NOTES_v4.md.
         resp = self._session.call(
-            "caseNumberWebService.php",
+            "caseTypesWebService.php",
             {
                 "state_code": str(state_code),
                 "dist_code": str(district_code),
@@ -184,8 +212,11 @@ class HighCourtClient:
         """
         if pending_disposed not in {"Pending", "Disposed", "Both"}:
             raise ValueError(f"pending_disposed must be Pending|Disposed|Both, got {pending_disposed!r}")
+        # eCourts v4.0 renamed the party-search endpoint showDataWebService.php
+        # -> searchByPartyName.php (same establishment/caseNos response shape,
+        # parsed by parse_party_search). See docs/RE_NOTES_v4.md.
         resp = self._session.call(
-            "showDataWebService.php",
+            "searchByPartyName.php",
             {
                 "state_code": str(state_code),
                 "dist_code": str(bench_code),

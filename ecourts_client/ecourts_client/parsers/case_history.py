@@ -36,6 +36,7 @@ from ecourts_client.models import (
     OrderRef,
     Party,
 )
+from ecourts_client.pdf import encode_v4_order
 
 
 def parse_case_history(response: dict[str, Any], cnr: str) -> Case:
@@ -53,15 +54,22 @@ def parse_case_history(response: dict[str, Any], cnr: str) -> Case:
 
     title = _build_title(history)
     court = _build_court(history)
-    stage = (history.get("purpose_name") or "").strip() or "Unknown"
+    # v4 leaves purpose_name null on disposed cases; fall back to the case-type
+    # name so the stage is never a bare "Unknown".
+    stage = (
+        (history.get("purpose_name") or "").strip()
+        or (history.get("type_name") or history.get("fil_type_name") or "").strip()
+        or "Unknown"
+    )
     next_hearing = _parse_date(history.get("date_next_list"))
     filing_date = _parse_date(history.get("date_of_filing"))
     judge = (history.get("desgname") or "").strip() or None
 
     parties = _build_parties(history)
-    acts = _parse_acts_html(history.get("act") or "")
-    hearings = _parse_history_html(history.get("historyOfCaseHearing") or "")
-    orders = _parse_orders_html(history.get("interimOrder") or "") + _parse_orders_html(history.get("finalOrder") or "")
+    acts = _parse_acts(history.get("act"))
+    hearings = _parse_history(history.get("historyOfCaseHearing"))
+    orders = _parse_orders(history.get("interimOrder")) + _parse_orders(history.get("finalOrder"))
+    facts = _extract_routing_facts(history)
 
     return Case(
         cnr=cnr,
@@ -78,6 +86,9 @@ def parse_case_history(response: dict[str, Any], cnr: str) -> Case:
         objections=None,
         category=None,
         filing_date=filing_date,
+        case_no=facts["case_no"], court_no=facts["court_no"],
+        state_code=facts["state_code"], district_code=facts["district_code"],
+        court_code=facts["court_code"],
     )
 
 
@@ -128,6 +139,102 @@ def _build_parties(h: dict[str, Any]) -> list[Party]:
             advocate=(h.get("res_adv") or "").strip() or None,
         ))
     return parties
+
+
+def _parse_acts(value: Any) -> list[Act]:
+    """eCourts v4 returns a JSON list of ``{actCodeName, actSectionName}``;
+    v3 returned an HTML ``<table>``. Handle both (and null)."""
+    if isinstance(value, list):
+        acts: list[Act] = []
+        for row in value:
+            if not isinstance(row, dict):
+                continue
+            name = (row.get("actCodeName") or "").strip()
+            if name:
+                acts.append(Act(act_name=name, section=(row.get("actSectionName") or "").strip() or None))
+        return acts
+    if isinstance(value, str):
+        return _parse_acts_html(value)
+    return []
+
+
+def _parse_history(value: Any) -> list[HearingHistoryRow]:
+    """v4 returns a JSON list of hearing dicts; v3 an HTML ``<table>``; either
+    may be null (disposed cases often omit the hearing history)."""
+    if isinstance(value, list):
+        rows: list[HearingHistoryRow] = []
+        for row in value:
+            if not isinstance(row, dict):
+                continue
+            hearing_date = _parse_date(
+                row.get("business_date") or row.get("hearing_date")
+                or row.get("date_next") or row.get("nextdate")
+            )
+            if hearing_date is None:
+                continue
+            rows.append(HearingHistoryRow(
+                hearing_date=hearing_date,
+                purpose=(row.get("purpose_name") or row.get("purpose") or "").strip(),
+                judge=(row.get("judge") or row.get("desgname") or "").strip(),
+                business_on_date=(row.get("business_date") or "").strip() or None,
+            ))
+        return rows
+    if isinstance(value, str):
+        return _parse_history_html(value)
+    return []
+
+
+def _parse_orders(value: Any) -> list[OrderRef]:
+    """v4 returns a JSON list of order dicts with a root-relative ``filename``
+    (+ caseno/cCode/appFlag/state_cd/dist_cd/court_code for the POST fallback);
+    v3 returned an HTML ``<table>``."""
+    if isinstance(value, list):
+        orders: list[OrderRef] = []
+        for row in value:
+            if not isinstance(row, dict):
+                continue
+            order_date = _parse_date(
+                row.get("order_date1") or row.get("order_date1f") or row.get("order_date")
+            )
+            filename = (row.get("filename") or "").strip()
+            if order_date is None or not filename:
+                continue
+            # v4 order PDFs need a POST to display_pdf_new.php; encode the order's
+            # params so fetch_order_pdf can resolve the signed pdf_url later.
+            url = encode_v4_order(row)
+            order_id = str(row.get("order_id") or order_date.isoformat())
+            orders.append(OrderRef(order_date=order_date, order_url=url, order_id=order_id))
+        return orders
+    if isinstance(value, str):
+        return _parse_orders_html(value)
+    return []
+
+
+def _extract_routing_facts(h: dict[str, Any]) -> dict[str, str | None]:
+    """court_no + case_no are top-level in the district caseHistory response;
+    numeric state/dist/court_code come from an order row (v4 interimOrder /
+    finalOrder carry state_cd/dist_cd/court_code). Best-effort — all None on HC
+    or when the case has no orders (fallback lookup lives in the bot)."""
+    facts: dict[str, str | None] = {
+        "case_no": (h.get("case_no") or "").strip() or None,
+        "court_no": (str(h.get("court_no")).strip() or None) if h.get("court_no") is not None else None,
+        "state_code": None, "district_code": None, "court_code": None,
+    }
+    sources: list[Any] = []
+    for key in ("interimOrder", "finalOrder"):
+        val = h.get(key)
+        if isinstance(val, list):
+            sources.extend(val)
+    lo = h.get("last_order")
+    if isinstance(lo, dict):
+        sources.append(lo)
+    for r in sources:
+        if isinstance(r, dict) and (r.get("court_code")):
+            facts["state_code"] = str(r.get("state_cd") or "").strip() or None
+            facts["district_code"] = str(r.get("dist_cd") or "").strip() or None
+            facts["court_code"] = str(r.get("court_code") or "").strip() or None
+            break
+    return facts
 
 
 def _parse_acts_html(html: str) -> list[Act]:
