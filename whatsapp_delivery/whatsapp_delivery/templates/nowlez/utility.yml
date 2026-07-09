@@ -22,8 +22,8 @@ templates:
   # ---------------------------------------------------------------------------
   # 8. stop_confirmation — sent right after STOP-keyword opt-out (Task 16).
   # ---------------------------------------------------------------------------
-  - name: stop_confirmation_v2
-    full_name: nowlez_stop_confirmation_v2
+  - name: stop_confirmation_v1
+    full_name: nowlez_stop_confirmation_v1
     category: UTILITY
     languages:
       en_US:
@@ -33,7 +33,7 @@ templates:
 
           We won't send you any more case updates or hearing reminders. If you change your mind, you can re-enable them anytime from your settings.
         buttons:
-          - { type: url, text: "Open settings", url: "https://www.nowlez.com/settings" }
+          - { type: url, text: "Open settings", url: "https://app.nowlez.in/settings" }
       hi:
         header: { type: text, text: "सूचनाएँ रोक दी गईं" }
         body: |
@@ -41,14 +41,14 @@ templates:
 
           हम आपको और केस अपडेट या सुनवाई रिमाइंडर नहीं भेजेंगे। यदि आप मन बदलें, तो सेटिंग्स से कभी भी पुनः सक्षम कर सकते हैं।
         buttons:
-          - { type: url, text: "सेटिंग्स खोलें", url: "https://www.nowlez.com/settings" }
+          - { type: url, text: "सेटिंग्स खोलें", url: "https://app.nowlez.in/settings" }
 
   # ---------------------------------------------------------------------------
   # 9. signup_welcome — sent right after a successful phone-OTP signup
   #    (Task 15). 1 body var: user_name.
   # ---------------------------------------------------------------------------
-  - name: signup_welcome_v2
-    full_name: nowlez_signup_welcome_v2
+  - name: signup_welcome_v1
+    full_name: nowlez_signup_welcome_v1
     category: UTILITY
     languages:
       en_US:
@@ -58,7 +58,7 @@ templates:
 
           You'll now get WhatsApp updates when your cases see new orders, hearing changes, or other important events. You can manage which notifications you receive at any time.
         buttons:
-          - { type: url, text: "Notification settings", url: "https://www.nowlez.com/settings" }
+          - { type: url, text: "Notification settings", url: "https://app.nowlez.in/settings" }
         variables:
           - { name: user_name, position: 1, location: body }
       hi:
@@ -68,7 +68,7 @@ templates:
 
           अब जब भी आपके केसों में नया आदेश, सुनवाई परिवर्तन या अन्य महत्वपूर्ण घटनाएँ हों, आपको WhatsApp पर सूचनाएँ मिलेंगी। आप कौन-सी सूचनाएँ प्राप्त करते हैं, इसे कभी भी प्रबंधित कर सकते हैं।
         buttons:
-          - { type: url, text: "सूचना सेटिंग्स", url: "https://www.nowlez.com/settings" }
+          - { type: url, text: "सूचना सेटिंग्स", url: "https://app.nowlez.in/settings" }
         variables:
           - { name: user_name, position: 1, location: body }
 
@@ -77,8 +77,8 @@ templates:
   #     out (Task 15 / PATCH /me/notification-preferences with
   #     is_re_enabling=True per plan line 2540).
   # ---------------------------------------------------------------------------
-  - name: resumed_v2
-    full_name: nowlez_resumed_v2
+  - name: resumed_v1
+    full_name: nowlez_resumed_v1
     category: UTILITY
     languages:
       en_US:
@@ -88,7 +88,7 @@ templates:
 
           You'll start receiving case updates and hearing reminders again. You can fine-tune which notifications you want from your settings anytime.
         buttons:
-          - { type: url, text: "Notification settings", url: "https://www.nowlez.com/settings" }
+          - { type: url, text: "Notification settings", url: "https://app.nowlez.in/settings" }
       hi:
         header: { type: text, text: "सूचनाएँ पुनः सक्षम" }
         body: |
@@ -96,7 +96,7 @@ templates:
 
           अब आपको केस अपडेट और सुनवाई रिमाइंडर पुनः मिलना शुरू हो जाएँगे। कौन-सी सूचनाएँ चाहिए, इसे सेटिंग्स से कभी भी बदल सकते हैं।
         buttons:
-          - { type: url, text: "सूचना सेटिंग्स", url: "https://www.nowlez.com/settings" }
+          - { type: url, text: "सूचना सेटिंग्स", url: "https://app.nowlez.in/settings" }
 
   # ---------------------------------------------------------------------------
   # 12. test_smoke — internal canary used by Task 2 / Task 18 (smoke test
@@ -114,6 +114,6 @@ templates:
 
           Message: {{1}} (smoke).
         buttons:
-          - { type: url, text: "Open Nowlez", url: "https://www.nowlez.com/" }
+          - { type: url, text: "Open Nowlez", url: "https://app.nowlez.in/" }
         variables:
           - { name: message, position: 1, location: body }

@@ -33,8 +33,8 @@ def _run(coro):
 
 def test_registry_returns_hindi_variant():
     """Smoke check: the registry has the hi_IN variant filed."""
-    t = get_template("nowlez_signup_welcome_v2", "hi_IN")
-    assert t.full_name == "nowlez_signup_welcome_v2"
+    t = get_template("nowlez_signup_welcome_v1", "hi_IN")
+    assert t.full_name == "nowlez_signup_welcome_v1"
     # Body must contain at least one Devanagari character.
     assert any("ऀ" <= ch <= "ॿ" for ch in t.body), (
         f"Hindi variant body has no Devanagari: {t.body!r}"
@@ -57,7 +57,7 @@ def test_hi_in_locale_routes_to_hindi_template_variant(
     job_id = _run(
         q.enqueue_send_template(
             to="+919999999999",
-            template_name="nowlez_signup_welcome_v2",
+            template_name="nowlez_signup_welcome_v1",
             language="hi_IN",
             variables={"user_name": "आशा"},
             brand="nowlez",
@@ -73,4 +73,4 @@ def test_hi_in_locale_routes_to_hindi_template_variant(
     # Assert the Meta payload used the hi_IN language code.
     body = json.loads(route.calls.last.request.content.decode())
     assert body["template"]["language"] == {"code": "hi_IN"}
-    assert body["template"]["name"] == "nowlez_signup_welcome_v2"
+    assert body["template"]["name"] == "nowlez_signup_welcome_v1"

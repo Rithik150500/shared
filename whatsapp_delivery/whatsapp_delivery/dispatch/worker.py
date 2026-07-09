@@ -441,21 +441,40 @@ def _resolve_document_url(
     return data
 
 
-def _bind_wamid_to_delivery_log(rq_job_id: str | None, wamid: str) -> None:
-    """Best-effort: link Meta's wamid back to the enqueue-side delivery row.
+def _bind_wamid_to_delivery_log(
+    rq_job_id: str | None,
+    wamid: str,
+    *,
+    user_id: str | None = None,
+    template_name: str | None = None,
+    brand: str | None = None,
+    send_date_ist=None,
+) -> None:
+    """Best-effort: link Meta's wamid to the delivery-log row.
 
-    Failures here are swallowed (and Sentry'd) because the send already
-    succeeded — Munshi-side analytics can rebuild the link from Meta's
-    status webhook if this misses.
+    Resolves the row deterministically (by ``rq_job_id``, else the daily-claim
+    natural key ``(user_id, template_name, send_date_ist)``, else inserts a
+    wamid-bearing row) so Meta's status webhook — which matches on
+    ``meta_message_id`` — can always update it. ``rq_job_id`` alone is
+    unreliable in the live two-worker topology. Failures are swallowed (and
+    Sentry'd) because the send itself already succeeded.
     """
-    if not (rq_job_id and wamid):
+    if not wamid:
         return
     try:
         from data_access.daos.whatsapp_dao import set_meta_message_id
         from data_access.engine import get_session
 
         with get_session() as s:
-            set_meta_message_id(s, rq_job_id=rq_job_id, meta_message_id=wamid)
+            set_meta_message_id(
+                s,
+                rq_job_id=rq_job_id,
+                meta_message_id=wamid,
+                user_id=user_id,
+                template_name=template_name,
+                brand=brand,
+                send_date_ist=send_date_ist,
+            )
     except Exception as e:  # pragma: no cover — best-effort linkage
         log.warning("failed to bind wamid=%s to job=%s: %s", wamid, rq_job_id, e)
 
@@ -651,7 +670,18 @@ def _do_send_template(
         )
         raise
 
-    _bind_wamid_to_delivery_log(_current_rq_job_id(), wamid)
+    _bind_wamid_to_delivery_log(
+        _current_rq_job_id(),
+        wamid,
+        user_id=user_id,
+        template_name=template_name,
+        brand=brand,
+        send_date_ist=(
+            _today_ist()
+            if (dedup_per_day and template_name in _DEDUP_DAILY_TEMPLATES and user_id)
+            else None
+        ),
+    )
     return wamid
 
 
@@ -745,7 +775,18 @@ def _do_send_template_with_components(
         )
         raise
 
-    _bind_wamid_to_delivery_log(_current_rq_job_id(), wamid)
+    _bind_wamid_to_delivery_log(
+        _current_rq_job_id(),
+        wamid,
+        user_id=user_id,
+        template_name=template_name,
+        brand=brand,
+        send_date_ist=(
+            _today_ist()
+            if (dedup_per_day and template_name in _DEDUP_DAILY_TEMPLATES and user_id)
+            else None
+        ),
+    )
     return wamid
 
 

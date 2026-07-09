@@ -28,11 +28,3 @@ test = [
 
 [tool.setuptools.packages.find]
 include = ["whatsapp_delivery*"]
-
-# The template registry is YAML data files under templates/{nowlez,munshi}/.
-# Without this, the wheel ships only the .py loader and the installed registry
-# is EMPTY — every enqueue_send_template (registry path) raises TemplateNotFound.
-# (The bot's low-level positional sends bypass the registry, which is why this
-# went unnoticed.) Ship the data files so the registry loads in deployed images.
-[tool.setuptools.package-data]
-"whatsapp_delivery.templates" = ["*.yml", "nowlez/*.yml", "munshi/*.yml"]

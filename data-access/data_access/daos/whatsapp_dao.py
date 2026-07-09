@@ -64,16 +64,75 @@ def log_send_enqueued(
 
 
 def set_meta_message_id(
-    session: Session, *, rq_job_id: str, meta_message_id: str,
+    session: Session,
+    *,
+    rq_job_id: str | None,
+    meta_message_id: str,
+    user_id: uuid.UUID | str | None = None,
+    template_name: str | None = None,
+    brand: str | None = None,
+    send_date_ist=None,
 ) -> int:
-    """Link Meta's wamid back to the enqueue row keyed by rq_job_id."""
-    result = session.execute(
-        update(WhatsAppDeliveryLog)
-        .where(WhatsAppDeliveryLog.rq_job_id == rq_job_id)
-        .values(meta_message_id=meta_message_id)
-    )
+    """Link Meta's wamid to a delivery-log row so status webhooks can match it.
+
+    The wamid MUST land on a row (status receipts match on ``meta_message_id``),
+    but binding by ``rq_job_id`` alone is unreliable in the live two-worker
+    topology (embedded app worker + dedicated worker) — the row created by
+    ``_claim_daily_send_slot`` is keyed by ``(user_id, template_name,
+    send_date_ist)``, not ``rq_job_id`` in a way the bind reliably resolves. So
+    resolve the row deterministically:
+
+      1. by ``rq_job_id`` (producer-side ``log_send_enqueued`` rows), else
+      2. by the daily-claim natural key ``(user_id, template_name,
+         send_date_ist)``, else
+      3. if no row exists (transactional sends that never logged), INSERT one.
+
+    Only ever fills a NULL ``meta_message_id`` (never overwrites).
+    """
+    if rq_job_id:
+        result = session.execute(
+            update(WhatsAppDeliveryLog)
+            .where(
+                WhatsAppDeliveryLog.rq_job_id == rq_job_id,
+                WhatsAppDeliveryLog.meta_message_id.is_(None),
+            )
+            .values(meta_message_id=meta_message_id)
+        )
+        if result.rowcount:
+            session.commit()
+            return result.rowcount
+
+    if user_id and template_name and send_date_ist is not None:
+        result = session.execute(
+            update(WhatsAppDeliveryLog)
+            .where(
+                WhatsAppDeliveryLog.user_id == user_id,
+                WhatsAppDeliveryLog.template_name == template_name,
+                WhatsAppDeliveryLog.send_date_ist == send_date_ist,
+                WhatsAppDeliveryLog.meta_message_id.is_(None),
+            )
+            .values(meta_message_id=meta_message_id)
+        )
+        if result.rowcount:
+            session.commit()
+            return result.rowcount
+
+    if user_id and template_name and brand:
+        session.add(
+            WhatsAppDeliveryLog(
+                user_id=user_id,
+                template_name=template_name,
+                brand=brand,
+                rq_job_id=rq_job_id,
+                meta_message_id=meta_message_id,
+                delivery_status="sent",
+            )
+        )
+        session.commit()
+        return 1
+
     session.commit()
-    return result.rowcount
+    return 0
 
 
 def update_delivery_status(

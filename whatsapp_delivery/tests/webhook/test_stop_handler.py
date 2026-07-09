@@ -128,7 +128,7 @@ def test_stop_handler_enqueues_confirmation_template(db_session, monkeypatch):
     _run(handle_stop_keyword(user.id, _msg(), db_session))
 
     assert sent["to"] == "+919876543210"
-    assert sent["template_name"] == "nowlez_stop_confirmation_v2"
+    assert sent["template_name"] == "nowlez_stop_confirmation_v1"
     assert sent["brand"] == "nowlez"
     assert sent["language"] == "en_US"
     assert sent["variables"] == {}

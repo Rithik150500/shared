@@ -45,7 +45,7 @@ def test_enqueue_template_then_worker_executes_and_returns_wamid(
     job_id = _run(
         q.enqueue_send_template(
             to="+919999999999",
-            template_name="nowlez_signup_welcome_v2",
+            template_name="nowlez_signup_welcome_v1",
             language="en_US",
             variables={"user_name": "Asha"},
             brand="nowlez",

@@ -61,7 +61,7 @@ def test_24h_error_on_template_path_also_surfaces(caplog):
     with pytest.raises(Meta24HourWindowExpired):
         _do_send_template(
             to="+919999999999",
-            template_name="nowlez_signup_welcome_v2",
+            template_name="nowlez_signup_welcome_v1",
             language="en_US",
             variables={"user_name": "Asha"},
             brand="nowlez",

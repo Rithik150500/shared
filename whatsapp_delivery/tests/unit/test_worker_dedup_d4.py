@@ -99,7 +99,7 @@ def test_send_template_first_call_with_dedup_key_sends(fake_redis):
     )
     wamid = w._do_send_template(
         to="+919999999999",
-        template_name="nowlez_signup_welcome_v2",
+        template_name="nowlez_signup_welcome_v1",
         language="en_US",
         variables={"user_name": "Asha"},
         brand="nowlez",
@@ -124,7 +124,7 @@ def test_send_template_second_call_with_same_dedup_key_short_circuits(fake_redis
     )
     common = dict(
         to="+919999999999",
-        template_name="nowlez_signup_welcome_v2",
+        template_name="nowlez_signup_welcome_v1",
         language="en_US",
         variables={"user_name": "Asha"},
         brand="nowlez",
@@ -156,7 +156,7 @@ def test_send_template_with_components_first_call_with_dedup_key_sends(fake_redi
     )
     wamid = w._do_send_template_with_components(
         to="+919999999999",
-        template_name="nowlez_signup_welcome_v2",
+        template_name="nowlez_signup_welcome_v1",
         language="en_US",
         body_variables=["Asha"],
         brand="nowlez",
@@ -178,7 +178,7 @@ def test_send_template_with_components_second_call_short_circuits(fake_redis):
     )
     common = dict(
         to="+919999999999",
-        template_name="nowlez_signup_welcome_v2",
+        template_name="nowlez_signup_welcome_v1",
         language="en_US",
         body_variables=["Asha"],
         brand="nowlez",
