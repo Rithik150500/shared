@@ -51,6 +51,8 @@ class TribunalKind(str, Enum):
     DRT = "drt"        # Debt Recovery Tribunal
     DRAT = "drat"      # Debt Recovery Appellate Tribunal
     SAT = "sat"        # Securities Appellate Tribunal
+    LABOUR_COURT = "labour_court"                # State Labour Court (ID Act §2A) — manual, no online source
+    INDUSTRIAL_TRIBUNAL = "industrial_tribunal"  # State Industrial Tribunal-cum-Labour Court (ID Act §33A/§33(2B)) — manual
 
 
 class IdentifierKind(str, Enum):
