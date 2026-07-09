@@ -33,6 +33,7 @@ from data_access.models import (
 )
 from data_access.models.audit import AuditLog
 from data_access.models.auth import AuthSession, LoginRequest
+from data_access.models.user import UserNowlez
 from data_access.models.whatsapp import MessageLog
 
 
@@ -443,6 +444,340 @@ def test_merge_users_repoint_true_external_identity_moves_when_no_collision(db_s
     # str or a uuid.UUID depending on identity-map/expiry state — compare via
     # str() on both sides to be robust either way.
     assert str(db_session.get(UserExternalIdentity, ext_id).user_id) == str(survivor.id)
+
+
+# ---------------------------------------------------------------------------
+# Move-or-drop on unique-key collision (review fix): case_preferences,
+# team_members, referrals.referred_user_id, munshi_invoices.
+# ---------------------------------------------------------------------------
+
+
+def test_merge_users_repoint_true_case_preferences_collision_drops_absorbed(db_session):
+    survivor = _older_survivor(db_session, phone="+919876500034")
+    absorbed = _newer_absorbed(db_session, phone="+919876500035")
+
+    # Both accounts already track the SAME cnr -> collides on the composite PK.
+    survivor_pref = CasePreferences(user_id=survivor.id, cnr="DLHC010000082024", alert_level="all")
+    db_session.add(survivor_pref)
+    db_session.flush()
+    absorbed_pref = CasePreferences(
+        user_id=absorbed.id, cnr="DLHC010000082024", alert_level="orders_only",
+    )
+    db_session.add(absorbed_pref)
+    db_session.flush()
+
+    # A non-overlapping row on the absorbed side should still move normally.
+    absorbed_pref_unique = CasePreferences(user_id=absorbed.id, cnr="DLHC010000092024")
+    db_session.add(absorbed_pref_unique)
+    db_session.flush()
+
+    user_dao.merge_users(
+        session=db_session, survivor_id=survivor.id, absorbed_id=absorbed.id, repoint=True,
+    )
+
+    # Survivor's original row wins, unchanged.
+    kept = db_session.get(CasePreferences, (survivor.id, "DLHC010000082024"))
+    assert kept is not None
+    assert kept.alert_level == "all"
+
+    # Absorbed's colliding row is gone entirely (dropped, not moved/duplicated).
+    assert db_session.get(CasePreferences, (absorbed.id, "DLHC010000082024")) is None
+    all_rows_for_cnr = db_session.execute(
+        select(CasePreferences).where(CasePreferences.cnr == "DLHC010000082024")
+    ).scalars().all()
+    assert len(all_rows_for_cnr) == 1
+
+    # Non-overlapping row moved.
+    moved = db_session.get(CasePreferences, (survivor.id, "DLHC010000092024"))
+    assert moved is not None
+
+    audit_event = db_session.execute(
+        select(AuditLog).where(AuditLog.event_type == "account.merge_repointed")
+    ).scalars().all()[-1]
+    counts = audit_event.metadata_["counts"]
+    assert counts["case_preferences"] >= 1
+    assert counts.get("_dropped_duplicates", {}).get("case_preferences", 0) >= 1
+
+
+def test_merge_users_repoint_true_team_members_collision_drops_absorbed(db_session):
+    survivor = _older_survivor(db_session, phone="+919876500036")
+    absorbed = _newer_absorbed(db_session, phone="+919876500037")
+
+    shared_team = Team(owner_id=survivor.id, name="Shared Team")
+    other_team = Team(owner_id=survivor.id, name="Other Team")
+    db_session.add_all([shared_team, other_team])
+    db_session.flush()
+
+    # Both are members of the SAME team -> collides on (team_id, user_id).
+    survivor_membership = TeamMember(team_id=shared_team.id, user_id=survivor.id, role="owner")
+    db_session.add(survivor_membership)
+    db_session.flush()
+    absorbed_membership = TeamMember(team_id=shared_team.id, user_id=absorbed.id, role="editor")
+    db_session.add(absorbed_membership)
+    db_session.flush()
+
+    # Non-overlapping membership on a different team should still move.
+    absorbed_other_membership = TeamMember(team_id=other_team.id, user_id=absorbed.id, role="viewer")
+    db_session.add(absorbed_other_membership)
+    db_session.flush()
+    absorbed_membership_id = absorbed_membership.id
+    absorbed_other_membership_id = absorbed_other_membership.id
+    survivor_membership_id = survivor_membership.id
+
+    user_dao.merge_users(db_session, survivor_id=survivor.id, absorbed_id=absorbed.id, repoint=True)
+
+    # Survivor's original membership row untouched.
+    kept = db_session.get(TeamMember, survivor_membership_id)
+    assert kept is not None
+    assert str(kept.user_id) == str(survivor.id)
+    assert kept.role == "owner"
+
+    # Absorbed's colliding membership dropped, not duplicated.
+    assert db_session.get(TeamMember, absorbed_membership_id) is None
+    remaining_on_shared = db_session.execute(
+        select(TeamMember).where(TeamMember.team_id == shared_team.id)
+    ).scalars().all()
+    assert len(remaining_on_shared) == 1
+
+    # Non-overlapping membership moved.
+    moved = db_session.get(TeamMember, absorbed_other_membership_id)
+    assert moved is not None
+    assert str(moved.user_id) == str(survivor.id)
+
+    audit_event = db_session.execute(
+        select(AuditLog).where(AuditLog.event_type == "account.merge_repointed")
+    ).scalars().all()[-1]
+    counts = audit_event.metadata_["counts"]
+    assert counts.get("_dropped_duplicates", {}).get("team_members", 0) >= 1
+
+
+def test_merge_users_repoint_true_referrals_referred_collision_drops_absorbed(db_session):
+    survivor = _older_survivor(db_session, phone="+919876500038")
+    absorbed = _newer_absorbed(db_session, phone="+919876500039")
+    referrer_a = _make_user(db_session, phone="+919876500040")
+    referrer_b = _make_user(db_session, phone="+919876500041")
+    referred_c = _make_user(db_session, phone="+919876500042")
+
+    # Both survivor and absorbed were ALREADY referred (referred_user_id is
+    # UNIQUE) -> collides.
+    survivor_referred_row = Referral(referrer_user_id=referrer_a.id, referred_user_id=survivor.id)
+    db_session.add(survivor_referred_row)
+    db_session.flush()
+    absorbed_referred_row = Referral(referrer_user_id=referrer_b.id, referred_user_id=absorbed.id)
+    db_session.add(absorbed_referred_row)
+    db_session.flush()
+
+    # referrer_user_id has no unique constraint -- absorbed-as-referrer still
+    # moves normally (blind update, no collision handling needed).
+    absorbed_as_referrer_row = Referral(referrer_user_id=absorbed.id, referred_user_id=referred_c.id)
+    db_session.add(absorbed_as_referrer_row)
+    db_session.flush()
+
+    survivor_referred_id = survivor_referred_row.id
+    absorbed_referred_id = absorbed_referred_row.id
+    absorbed_as_referrer_id = absorbed_as_referrer_row.id
+
+    user_dao.merge_users(db_session, survivor_id=survivor.id, absorbed_id=absorbed.id, repoint=True)
+
+    # Survivor's own referred-row untouched.
+    kept = db_session.get(Referral, survivor_referred_id)
+    assert kept is not None
+    assert str(kept.referred_user_id) == str(survivor.id)
+
+    # Absorbed's colliding referred-row dropped, not duplicated (survivor
+    # already has a referred_user_id row -- UNIQUE would otherwise blow up).
+    assert db_session.get(Referral, absorbed_referred_id) is None
+    remaining_referred_rows = db_session.execute(
+        select(Referral).where(Referral.referred_user_id == survivor.id)
+    ).scalars().all()
+    assert len(remaining_referred_rows) == 1
+
+    # referrer_user_id row (no unique constraint) still moves via blind update.
+    moved_referrer_row = db_session.get(Referral, absorbed_as_referrer_id)
+    assert moved_referrer_row is not None
+    assert str(moved_referrer_row.referrer_user_id) == str(survivor.id)
+
+    audit_event = db_session.execute(
+        select(AuditLog).where(AuditLog.event_type == "account.merge_repointed")
+    ).scalars().all()[-1]
+    counts = audit_event.metadata_["counts"]
+    assert counts.get("_dropped_duplicates", {}).get("referrals", 0) >= 1
+
+
+def test_merge_users_repoint_true_munshi_invoices_collision_drops_absorbed(db_session):
+    survivor = _older_survivor(db_session, phone="+919876500043")
+    absorbed = _newer_absorbed(db_session, phone="+919876500044")
+
+    cycle_start = datetime.now(timezone.utc) - timedelta(days=30)
+    cycle_end = datetime.now(timezone.utc)
+
+    # Both accounts have an invoice for the SAME (cycle_start, cycle_end).
+    survivor_invoice = MunshiInvoice(
+        user_id=survivor.id, cycle_start=cycle_start, cycle_end=cycle_end,
+        case_count=3, amount_paise=30000,
+    )
+    db_session.add(survivor_invoice)
+    db_session.flush()
+    absorbed_invoice = MunshiInvoice(
+        user_id=absorbed.id, cycle_start=cycle_start, cycle_end=cycle_end,
+        case_count=1, amount_paise=10000,
+    )
+    db_session.add(absorbed_invoice)
+    db_session.flush()
+
+    # Non-overlapping cycle on absorbed should still move.
+    other_cycle_start = cycle_start - timedelta(days=30)
+    other_cycle_end = cycle_start
+    absorbed_other_invoice = MunshiInvoice(
+        user_id=absorbed.id, cycle_start=other_cycle_start, cycle_end=other_cycle_end,
+        case_count=2, amount_paise=20000,
+    )
+    db_session.add(absorbed_other_invoice)
+    db_session.flush()
+
+    survivor_invoice_id = survivor_invoice.id
+    absorbed_invoice_id = absorbed_invoice.id
+    absorbed_other_invoice_id = absorbed_other_invoice.id
+
+    user_dao.merge_users(db_session, survivor_id=survivor.id, absorbed_id=absorbed.id, repoint=True)
+
+    # Survivor's original invoice untouched (survivor wins).
+    kept = db_session.get(MunshiInvoice, survivor_invoice_id)
+    assert kept is not None
+    assert kept.case_count == 3
+    assert str(kept.user_id) == str(survivor.id)
+
+    # Absorbed's colliding invoice dropped, not duplicated.
+    assert db_session.get(MunshiInvoice, absorbed_invoice_id) is None
+    remaining_for_cycle = db_session.execute(
+        select(MunshiInvoice).where(
+            MunshiInvoice.cycle_start == cycle_start, MunshiInvoice.cycle_end == cycle_end,
+        )
+    ).scalars().all()
+    assert len(remaining_for_cycle) == 1
+
+    # Non-overlapping-cycle invoice moved.
+    moved = db_session.get(MunshiInvoice, absorbed_other_invoice_id)
+    assert moved is not None
+    assert str(moved.user_id) == str(survivor.id)
+
+    audit_event = db_session.execute(
+        select(AuditLog).where(AuditLog.event_type == "account.merge_repointed")
+    ).scalars().all()[-1]
+    counts = audit_event.metadata_["counts"]
+    assert counts.get("_dropped_duplicates", {}).get("munshi_invoices", 0) >= 1
+
+
+def test_plan_merge_repoint_reports_would_drop_for_case_preferences_collision(db_session):
+    survivor = _older_survivor(db_session, phone="+919876500045")
+    absorbed = _newer_absorbed(db_session, phone="+919876500046")
+
+    db_session.add(CasePreferences(user_id=survivor.id, cnr="DLHC010000102024"))
+    db_session.flush()
+    db_session.add(CasePreferences(user_id=absorbed.id, cnr="DLHC010000102024"))
+    db_session.add(CasePreferences(user_id=absorbed.id, cnr="DLHC010000112024"))
+    db_session.flush()
+
+    plan = user_dao.plan_merge_repoint(db_session, survivor_id=survivor.id, absorbed_id=absorbed.id)
+
+    # 1 row moves cleanly, 1 would collide/drop.
+    assert plan["case_preferences"] == 1
+    assert plan.get("case_preferences_dropped_dupes", plan.get("case_preferences_would_drop", 0)) == 1
+
+    # Dry-run: writes NOTHING.
+    assert db_session.get(CasePreferences, (absorbed.id, "DLHC010000102024")) is not None
+    assert db_session.get(CasePreferences, (absorbed.id, "DLHC010000112024")) is not None
+    assert db_session.get(User, absorbed.id) is not None
+
+
+def test_plan_merge_repoint_reports_would_drop_for_team_members_collision(db_session):
+    survivor = _older_survivor(db_session, phone="+919876500047")
+    absorbed = _newer_absorbed(db_session, phone="+919876500048")
+    team = Team(owner_id=survivor.id, name="Plan Team")
+    db_session.add(team)
+    db_session.flush()
+    db_session.add(TeamMember(team_id=team.id, user_id=survivor.id, role="owner"))
+    db_session.flush()
+    db_session.add(TeamMember(team_id=team.id, user_id=absorbed.id, role="viewer"))
+    db_session.flush()
+
+    plan = user_dao.plan_merge_repoint(db_session, survivor_id=survivor.id, absorbed_id=absorbed.id)
+
+    assert plan["team_members"] == 0
+    assert plan.get("team_members_dropped_dupes", plan.get("team_members_would_drop", 0)) == 1
+
+
+def test_plan_merge_repoint_reports_would_drop_for_referrals_collision(db_session):
+    survivor = _older_survivor(db_session, phone="+919876500049")
+    absorbed = _newer_absorbed(db_session, phone="+919876500050")
+    referrer_a = _make_user(db_session, phone="+919876500051")
+    referrer_b = _make_user(db_session, phone="+919876500052")
+
+    db_session.add(Referral(referrer_user_id=referrer_a.id, referred_user_id=survivor.id))
+    db_session.flush()
+    db_session.add(Referral(referrer_user_id=referrer_b.id, referred_user_id=absorbed.id))
+    db_session.flush()
+
+    plan = user_dao.plan_merge_repoint(db_session, survivor_id=survivor.id, absorbed_id=absorbed.id)
+
+    assert plan.get("referrals_dropped_dupes", plan.get("referrals_would_drop", 0)) == 1
+
+
+def test_plan_merge_repoint_reports_would_drop_for_munshi_invoices_collision(db_session):
+    survivor = _older_survivor(db_session, phone="+919876500053")
+    absorbed = _newer_absorbed(db_session, phone="+919876500054")
+    cycle_start = datetime.now(timezone.utc) - timedelta(days=30)
+    cycle_end = datetime.now(timezone.utc)
+
+    db_session.add(
+        MunshiInvoice(
+            user_id=survivor.id, cycle_start=cycle_start, cycle_end=cycle_end,
+            case_count=1, amount_paise=10000,
+        )
+    )
+    db_session.flush()
+    db_session.add(
+        MunshiInvoice(
+            user_id=absorbed.id, cycle_start=cycle_start, cycle_end=cycle_end,
+            case_count=1, amount_paise=10000,
+        )
+    )
+    db_session.flush()
+
+    plan = user_dao.plan_merge_repoint(db_session, survivor_id=survivor.id, absorbed_id=absorbed.id)
+
+    assert plan["munshi_invoices"] == 0
+    assert (
+        plan.get("munshi_invoices_dropped_dupes", plan.get("munshi_invoices_would_drop", 0)) == 1
+    )
+
+
+# ---------------------------------------------------------------------------
+# referred_by SET-NULL re-point (review fix): attribution should follow the
+# merge, not be lost, when the absorbed user row is deleted.
+# ---------------------------------------------------------------------------
+
+
+def test_merge_users_repoint_true_referred_by_repointed_not_nulled(db_session):
+    from sqlalchemy import update as sa_update
+
+    survivor = _older_survivor(db_session, phone="+919876500055")
+    absorbed = _newer_absorbed(db_session, phone="+919876500056")
+    referred_child = _make_user(db_session, phone="+919876500057")
+    user_dao.ensure_nowlez_extension(db_session, referred_child.id, name="Child")
+    db_session.execute(
+        sa_update(UserNowlez)
+        .where(UserNowlez.user_id == referred_child.id)
+        .values(referred_by=absorbed.id)
+    )
+    db_session.flush()
+
+    user_dao.merge_users(db_session, survivor_id=survivor.id, absorbed_id=absorbed.id, repoint=True)
+
+    refreshed = db_session.get(UserNowlez, referred_child.id)
+    assert refreshed is not None
+    assert refreshed.referred_by is not None
+    assert str(refreshed.referred_by) == str(survivor.id)
 
 
 # ---------------------------------------------------------------------------
