@@ -7,6 +7,7 @@ Surface area today:
 - upload_media               POST {phone_id}/media (multipart) -> media_id
 - send_document              type=document referencing a media_id
 - send_document_from_bytes   convenience: upload + send in one call
+- send_video                 type=video via public link or media_id
 
 Why two-step (upload then send) instead of `link`-based send?
 WhatsApp's `link` mode requires the document to be fetched from a public URL,
@@ -303,6 +304,32 @@ class MetaClient:
         return self.send_document(
             to, media_id=media_id, filename=filename, caption=caption,
         )
+
+    def send_video(
+        self,
+        to: str,
+        *,
+        link: str | None = None,
+        media_id: str | None = None,
+        caption: str | None = None,
+    ) -> str:
+        """Send a video by public URL (`link`) or an uploaded `media_id`.
+
+        Provide exactly one of `link` / `media_id`. `caption` shows below the
+        video and supports basic WhatsApp formatting (*bold*, _italic_).
+        Returns the wamid on success.
+        """
+        if bool(link) == bool(media_id):
+            raise ValueError("send_video requires exactly one of link / media_id")
+        video: dict[str, Any] = {"link": link} if link else {"id": media_id}
+        if caption:
+            video["caption"] = caption[:_MAX_DOCUMENT_CAPTION]
+        return self._send({
+            "messaging_product": "whatsapp",
+            "to": to.lstrip("+"),
+            "type": "video",
+            "video": video,
+        })
 
     def _send(self, body: dict[str, Any]) -> str:
         url = f"{_GRAPH_BASE}/{self.phone_number_id}/messages"
