@@ -345,3 +345,45 @@ def test_send_document_from_bytes_uploads_then_sends():
         caption="cap",
     )
     assert wamid == "wamid.bytes"
+
+
+# ---------------------------------------------------------------------------
+# send_video
+# ---------------------------------------------------------------------------
+
+
+import json
+import pytest
+
+
+@respx.mock
+def test_send_video_link_posts_video_payload():
+    route = respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(200, json={"messages": [{"id": "wamid.vid"}]})
+    )
+    wamid = _make_client().send_video(
+        "+919999999999", link="https://cdn/w.mp4", caption="Welcome"
+    )
+    assert wamid == "wamid.vid"
+    body = json.loads(route.calls.last.request.content)
+    assert body["type"] == "video"
+    assert body["to"] == "919999999999"
+    assert body["video"] == {"link": "https://cdn/w.mp4", "caption": "Welcome"}
+
+
+@respx.mock
+def test_send_video_media_id_payload():
+    route = respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(200, json={"messages": [{"id": "wamid.m"}]})
+    )
+    _make_client().send_video("+919999999999", media_id="MID123")
+    body = json.loads(route.calls.last.request.content)
+    assert body["video"] == {"id": "MID123"}
+
+
+def test_send_video_requires_exactly_one_source():
+    client = _make_client()
+    with pytest.raises(ValueError):
+        client.send_video("+919999999999")  # neither
+    with pytest.raises(ValueError):
+        client.send_video("+919999999999", link="x", media_id="y")  # both
