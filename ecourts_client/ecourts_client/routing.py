@@ -45,12 +45,19 @@ def validate_cnr_shape(cnr: str) -> None:
         raise CNRMalformed(cnr=cnr, reason="failed regex [A-Z]{2}[A-Z]{2}[A-Z0-9]{12}")
     state = cnr[:2]
     court_type = cnr[2:4]
-    # High Court CNRs carry an HC-specific 2-letter code in the state slot that
-    # is not always a geographic state (e.g. 'PH' = Punjab & Haryana HC, 'GA'
-    # shared by Gauhati HC). Only enforce the geographic-state whitelist for
-    # District Court CNRs; HC CNRs are validated by shape + the 'HC' court-type
-    # segment (the search that produced the CNR already scoped the establishment).
-    if court_type not in HC_ESTABLISHMENT_CODES and state not in STATE_CODES:
+    # High Court CNRs use TWO eCourts conventions:
+    #   1. [STATE][HC] -- the 'HC' establishment code sits in chars 2:4 with a
+    #      real (or HC-specific, e.g. 'PH'/'GA') 2-letter code in the state slot.
+    #   2. [HC][bench]  -- the literal 'HC' sits in the STATE slot (chars 0:2)
+    #      and the bench/court code in chars 2:4, e.g. 'HCBM...' (Bombay),
+    #      'HCMA...' (Madras). These are REAL CNRs the HC portal returns.
+    # No geographic state is ever 'HC', so an 'HC' state slot is unambiguously a
+    # High Court. Only enforce the geographic-state whitelist for District Courts.
+    if (
+        state != "HC"
+        and court_type not in HC_ESTABLISHMENT_CODES
+        and state not in STATE_CODES
+    ):
         raise CNRMalformed(cnr=cnr, reason=f"unknown state code '{state}'")
 
 
