@@ -95,8 +95,15 @@ _SEND_DEDUP_TTL_SECONDS = 600  # 10 minutes; safely covers the retry budget.
 # Keep in sync with ``_DAILY_CADENCE_TEMPLATES`` in
 # ``shared/data-access/data_access/alembic/versions/20260606_b3_dedup_send_per_day.py``.
 _DEDUP_DAILY_TEMPLATES: frozenset[str] = frozenset({
+    # v1 kept dormant: deleted on Meta ~2026-06 (post-deletion name block), so
+    # the producer no longer sends these — retained only so any stray v1 send
+    # still dedups rather than fanning out. See reminders.yml.
     "nowlez_tomorrow_hearings_v1",
     "nowlez_weekly_summary_v1",
+    # v2 live: re-filed on Meta 2026-07-10 after v1's deletion; the casepilot
+    # cron (backend/scheduler.py) now sends these.
+    "nowlez_tomorrow_hearings_v2",
+    "nowlez_weekly_summary_v2",
 })
 
 # IST timezone for per-day key computation. Computed once at module load —
@@ -366,6 +373,57 @@ def _claim_daily_send_slot(
             template_name,
         )
         return True
+
+
+def _mark_daily_claim_failed(
+    *,
+    user_id: str | None,
+    template_name: str,
+    dedup_per_day: bool,
+    reason: str,
+) -> None:
+    """Best-effort: flip this send's daily-dedup claim row from ``pending`` to
+    ``failed`` when the Meta send throws.
+
+    The claim row is written BEFORE the Meta call (see the crash-safety note in
+    the module docstring), so a terminal send error would otherwise leave it
+    ``pending`` forever — and the RQ retry re-runs, finds its own orphaned
+    claim, dedup-short-circuits, and reports the job ``OK``, silently MASKING
+    the failure. (That masking hid the 2026-06-28 nowlez cron outage: 0
+    delivered, 0 failures recorded.) Flagging the row ``failed`` makes the
+    failure visible in the ``whatsapp_delivery_log`` status breakdown instead.
+
+    Only touches the claim THIS send created (the dedup path); a no-op
+    otherwise. Swallows every error — it must NEVER shadow the original send
+    exception that the caller is about to re-raise.
+    """
+    if not (dedup_per_day and template_name in _DEDUP_DAILY_TEMPLATES and user_id):
+        return
+    try:
+        from sqlalchemy import update
+
+        from data_access.engine import get_session
+        from data_access.models import WhatsAppDeliveryLog
+
+        with get_session() as s:
+            s.execute(
+                update(WhatsAppDeliveryLog)
+                .where(
+                    WhatsAppDeliveryLog.user_id == user_id,
+                    WhatsAppDeliveryLog.template_name == template_name,
+                    WhatsAppDeliveryLog.send_date_ist == _today_ist(),
+                    WhatsAppDeliveryLog.delivery_status == "pending",
+                    WhatsAppDeliveryLog.meta_message_id.is_(None),
+                )
+                .values(delivery_status="failed", failure_reason=reason[:500])
+            )
+    except Exception as e:  # pragma: no cover — must not shadow the send error
+        log.warning(
+            "mark_daily_claim_failed: could not flag failure for (user=%s, tmpl=%s): %s",
+            user_id,
+            template_name,
+            e,
+        )
 
 
 def _resolve_document_url(
@@ -655,6 +713,7 @@ def _do_send_template(
             button_url_variables=button_vars or None,
         )
     except MetaTransientError:
+        # Retryable — leave the claim in place for RQ's Retry policy.
         raise
     except Meta24HourWindowExpired as e:
         # Templates SHOULD bypass the 24h window — if we see this, the
@@ -667,6 +726,31 @@ def _do_send_template(
             brand=brand,
             user_id=user_id,
             err=str(e),
+        )
+        _mark_daily_claim_failed(
+            user_id=user_id,
+            template_name=template_name,
+            dedup_per_day=dedup_per_day,
+            reason=f"Meta24HourWindowExpired: {e}",
+        )
+        raise
+    except Exception as e:
+        # Terminal send failure (e.g. MetaInvalidMessage #132001 — template
+        # missing/unapproved/being-deleted on Meta). Emit a greppable alert
+        # metric and flag the daily-dedup claim row 'failed' so the failure is
+        # VISIBLE instead of being masked as a false 'OK' by the retry's dedup
+        # short-circuit, then re-raise so RQ's failed-job registry records it.
+        log.error(
+            "metric=whatsapp_send_terminal_failure_total template=%s brand=%s err=%s",
+            template_name,
+            brand,
+            type(e).__name__,
+        )
+        _mark_daily_claim_failed(
+            user_id=user_id,
+            template_name=template_name,
+            dedup_per_day=dedup_per_day,
+            reason=f"{type(e).__name__}: {e}",
         )
         raise
 
@@ -762,6 +846,7 @@ def _do_send_template_with_components(
             button_url_variables=button_url_variables,
         )
     except MetaTransientError:
+        # Retryable — leave the claim in place for RQ's Retry policy.
         raise
     except Meta24HourWindowExpired as e:
         _alert_dead_letter(
@@ -772,6 +857,29 @@ def _do_send_template_with_components(
             brand=brand,
             user_id=user_id,
             err=str(e),
+        )
+        _mark_daily_claim_failed(
+            user_id=user_id,
+            template_name=template_name,
+            dedup_per_day=dedup_per_day,
+            reason=f"Meta24HourWindowExpired: {e}",
+        )
+        raise
+    except Exception as e:
+        # Terminal send failure — flag the daily-dedup claim 'failed' so it is
+        # visible instead of dedup-masked to a false 'OK' on retry (parity with
+        # _do_send_template).
+        log.error(
+            "metric=whatsapp_send_terminal_failure_total template=%s brand=%s err=%s",
+            template_name,
+            brand,
+            type(e).__name__,
+        )
+        _mark_daily_claim_failed(
+            user_id=user_id,
+            template_name=template_name,
+            dedup_per_day=dedup_per_day,
+            reason=f"{type(e).__name__}: {e}",
         )
         raise
 

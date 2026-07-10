@@ -342,8 +342,82 @@ def test_dedup_daily_templates_includes_documented_set():
     """
     assert "nowlez_tomorrow_hearings_v1" in w._DEDUP_DAILY_TEMPLATES
     assert "nowlez_weekly_summary_v1" in w._DEDUP_DAILY_TEMPLATES
+    # v2 re-filings (2026-07-10) are the live producer targets after v1 was
+    # deleted on Meta.
+    assert "nowlez_tomorrow_hearings_v2" in w._DEDUP_DAILY_TEMPLATES
+    assert "nowlez_weekly_summary_v2" in w._DEDUP_DAILY_TEMPLATES
     # Transactional templates must NOT be in the allowlist.
     assert "nowlez_signup_welcome_v2" not in w._DEDUP_DAILY_TEMPLATES
+
+
+def test_v2_reminder_templates_registered():
+    """The re-filed v2 daily templates must resolve in the registry (both
+    languages) so the worker can render them — a missing entry raises
+    TemplateNotFound and re-breaks the daily/weekly sends (the failure mode
+    that started this whole investigation)."""
+    from whatsapp_delivery.templates import get_template
+
+    for name in ("nowlez_tomorrow_hearings_v2", "nowlez_weekly_summary_v2"):
+        for lang in ("en_US", "hi"):
+            tmpl = get_template(name, lang)
+            assert tmpl.full_name == name
+
+
+@respx.mock
+def test_terminal_send_failure_marks_claim_failed(sqlite_session_factory):
+    """A terminal Meta error (e.g. #132001 'template does not exist') on a
+    daily-dedup send must flip the claim row from 'pending' to 'failed', so
+    the failure is VISIBLE in whatsapp_delivery_log.
+
+    Without this the claim row is left 'pending' and the RQ retry re-runs,
+    finds its own orphaned claim, dedup-short-circuits, and reports the job
+    'OK' — silently masking a hard failure (this is exactly the 2026-06-28
+    nowlez_tomorrow_hearings outage: 0 delivered, 0 failures recorded).
+    """
+    Session = sqlite_session_factory
+    user = _seed_user(Session)
+
+    respx.post("https://graph.facebook.com/v20.0/111/messages").mock(
+        return_value=Response(
+            400,
+            json={"error": {
+                "message": "(#132001) Template name does not exist in the translation",
+                "code": 132001,
+                "type": "OAuthException",
+            }},
+        )
+    )
+
+    from whatsapp_delivery.errors import MetaInvalidMessage
+    with pytest.raises(MetaInvalidMessage):
+        w._do_send_template(
+            to="+919876543210",
+            template_name="nowlez_tomorrow_hearings_v1",
+            language="en_US",
+            variables={"count": "1", "formatted_list": "Mehta v. State"},
+            brand="nowlez",
+            media_bytes=None,
+            media_filename=None,
+            media_mime="application/pdf",
+            related_case_id=None,
+            related_order_id=None,
+            user_id=str(user.id),
+            dedup_per_day=True,
+        )
+
+    from data_access.models import WhatsAppDeliveryLog
+    with Session() as s:
+        rows = (
+            s.query(WhatsAppDeliveryLog)
+            .filter_by(user_id=user.id, template_name="nowlez_tomorrow_hearings_v1")
+            .all()
+        )
+        assert len(rows) == 1, "the claim row must still exist"
+        assert rows[0].delivery_status == "failed", (
+            "terminal send failure must mark the claim 'failed', not leave it 'pending'"
+        )
+        assert rows[0].meta_message_id is None
+        assert rows[0].failure_reason and "MetaInvalidMessage" in rows[0].failure_reason
 
 
 # ---------------------------------------------------------------------------
