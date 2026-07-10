@@ -62,10 +62,15 @@ def validate_cnr_shape(cnr: str) -> None:
 
 
 def classify_cnr(cnr: str) -> CnrScope:
-    """Return 'district' or 'highcourt' based on CNR's 3rd-4th chars (court-type code)."""
+    """Return 'district' or 'highcourt'.
+
+    High Court when either the 'HC' establishment code is in chars 2:4
+    ([STATE][HC], e.g. 'KAHC') or 'HC' is in the state slot ([HC][bench], e.g.
+    'HCBM' Bombay / 'HCMA' Madras). Everything else is District Court.
+    """
     validate_cnr_shape(cnr)
     court_type = cnr[2:4]
-    if court_type in HC_ESTABLISHMENT_CODES:
+    if court_type in HC_ESTABLISHMENT_CODES or cnr[:2] == "HC":
         return "highcourt"
     return "district"
 
