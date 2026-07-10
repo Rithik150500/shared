@@ -13,7 +13,7 @@ from ecourts_client.forums import (
 
 CnrScope = Literal["district", "highcourt"]
 
-CNR_REGEX = re.compile(r"^[A-Z]{2}[A-Z]{2}[A-Z0-9]{12}$")
+CNR_REGEX = re.compile(r"^[A-Z]{2}[A-Z0-9]{14}$")
 
 # State codes per NIC's eCourts taxonomy. Full list per spec; abbreviated here.
 STATE_CODES: dict[str, str] = {
@@ -34,15 +34,20 @@ HC_ESTABLISHMENT_CODES: set[str] = {"HC"}  # 3rd-4th chars when scope is HC
 def validate_cnr_shape(cnr: str) -> None:
     """Raise CNRMalformed if shape or state code is invalid.
 
-    The CNR format is 16 chars: [STATE-2][COURT-2][ESTABLISHMENT-12]. The
-    establishment segment is alphanumeric -- some Punjab benches encode special
-    info as a letter in this segment (e.g. 'PBASB10004672023'). Note: state-code
-    'GA' is also reused for Gauhati HC (jurisdiction over Assam/Meghalaya/etc),
-    not just Goa, so we don't try to disambiguate scope by state alone -- court
-    type code (chars 2:4) is the source of truth.
+    The CNR format is 16 chars: [STATE-2 letters][ESTABLISHMENT-14 alnum].
+    The establishment segment is alphanumeric and MAY START WITH DIGITS --
+    e.g. Madhya Pradesh district CNRs like 'MP20060042872025' (chars 2:4 =
+    '20'), and some Punjab benches encode special info as a letter
+    ('PBASB10004672023'). So chars 2:4 are NOT necessarily letters; the older
+    ``[A-Z]{2}[A-Z]{2}...`` shape wrongly rejected every state whose
+    establishment code begins numerically. Note: state-code 'GA' is also
+    reused for Gauhati HC (jurisdiction over Assam/Meghalaya/etc), not just
+    Goa, so we don't disambiguate scope by state alone -- the court-type code
+    (chars 2:4) is the source of truth and equals the literal 'HC' for High
+    Court CNRs (digits never collide with 'HC').
     """
     if not isinstance(cnr, str) or not CNR_REGEX.match(cnr):
-        raise CNRMalformed(cnr=cnr, reason="failed regex [A-Z]{2}[A-Z]{2}[A-Z0-9]{12}")
+        raise CNRMalformed(cnr=cnr, reason="failed regex [A-Z]{2}[A-Z0-9]{14}")
     state = cnr[:2]
     court_type = cnr[2:4]
     # High Court CNRs use TWO eCourts conventions:
