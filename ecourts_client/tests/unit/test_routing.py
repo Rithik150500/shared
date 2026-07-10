@@ -38,3 +38,19 @@ def test_hc_prefixed_bombay_cnr_classifies_highcourt():
 
 def test_hc_prefixed_madras_cnr_classifies_highcourt():
     assert classify_cnr("HCMA010745952023") == "highcourt"
+
+
+def test_numeric_establishment_cnr_accepted():
+    # Real Madhya Pradesh district CNR: establishment code is numeric ('20'),
+    # so chars 2:4 are digits. The old [A-Z]{2}[A-Z]{2}... regex wrongly
+    # rejected these; a valid state ('MP') + 16-char shape must classify as
+    # district. Regression for "CNR validation failed for Madhya Pradesh".
+    validate_cnr_shape("MP20060042872025")  # should not raise
+    assert classify_cnr("MP20060042872025") == "district"
+
+
+def test_numeric_establishment_unknown_state_still_raises():
+    # Shape now allows numeric establishment, but the state whitelist still
+    # guards district CNRs: 'ZZ' is not a real state code.
+    with pytest.raises(CNRMalformed):
+        validate_cnr_shape("ZZ20060042872025")
