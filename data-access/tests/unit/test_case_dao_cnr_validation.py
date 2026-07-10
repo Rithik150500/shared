@@ -5,8 +5,9 @@ is the first line of defense, but non-handler write paths (backfill jobs,
 scheduler workers, future refactors) bypass it. The DAO must reject
 malformed CNRs so we never persist garbage.
 
-The canonical regex is ``^[A-Z]{2}[A-Z]{2}[A-Z0-9]{12}$`` — 16 chars,
-first 4 alpha (state + court code), remaining 12 alphanumeric.
+The canonical regex is ``^[A-Z]{2}[A-Z0-9]{14}$`` — 16 chars, first 2 alpha
+(state), then 14 alphanumeric. The establishment code may begin with digits
+(e.g. Madhya Pradesh ``MP20060042872025``), so chars 2:4 need not be letters.
 """
 from __future__ import annotations
 
@@ -64,7 +65,6 @@ def _case_dataclass(cnr: str) -> DataCase:
     ("MHCC01005473202", "15 chars — too short"),
     ("MHCC0100547320244", "17 chars — too long"),
     ("12CC010054732024", "first 2 must be alpha"),
-    ("MH12010054732024", "chars 3-4 must be alpha"),
     ("MHCC01005473!024", "special char in tail"),
 ])
 def test_upsert_case_rejects_bad_cnr(session, user_id, bad_cnr, reason):
@@ -86,6 +86,20 @@ def test_upsert_case_accepts_valid_cnr(session, user_id):
         session, user_id=user_id, cnr="MHCC010054732024", case_data=fresh,
     )
     assert row.cnr == "MHCC010054732024"
+
+
+@pytest.mark.parametrize("cnr", [
+    "MP20060042872025",  # Madhya Pradesh: numeric establishment ('20') — the
+                          # exact CNR that failed before this fix
+    "MH12010054732024",  # numeric establishment, valid state (was wrongly
+                          # asserted as *rejected* before the fix)
+    "PBASB10004672023",  # Punjab special bench: letter inside establishment
+])
+def test_upsert_case_accepts_numeric_and_mixed_establishment(session, user_id, cnr):
+    """Establishment codes may be numeric or mixed, not just alpha."""
+    fresh = _case_dataclass(cnr)
+    row = case_dao.upsert_case(session, user_id=user_id, cnr=cnr, case_data=fresh)
+    assert row.cnr == cnr
 
 
 @pytest.mark.parametrize("bad_cnr", ["short", "ABCD123!", "mhcc010054732024", ""])

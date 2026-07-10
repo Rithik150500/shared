@@ -28,11 +28,13 @@ _DIFFABLE_FIELDS = ("stage", "case_status", "next_hearing_date", "judge", "court
 # future refactors) bypass it. Without this assertion any caller could
 # persist garbage CNRs into the cases table.
 #
-# Pattern: 16 chars total — 4 alpha (state + court code) + 12 alphanumeric.
-# Mirrors ecourts_client.routing.CNR_REGEX but kept local so DAO callers
-# get a plain ValueError instead of CNRMalformed (no ecourts_client import
-# in the contract of writes here).
-_CNR_REGEX = re.compile(r"^[A-Z]{2}[A-Z]{2}[A-Z0-9]{12}$")
+# Pattern: 16 chars total — 2 alpha (state) + 14 alphanumeric. The
+# establishment code may begin with digits (e.g. Madhya Pradesh
+# 'MP20060042872025'), so chars 2:4 are NOT forced to be letters. Mirrors
+# ecourts_client.routing.CNR_REGEX but kept local so DAO callers get a plain
+# ValueError instead of CNRMalformed (no ecourts_client import in the
+# contract of writes here).
+_CNR_REGEX = re.compile(r"^[A-Z]{2}[A-Z0-9]{14}$")
 
 
 def _assert_valid_cnr(cnr: str) -> None:
