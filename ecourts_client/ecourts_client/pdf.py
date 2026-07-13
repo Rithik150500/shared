@@ -67,9 +67,27 @@ _MAGIC_HEADER_SCAN_LIMIT = 1024
 
 
 def fetch_pdf(session: requests.Session, url: str) -> bytes:
+    # Gate PDF egress on the SAME shared schedule as the JSON API. The JSON path
+    # paces every wire call in ``_session._send``, but this GET (the order-alias
+    # download + every cause-list PDF) bypasses ``_send`` entirely, so a bulk
+    # cause-list/order PDF burst could trip the per-IP 405 throttle that the
+    # Tier-2 limiter exists to prevent. Import lazily to avoid any
+    # ``_session`` <-> ``pdf`` import cycle (mirrors redis_limiter's lazy import).
+    from ecourts_client._session import _get_rate_gate, _log_throttle, _penalize_rate_gate
+
+    _get_rate_gate().wait()
     resp = session.get(url, timeout=60, stream=False)
     if resp.status_code == 404:
         raise PDFNotFound(f"404 for {url}")
+    if resp.status_code == 405:
+        # Same burst-throttle signal as the JSON path (HTTP 405 + HTML "Search
+        # Page not Found", ~15-30 min per-IP ban). Record it -- otherwise PDF-path
+        # 405s are invisible to the throttle counter -- and widen the shared
+        # limiter so the whole fleet backs off. Surface as PDFNotFound so caller
+        # control flow is unchanged (a missing PDF is already skippable).
+        _log_throttle("throttle_405", "fetch_pdf", 405)
+        _penalize_rate_gate()
+        raise PDFNotFound(f"405 (burst throttle) for {url}")
     if 400 <= resp.status_code < 600:
         raise PDFNotFound(f"{resp.status_code} for {url}")
 
