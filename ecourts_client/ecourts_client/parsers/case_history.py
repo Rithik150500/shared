@@ -166,8 +166,12 @@ def _parse_history(value: Any) -> list[HearingHistoryRow]:
         for row in value:
             if not isinstance(row, dict):
                 continue
+            # District v4 rows carry the hearing date in ``todays_date``
+            # (DD-MM-YYYY); ``nextdate``/``n_dt`` are the *next* date in YYYYMMDD
+            # (unparseable here) and must not be used as the hearing date.
             hearing_date = _parse_date(
                 row.get("business_date") or row.get("hearing_date")
+                or row.get("todays_date") or row.get("todays_date1")
                 or row.get("date_next") or row.get("nextdate")
             )
             if hearing_date is None:
@@ -175,7 +179,7 @@ def _parse_history(value: Any) -> list[HearingHistoryRow]:
             rows.append(HearingHistoryRow(
                 hearing_date=hearing_date,
                 purpose=(row.get("purpose_name") or row.get("purpose") or "").strip(),
-                judge=(row.get("judge") or row.get("desgname") or "").strip(),
+                judge=(row.get("judge") or row.get("judge_name") or row.get("desgname") or "").strip(),
                 business_on_date=(row.get("business_date") or "").strip() or None,
             ))
         return rows
