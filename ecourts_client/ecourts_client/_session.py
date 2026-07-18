@@ -247,6 +247,16 @@ _UID = _PACKAGE_NAME
 _APP_VERSION = "4.0.1"
 _REQUEST_TIMEOUT = 30
 
+# Mint-flood guard: a 405/429 on the JWT-mint bootstrap (appReleaseWebService.php)
+# leaves ``self.jwt`` None, so ``_ensure_jwt`` would re-attempt the mint on EVERY
+# subsequent call -- hammering eCourts' most burst-sensitive endpoint and turning
+# a transient throttle into a sustained appReleaseWebService.php outage (which
+# then trips the shared ``ecourts_global`` circuit platform-wide). After a mint
+# throttle we hold off further mint attempts for this window so callers fast-fail
+# with RateLimited instead of re-flooding the bootstrap. Kept short so recovery
+# stays inside the circuit's base recovery window.
+_MINT_COOLDOWN_SECONDS = float(os.environ.get("ECOURTS_MINT_COOLDOWN_SECONDS", "30"))
+
 # A-5 audit fix: the transport layer is now retry-free. The outer
 # ``ecourts_client.resilience.retry.with_retry`` decorator (composed by
 # ``client._wrap_with_resilience``) is the single source of retry truth and
@@ -286,6 +296,9 @@ class Session:
         # self.jwt is written only in init(), under this lock, never lock-free.
         self._lock = threading.RLock()
         self._mint_gen = 0
+        # Set to a monotonic deadline after a mint 405/429; while in the future,
+        # init() fast-fails instead of re-hitting the throttled bootstrap.
+        self._mint_cooldown_until = 0.0
 
     @property
     def uid_with_pkgname(self) -> str:
@@ -305,8 +318,25 @@ class Session:
         sleep inside a second lock; ``_send`` gates itself and this stays deadlock-free.
         """
         with self._lock:
+            now = time.monotonic()
+            if now < self._mint_cooldown_until:
+                # A recent mint got 405/429-throttled. Do NOT re-hit the bootstrap
+                # endpoint on every call -- that self-sustaining flood is exactly
+                # what keeps appReleaseWebService.php throttled. Fast-fail instead;
+                # the outer resilience layer (circuit + retry) handles back-off.
+                raise RateLimited(
+                    "JWT mint (appReleaseWebService.php) on cooldown for "
+                    f"{self._mint_cooldown_until - now:.0f}s after a recent "
+                    "405/429 -- not re-hitting the throttle-sensitive bootstrap."
+                )
             payload = {"appVersion": _APP_VERSION, "uid": self.uid}
-            body = self._send("appReleaseWebService.php", payload, with_bearer=False)
+            try:
+                body = self._send("appReleaseWebService.php", payload, with_bearer=False)
+            except RateLimited:
+                # The mint endpoint itself is burst-throttled. Arm the cooldown so
+                # subsequent callers fast-fail above rather than re-flooding it.
+                self._mint_cooldown_until = time.monotonic() + _MINT_COOLDOWN_SECONDS
+                raise
             token = body.get("token")
             if not token:
                 raise ECourtsError(
