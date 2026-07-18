@@ -192,6 +192,20 @@ class UserNowlez(Base):
         Text, nullable=True, unique=True, index=True
     )
 
+    # Supabase Auth: maps this user to their Supabase ``auth.users.id`` (the
+    # JWT ``sub``), resolved once at the auth boundary. Supabase sits in FRONT
+    # of this table — ``users.id`` remains the ownership spine — so there is
+    # deliberately NO FK here, exactly as with legacy_sqlite_id above.
+    #
+    # The unique index is declared in __table_args__ rather than via
+    # ``unique=True, index=True`` on the column so the model's predicate
+    # matches the partial index the migration actually creates. Doing it the
+    # legacy_sqlite_id way declares a NON-partial index under the same name,
+    # which leaves --autogenerate permanently trying to drop and recreate it.
+    supabase_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUIDType, nullable=True
+    )
+
     # Sub-G step 1: orphan columns migrated from the SQLite `users` table —
     # identity-channel users need a PG home for these (no SQLite row).
     monthly_upload_count: Mapped[int] = mapped_column(
@@ -221,5 +235,11 @@ class UserNowlez(Base):
             "users_nowlez_referral_code_idx",
             "referral_code",
             postgresql_where=text("referral_code IS NOT NULL"),
+        ),
+        Index(
+            "ix_users_nowlez_supabase_user_id",
+            "supabase_user_id",
+            unique=True,
+            postgresql_where=text("supabase_user_id IS NOT NULL"),
         ),
     )
