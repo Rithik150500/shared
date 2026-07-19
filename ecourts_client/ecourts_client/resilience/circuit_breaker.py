@@ -13,10 +13,25 @@ from functools import wraps
 from typing import TypeVar
 
 from ecourts_client.errors import CircuitOpen
+from ecourts_client.resilience.failure_policy import Outcome, classify_failure
 
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
+
+
+def _record_outcome(cb: "CircuitBreaker", exc: BaseException, use_taxonomy: bool) -> None:
+    """Record ``exc`` against ``cb`` unless the taxonomy says it is no signal.
+
+    With ``use_taxonomy=False`` this is the historical behaviour: every
+    exception counts as an availability failure.
+    """
+    if use_taxonomy and classify_failure(exc) is Outcome.NEUTRAL:
+        # No signal about upstream health. Deliberately NOT record_success()
+        # either -- the breaker counts consecutive failures, so healing here
+        # would let an interleaved neutral stream mask a real outage.
+        return
+    cb.record_failure()
 
 
 class CircuitBreaker:
@@ -159,8 +174,15 @@ class _CircuitRegistry:
 
 def with_circuit_breaker(
     *, name: str, failure_threshold: int = 5, recovery_timeout: float = 60.0,
+    use_taxonomy: bool = False,
 ) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
-    """Wrap an async function with a named circuit breaker."""
+    """Wrap an async function with a named circuit breaker.
+
+    Args:
+        use_taxonomy: when True, only exceptions that the failure taxonomy
+            classifies as availability signals count toward opening. Default
+            False preserves the historical count-everything behaviour.
+    """
     def decorator(fn: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
         @wraps(fn)
         async def wrapper(*args, **kwargs):
@@ -173,8 +195,8 @@ def with_circuit_breaker(
                 result = await fn(*args, **kwargs)
                 cb.record_success()
                 return result
-            except Exception:
-                cb.record_failure()
+            except Exception as exc:
+                _record_outcome(cb, exc, use_taxonomy)
                 raise
         return wrapper
     return decorator
@@ -182,10 +204,13 @@ def with_circuit_breaker(
 
 def with_circuit_breaker_sync(
     *, name: str, failure_threshold: int = 5, recovery_timeout: float = 60.0,
+    use_taxonomy: bool = False,
 ):
     """Sync mirror of `with_circuit_breaker`. Uses the SAME named registry
     as the async wrapper, so sync and async callers see one shared breaker
     per name. Thread-safe by virtue of CircuitBreaker._lock added in Task 1.
+
+    See `with_circuit_breaker` for `use_taxonomy`.
     """
     def decorator(fn):
         @wraps(fn)
@@ -199,8 +224,8 @@ def with_circuit_breaker_sync(
                 result = fn(*args, **kwargs)
                 cb.record_success()
                 return result
-            except Exception:
-                cb.record_failure()
+            except Exception as exc:
+                _record_outcome(cb, exc, use_taxonomy)
                 raise
         return wrapper
     return decorator

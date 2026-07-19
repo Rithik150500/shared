@@ -79,6 +79,7 @@ def _build_wrapped(raw_fn, *, config: ECourtsConfig):
         name="ecourts_global",
         failure_threshold=config.ecourts_circuit_failure_threshold,
         recovery_timeout=config.ecourts_circuit_recovery_timeout_seconds,
+        use_taxonomy=config.ecourts_failure_taxonomy,
     )(wrapped)
     wrapped = with_semaphore_sync(
         name="ecourts_global",
