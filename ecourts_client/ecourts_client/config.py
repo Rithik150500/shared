@@ -23,6 +23,16 @@ class ECourtsConfig(BaseSettings):
     ecourts_retry_max_attempts: int = 3
     ecourts_retry_base_delay_seconds: float = 1.0
 
+    # Failure taxonomy (ECOURTS_FAILURE_TAXONOMY). OFF by default -- flipping it
+    # on is the whole rollout. When False the circuit breakers keep their
+    # historical behaviour of counting EVERY exception as an availability
+    # failure, which means client-side errors open them: five user-typed bad
+    # CNRs raise CNRNotFound five times and trip the process-wide breaker for
+    # every tenant. When True only exceptions that
+    # resilience.failure_policy.classify_failure calls an availability signal
+    # are counted; client-side and content errors are ignored.
+    ecourts_failure_taxonomy: bool = False
+
     # Proactive burst control (opt-in tuning knob; OFF by default). eCourts
     # throttles IP bursts to HTTP 405 + an HTML error page for ~15-30 min
     # (docs/RE_NOTES_v4.md); a bulk add/refresh fires one display_pdf_new.php POST

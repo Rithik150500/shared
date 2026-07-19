@@ -50,6 +50,7 @@ def _wrap_with_resilience(fn, *, name: str = "ecourts_global"):
             name=name,
             failure_threshold=_CONFIG.ecourts_circuit_failure_threshold,
             recovery_timeout=_CONFIG.ecourts_circuit_recovery_timeout_seconds,
+            use_taxonomy=_CONFIG.ecourts_failure_taxonomy,
         )(
             with_retry(
                 max_attempts=_CONFIG.ecourts_retry_max_attempts,
