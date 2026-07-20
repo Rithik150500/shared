@@ -6,8 +6,9 @@ keyword arguments through every call site.
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ecourts_client.resilience.court_key import UNKNOWN_KEY
 
@@ -37,6 +38,9 @@ class PerCourtPolicy:
     recovery_timeout: float = 120.0
     failure_window_seconds: float = 300.0
     cascade_open_threshold: int = 8
+    #: Injectable monotonic clock for the court breakers, so a staggered
+    #: outage can be simulated deterministically in tests.
+    clock: Callable[[], float] = field(default=time.monotonic, compare=False)
 
     def key_for(self, args: tuple, kwargs: dict) -> str:
         """Derive the court key, never raising."""
