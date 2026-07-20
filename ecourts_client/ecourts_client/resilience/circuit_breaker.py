@@ -8,11 +8,13 @@ import asyncio
 import logging
 import time
 import threading
+from collections import deque
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TypeVar
 
 from ecourts_client.errors import CircuitOpen
+from ecourts_client.resilience.court_key import is_court_scoped
 from ecourts_client.resilience.failure_policy import Outcome, classify_failure
 
 
@@ -34,6 +36,61 @@ def _record_outcome(cb: "CircuitBreaker", exc: BaseException, use_taxonomy: bool
     cb.record_failure()
 
 
+def _court_breaker(policy, args, kwargs, global_name: str):
+    """Resolve the per-court breaker for this call, or None."""
+    if policy is None:
+        return None, global_name
+    key = policy.key_for(args, kwargs)
+    if key == global_name:
+        return None, key
+    return _CircuitRegistry.get(
+        key,
+        failure_threshold=policy.failure_threshold,
+        recovery_timeout=policy.recovery_timeout,
+        failure_window_seconds=policy.failure_window_seconds,
+    ), key
+
+
+def _maybe_cascade(global_cb: "CircuitBreaker", policy) -> None:
+    """Force the global breaker open when too many courts are down at once.
+
+    Naive per-court keying makes a BROAD outage worse: N independent breakers
+    each burn their own failure budget and then probe on their own half-open
+    ladder, RAISING traffic against a host that bans by IP. Collapsing onto one
+    breaker restores today's single genuinely valuable property.
+    """
+    threshold = getattr(policy, "cascade_open_threshold", 0)
+    if not threshold:
+        return
+    open_courts = sum(
+        1 for name, cb in _CircuitRegistry.all_items()
+        if is_court_scoped(name) and cb.state == "open"
+    )
+    if open_courts >= threshold:
+        logger.warning(
+            "ECOURTS_CASCADE open_courts=%d threshold=%d -- forcing '%s' open",
+            open_courts, threshold, global_cb.name,
+        )
+        global_cb.force_open()
+
+
+def _run_outcome(exc, global_cb, court_cb, use_taxonomy, policy) -> None:
+    """Route a failure to the right breaker(s) per the taxonomy."""
+    if not use_taxonomy:
+        global_cb.record_failure()          # historical: everything is global
+        return
+    outcome = classify_failure(exc)
+    if outcome is Outcome.NEUTRAL:
+        return                               # no availability signal at all
+    if outcome is Outcome.TRIP_GLOBAL or court_cb is None:
+        global_cb.record_failure()
+        return
+    court_cb.record_failure()
+    # Only scan the registry when this court actually ended up open.
+    if court_cb.state == "open":
+        _maybe_cascade(global_cb, policy)
+
+
 class CircuitBreaker:
     """3-state circuit breaker.
 
@@ -43,6 +100,13 @@ class CircuitBreaker:
         recovery_timeout: seconds before transitioning open -> half_open.
         max_recovery_timeout: ceiling on exponential back-off in half_open re-open.
         on_open: optional async callback (failure_count, recovery_timeout) invoked once per open transition.
+        failure_window_seconds: when set, count failures in a SLIDING WINDOW
+            instead of consecutively. Consecutive counting cannot trip a
+            coarse (state-level) key, because a partial outage produces an
+            interleaved success/failure stream that never reaches N in a row.
+            Leave None for the historical consecutive semantics.
+        clock: injectable monotonic clock, for deterministic tests. Patching
+            ``time.monotonic`` globally is unsafe -- asyncio shares it.
     """
     def __init__(
         self,
@@ -52,6 +116,8 @@ class CircuitBreaker:
         recovery_timeout: float = 60.0,
         max_recovery_timeout: float = 1800.0,
         on_open: Callable[[int, float], Awaitable[None]] | None = None,
+        failure_window_seconds: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.name = name
         self._failure_threshold = failure_threshold
@@ -66,11 +132,14 @@ class CircuitBreaker:
         self._half_open_time = 0.0
         self._probe_failures = 0
         self._lock = threading.Lock()
+        self._window = failure_window_seconds
+        self._clock = clock
+        self._failures: deque[float] = deque()
 
     @property
     def state(self) -> str:
         with self._lock:
-            now = time.monotonic()
+            now = self._clock()
             if self._state == "open" and (now - self._last_failure_time) >= self._current_recovery_timeout:
                 self._state = "half_open"
                 self._half_open_allowed = True
@@ -86,7 +155,7 @@ class CircuitBreaker:
         # half_open_allowed write atomically (nested re-acquire would
         # require RLock).
         with self._lock:
-            now = time.monotonic()
+            now = self._clock()
             if self._state == "open" and (now - self._last_failure_time) >= self._current_recovery_timeout:
                 self._state = "half_open"
                 self._half_open_allowed = True
@@ -106,8 +175,20 @@ class CircuitBreaker:
     def record_success(self) -> None:
         with self._lock:
             if self._state == "half_open":
+                # A successful probe means recovery: reset the back-off ladder
+                # AND clear the window, else stale failures re-open instantly.
                 self._probe_failures = 0
                 self._current_recovery_timeout = self._base_recovery_timeout
+                self._failures.clear()
+                self._failure_count = 0
+                self._state = "closed"
+                self._half_open_allowed = False
+                return
+            if self._window is not None:
+                # Windowed mode: a success while CLOSED is NOT healing.
+                # Failures must age out by time, not be erased by traffic, or a
+                # coarse key can never accumulate enough to trip.
+                return
             self._failure_count = 0
             self._state = "closed"
             self._half_open_allowed = False
@@ -117,8 +198,15 @@ class CircuitBreaker:
         snap_failure_count = 0
         snap_recovery_timeout = 0.0
         with self._lock:
+            now = self._clock()
             self._failure_count += 1
-            self._last_failure_time = time.monotonic()
+            self._last_failure_time = now
+            if self._window is not None:
+                self._failures.append(now)
+                cutoff = now - self._window
+                while self._failures and self._failures[0] < cutoff:
+                    self._failures.popleft()
+                self._failure_count = len(self._failures)
             if self._state == "half_open":
                 self._probe_failures += 1
                 self._current_recovery_timeout = min(
@@ -136,11 +224,30 @@ class CircuitBreaker:
         if fire:
             self._fire_on_open(snap_failure_count, snap_recovery_timeout)
 
+    def force_open(self) -> None:
+        """Open the breaker regardless of the failure count.
+
+        Used by the cascade guard: when many per-court breakers are open the
+        host is hostile, and N independent half-open ladders would RAISE
+        traffic against an IP that bans on burst. Collapsing onto the global
+        breaker restores the "a broad outage silences the process" property.
+        """
+        fire = False
+        with self._lock:
+            if self._state != "open":
+                self._state = "open"
+                self._half_open_allowed = False
+                fire = True
+            self._last_failure_time = self._clock()
+            snap_count, snap_timeout = self._failure_count, self._current_recovery_timeout
+        if fire:
+            self._fire_on_open(snap_count, snap_timeout)
+
     def time_until_retry(self) -> float:
         with self._lock:
             if self._state != "open":
                 return 0.0
-            return max(0.0, self._current_recovery_timeout - (time.monotonic() - self._last_failure_time))
+            return max(0.0, self._current_recovery_timeout - (self._clock() - self._last_failure_time))
 
     def _fire_on_open(self, failure_count: int, recovery_timeout: float) -> None:
         logger.warning("Circuit '%s' open: failures=%d, retry_in=%.1fs",
@@ -167,6 +274,12 @@ class _CircuitRegistry:
             return cls._registry[name]
 
     @classmethod
+    def all_items(cls) -> list[tuple[str, "CircuitBreaker"]]:
+        """Snapshot of (name, breaker). Used by the cascade guard."""
+        with cls._lock:
+            return list(cls._registry.items())
+
+    @classmethod
     def reset(cls) -> None:
         with cls._lock:
             cls._registry.clear()
@@ -174,7 +287,7 @@ class _CircuitRegistry:
 
 def with_circuit_breaker(
     *, name: str, failure_threshold: int = 5, recovery_timeout: float = 60.0,
-    use_taxonomy: bool = False,
+    use_taxonomy: bool = False, per_court=None,
 ) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
     """Wrap an async function with a named circuit breaker.
 
@@ -191,12 +304,19 @@ def with_circuit_breaker(
             )
             if not cb.allow_request():
                 raise CircuitOpen(name=name, retry_after_seconds=cb.time_until_retry())
+            court_cb, court_name = _court_breaker(per_court, args, kwargs, name)
+            if court_cb is not None and not court_cb.allow_request():
+                raise CircuitOpen(
+                    name=court_name, retry_after_seconds=court_cb.time_until_retry()
+                )
             try:
                 result = await fn(*args, **kwargs)
                 cb.record_success()
+                if court_cb is not None:
+                    court_cb.record_success()
                 return result
             except Exception as exc:
-                _record_outcome(cb, exc, use_taxonomy)
+                _run_outcome(exc, cb, court_cb, use_taxonomy, per_court)
                 raise
         return wrapper
     return decorator
@@ -204,7 +324,7 @@ def with_circuit_breaker(
 
 def with_circuit_breaker_sync(
     *, name: str, failure_threshold: int = 5, recovery_timeout: float = 60.0,
-    use_taxonomy: bool = False,
+    use_taxonomy: bool = False, per_court=None,
 ):
     """Sync mirror of `with_circuit_breaker`. Uses the SAME named registry
     as the async wrapper, so sync and async callers see one shared breaker
@@ -220,12 +340,19 @@ def with_circuit_breaker_sync(
             )
             if not cb.allow_request():
                 raise CircuitOpen(name=name, retry_after_seconds=cb.time_until_retry())
+            court_cb, court_name = _court_breaker(per_court, args, kwargs, name)
+            if court_cb is not None and not court_cb.allow_request():
+                raise CircuitOpen(
+                    name=court_name, retry_after_seconds=court_cb.time_until_retry()
+                )
             try:
                 result = fn(*args, **kwargs)
                 cb.record_success()
+                if court_cb is not None:
+                    court_cb.record_success()
                 return result
             except Exception as exc:
-                _record_outcome(cb, exc, use_taxonomy)
+                _run_outcome(exc, cb, court_cb, use_taxonomy, per_court)
                 raise
         return wrapper
     return decorator
