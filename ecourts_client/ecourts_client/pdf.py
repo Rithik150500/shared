@@ -51,7 +51,18 @@ def fetch_order_pdf(session, url: str) -> bytes:
         params = dict(parse_qsl(url[len(_V4_ORDER_SCHEME):]))
         params["bilingual_flag"] = "1"
         session._ensure_jwt()
+        # Mirror Session.call()'s 401 recovery. This path POSTs through _send
+        # DIRECTLY, so it does not inherit call()'s re-mint. With the JWT shared
+        # fleet-wide that gap is no longer local: a dead token left in the cache
+        # is adopted by every other process, so one 401 here could fail order
+        # fetches across the whole fleet until the entry expired.
+        gen = session._mint_gen
         resp = session._send("display_pdf_new.php", params, with_bearer=True, method="POST")
+        if resp.get("status") == "N" and str(resp.get("status_code")) == "401":
+            session._remint_on_401(gen)   # invalidates the shared token, re-mints
+            resp = session._send(
+                "display_pdf_new.php", params, with_bearer=True, method="POST"
+            )
         pdf_url = resp.get("pdf_url")
         if not pdf_url:
             raise PDFNotFound(f"display_pdf_new.php returned no pdf_url: {resp!r}")
