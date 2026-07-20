@@ -16,6 +16,7 @@ DC_BASE_URL/HC_BASE_URL constants for the full v3->v4 delta and provenance
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -261,6 +262,99 @@ def _arm_shared_mint_cooldown(scope: str) -> None:
         pass
 
 
+# Fleet-wide JWT cache. ``get_warm_session`` keeps one Session (one JWT) per
+# PROCESS, which is not enough for the bot: ``rq.Worker`` forks a child per job
+# and the parent never runs job code, so the warm registry is built in a child
+# that immediately exits -- every job cold-minted. Sharing the token is sound
+# because nothing in the v4.0 mint is per-process (payload is
+# {"appVersion": <const>, "uid": <bare bundle id>}, uid CONSTANT), and one token
+# is already shared across every thread in a process today.
+_JWT_EXP_MARGIN_SECONDS = 60.0    # stop serving a token this long before it dies
+_JWT_MAX_TTL_SECONDS = 3600.0     # ceiling if a token claims an implausible exp
+_JWT_FALLBACK_TTL_SECONDS = 300.0  # used when ``exp`` can't be parsed
+
+
+def _jwt_cache_key(scope: str) -> str:
+    return f"ecourts:jwt:{scope}"
+
+
+def _jwt_seconds_remaining(token: str) -> float | None:
+    """Seconds until the token's ``exp``, or None if it can't be read. The
+    signature is NOT verified -- eCourts is the only verifier; we read ``exp``
+    solely to size the cache TTL, so no crypto dependency is introduced."""
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)  # restore stripped padding
+        exp = json.loads(base64.urlsafe_b64decode(payload_b64)).get("exp")
+        if exp is None:
+            return None
+        return float(exp) - time.time()
+    except Exception:  # noqa: BLE001 -- an unparseable token must not break minting
+        return None
+
+
+def _shared_jwt_get(scope: str) -> str | None:
+    """Return a live fleet-wide token, or None. FAIL-OPEN: any error yields None
+    and the caller mints exactly as it does today."""
+    try:
+        client = _throttle_redis_client()
+        if client is None:
+            return None
+        raw = client.get(_jwt_cache_key(scope))
+        if not raw:
+            return None
+        token = raw.decode() if isinstance(raw, bytes) else str(raw)
+        # Defence in depth: Redis TTL should already have evicted an expired
+        # token, but re-check so clock skew can never serve a dead one.
+        remaining = _jwt_seconds_remaining(token)
+        if remaining is not None and remaining <= _JWT_EXP_MARGIN_SECONDS:
+            return None
+        return token
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _shared_jwt_put(scope: str, token: str) -> None:
+    """Publish a freshly minted token fleet-wide, TTL sized from its own ``exp``.
+    Best-effort: a failure here just means siblings mint their own."""
+    try:
+        client = _throttle_redis_client()
+        if client is None:
+            return
+        remaining = _jwt_seconds_remaining(token)
+        if remaining is None:
+            ttl = _JWT_FALLBACK_TTL_SECONDS
+        else:
+            ttl = min(remaining - _JWT_EXP_MARGIN_SECONDS, _JWT_MAX_TTL_SECONDS)
+        if ttl <= 0:
+            return  # already expired (or within the margin) -- never publish it
+        client.set(_jwt_cache_key(scope), token, px=max(1, int(ttl * 1000)))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# COMPARE-AND-DELETE. A plain DEL would let a process arriving late with a 401
+# for an OLD token wipe the brand-new one a sibling just published -- costing the
+# fleet a good token and sending every process back to the mint endpoint.
+_JWT_CAD_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+
+def _shared_jwt_drop(scope: str, token: str) -> None:
+    """Invalidate the shared token, but ONLY if it is still the one we used."""
+    try:
+        client = _throttle_redis_client()
+        if client is None:
+            return
+        client.eval(_JWT_CAD_LUA, 1, _jwt_cache_key(scope), token)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _log_throttle(kind: str, endpoint: str, status: int) -> None:
     """Emit the greppable WARNING + bump the best-effort Redis counter."""
     logger.warning("ECOURTS_THROTTLE kind=%s endpoint=%s http=%s", kind, endpoint, status)
@@ -362,6 +456,16 @@ class Session:
         sleep inside a second lock; ``_send`` gates itself and this stays deadlock-free.
         """
         with self._lock:
+            # A live fleet-wide token means no mint is needed AT ALL, so this is
+            # checked BEFORE the cooldown: the cooldown guards the bootstrap
+            # endpoint, not token use. Checking it first would fast-fail callers
+            # we could serve from cache -- and would bite hardest during a
+            # throttle, precisely when the cached token is most valuable.
+            shared = _shared_jwt_get(self.scope)
+            if shared:
+                self.jwt = shared
+                self._mint_gen += 1
+                return
             now = time.monotonic()
             # Local window AND the fleet-wide one: whichever has longer to run
             # wins. The shared window is what stops a *different* process (RQ
@@ -399,6 +503,7 @@ class Session:
                 )
             self.jwt = token
             self._mint_gen += 1
+            _shared_jwt_put(self.scope, token)
 
     def _ensure_jwt(self) -> None:
         """Mint the JWT if absent, double-checked under the lock so concurrent
@@ -414,6 +519,11 @@ class Session:
         the freshly minted jwt."""
         with self._lock:
             if self._mint_gen == gen_used:
+                # eCourts rejected this token, so the fleet copy is dead too --
+                # invalidate it (compare-and-delete) BEFORE re-minting, or init()
+                # would just re-adopt the very token that was refused.
+                if self.jwt is not None:
+                    _shared_jwt_drop(self.scope, self.jwt)
                 self.init()
 
     def call(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
