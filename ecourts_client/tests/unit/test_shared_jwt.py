@@ -183,6 +183,73 @@ def test_shared_jwt_is_used_even_while_the_mint_is_on_cooldown(redis_env):
     assert sess.jwt == token, "a cached token must be usable during a mint cooldown"
 
 
+def test_real_shaped_token_is_cached_for_close_to_its_full_life(redis_env):
+    """A REAL eCourts v4.0 token (captured from prod 2026-07-20) carries
+    exp - iat = 6010s, i.e. ~100 minutes. The TTL ceiling must not clip that down
+    to an hour -- doing so re-mints ~40 minutes early for no reason, and the whole
+    point of this change is to mint as rarely as possible."""
+    token = _make_jwt(exp_in=6010.0)
+    S._shared_jwt_put("highcourt", token)
+    pttl_ms = redis_env.pttl(S._jwt_cache_key("highcourt"))
+    assert pttl_ms > 3600 * 1000, (
+        f"a ~100min token was cached for only {pttl_ms/1000:.0f}s -- the ceiling "
+        "is clipping real tokens and forcing premature mints"
+    )
+    assert pttl_ms < 6010 * 1000, "must still expire before the token itself does"
+
+
+def test_mint_gen_advances_when_a_shared_token_is_adopted(redis_env):
+    """``_mint_gen`` is what makes concurrent 401s converge on ONE re-mint:
+    call() snapshots it, and _remint_on_401 only re-mints if it still matches.
+    The adopt path must bump it exactly like the mint path, or a caller holding a
+    stale generation re-mints needlessly. Deleting that one line left the whole
+    suite green, so this pins it."""
+    S._shared_jwt_put("highcourt", _make_jwt())
+    sess = S.Session(scope="highcourt")
+    before = sess._mint_gen
+    sess.init()                                    # adopts from cache, does not mint
+    assert sess._mint_gen == before + 1, (
+        "adopting a shared token must advance the generation counter, exactly as "
+        "minting does -- otherwise 401 convergence silently breaks"
+    )
+
+
+def test_failed_drop_forces_a_mint_instead_of_re_adopting_the_dead_token(redis_env, monkeypatch):
+    """If the compare-and-delete cannot run (Redis with scripting disabled/ACL'd,
+    or a transient EVAL error), the dead token stays cached -- and init() would
+    read it straight back, hand the caller the very token eCourts just refused,
+    and never mint. That wedges the session: repeated calls, zero mints. The drop
+    must therefore report failure, and the re-mint path must then bypass the cache."""
+    dead = _make_jwt()
+    S._shared_jwt_put("highcourt", dead)
+
+    real_client = S._throttle_redis_client()
+
+    class _NoEval:
+        def __getattr__(self, name):
+            if name == "eval":
+                def _refuse(*a, **k):
+                    raise RuntimeError("EVAL refused (scripting disabled)")
+                return _refuse
+            return getattr(real_client, name)
+
+    monkeypatch.setattr(S, "_throttle_redis_singleton", _NoEval())
+
+    good = _make_jwt()
+    calls = []
+    sess = S.Session(scope="highcourt")
+    sess.init()                                    # adopts `dead`
+    assert sess.jwt == dead
+    sess._send = _minting_send(calls, good)
+    sess._remint_on_401(sess._mint_gen)
+
+    assert calls == ["appReleaseWebService.php"], (
+        "a drop that could not run must force a real mint -- re-adopting the "
+        "rejected token wedges the session with zero mints"
+    )
+    assert sess.jwt == good
+
+
 def test_jwt_sharing_fails_open_when_redis_is_unreachable(monkeypatch):
     """Redis down must degrade to today's per-process mint, not break minting."""
     monkeypatch.setenv("SHARED_REDIS_URL", "redis://127.0.0.1:1/0")

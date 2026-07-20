@@ -30,7 +30,7 @@ def test_concurrent_cold_callers_mint_exactly_once(monkeypatch):
     s = _fresh()
     mints = []
 
-    def counting_init(self):
+    def counting_init(self, **_kw):   # **_kw: init() takes use_shared=
         mints.append(1)
         time.sleep(0.02)          # widen the race window
         self.jwt = "tok"
@@ -52,7 +52,7 @@ def test_concurrent_401s_reminted_once(monkeypatch):
     s._mint_gen = 1
     mints = []
 
-    def counting_init(self):
+    def counting_init(self, **_kw):   # **_kw: init() takes use_shared=
         mints.append(1)
         time.sleep(0.02)
         self.jwt = "fresh"
@@ -72,7 +72,7 @@ def test_remint_skipped_when_generation_already_advanced(monkeypatch):
     s = _fresh()
     s.jwt = "fresh"
     s._mint_gen = 5  # someone already re-minted since the caller's gen (=4)
-    monkeypatch.setattr(Session, "init", lambda self: pytest.fail("must not re-mint"))
+    monkeypatch.setattr(Session, "init", lambda self, **_kw: pytest.fail("must not re-mint"))
     s._remint_on_401(gen_used=4)
     assert s.jwt == "fresh"
 

@@ -270,7 +270,10 @@ def _arm_shared_mint_cooldown(scope: str) -> None:
 # {"appVersion": <const>, "uid": <bare bundle id>}, uid CONSTANT), and one token
 # is already shared across every thread in a process today.
 _JWT_EXP_MARGIN_SECONDS = 60.0    # stop serving a token this long before it dies
-_JWT_MAX_TTL_SECONDS = 3600.0     # ceiling if a token claims an implausible exp
+# Ceiling for an implausible/hostile ``exp``. Sized from a REAL prod token
+# (captured 2026-07-20): eCourts v4.0 issues exp - iat = 6010s (~100 min), so a
+# 1h ceiling would clip every real token and force a needless early re-mint.
+_JWT_MAX_TTL_SECONDS = 7200.0
 _JWT_FALLBACK_TTL_SECONDS = 300.0  # used when ``exp`` can't be parsed
 
 
@@ -344,15 +347,26 @@ return 0
 """
 
 
-def _shared_jwt_drop(scope: str, token: str) -> None:
-    """Invalidate the shared token, but ONLY if it is still the one we used."""
+def _shared_jwt_drop(scope: str, token: str) -> bool:
+    """Invalidate the shared token, but ONLY if it is still the one we used.
+
+    Returns True when the cache is known NOT to still hold ``token`` -- i.e. we
+    deleted it, or someone had already replaced it. Returns False when we could
+    not establish that (no Redis, or the EVAL failed).
+
+    The return value is load-bearing, which is why this one Redis helper is not
+    purely fail-open in the caller's eyes: a drop that silently failed would let
+    ``init()`` read the rejected token straight back out of the cache and hand it
+    to the caller, wedging the session with zero mints. The caller uses False to
+    bypass the cache and force a real mint."""
     try:
         client = _throttle_redis_client()
         if client is None:
-            return
+            return False
         client.eval(_JWT_CAD_LUA, 1, _jwt_cache_key(scope), token)
-    except Exception:  # noqa: BLE001
-        pass
+        return True
+    except Exception:  # noqa: BLE001 -- never raise into the mint path
+        return False
 
 
 def _log_throttle(kind: str, endpoint: str, status: int) -> None:
@@ -443,8 +457,12 @@ class Session:
         """v4.0 uid == the bare bundle id (kept as a property for call sites)."""
         return self.uid
 
-    def init(self) -> None:
+    def init(self, *, use_shared: bool = True) -> None:
         """Mint the initial JWT via appReleaseWebService.php (v4.0).
+
+        ``use_shared=False`` skips the fleet-wide cache and forces a real mint.
+        The 401 path uses it when it could not confirm the rejected token was
+        evicted, so correctness never depends on the eviction having worked.
 
         v4.0 bootstrap payload is ``{"appVersion": <ver>, "uid": <bundle id>}``.
         The response carries the HS256 JWT in ``token`` (same slot as v3). Sending
@@ -461,7 +479,7 @@ class Session:
             # endpoint, not token use. Checking it first would fast-fail callers
             # we could serve from cache -- and would bite hardest during a
             # throttle, precisely when the cached token is most valuable.
-            shared = _shared_jwt_get(self.scope)
+            shared = _shared_jwt_get(self.scope) if use_shared else None
             if shared:
                 self.jwt = shared
                 self._mint_gen += 1
@@ -522,9 +540,14 @@ class Session:
                 # eCourts rejected this token, so the fleet copy is dead too --
                 # invalidate it (compare-and-delete) BEFORE re-minting, or init()
                 # would just re-adopt the very token that was refused.
+                dropped = True
                 if self.jwt is not None:
-                    _shared_jwt_drop(self.scope, self.jwt)
-                self.init()
+                    dropped = _shared_jwt_drop(self.scope, self.jwt)
+                # If the eviction could not be confirmed, do NOT consult the cache
+                # on the way back in -- it may still hold the token eCourts just
+                # refused, and re-adopting it would wedge this session into
+                # repeated 401s with zero mints.
+                self.init(use_shared=dropped)
 
     def call(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Encrypted-GET to <base>/<endpoint>.
