@@ -217,6 +217,50 @@ def _record_throttle_event(kind: str, endpoint: str) -> None:
         pass
 
 
+def _mint_cooldown_key(scope: str) -> str:
+    return f"ecourts:mint_cooldown:{scope}"
+
+
+def _shared_mint_cooldown_remaining(scope: str) -> float:
+    """Seconds left on the FLEET-WIDE mint cooldown, or 0.0 if none/unknown.
+
+    The per-instance ``_mint_cooldown_until`` cannot coordinate a fleet: RQ forks
+    a process per job, so every fresh process arrived with a clean window and was
+    free to re-hit the bootstrap -- observed as mint-405 bursts spaced 14-20s
+    apart, well inside the 30s window. Redis makes the window shared.
+
+    FAIL-OPEN: any error (no redis wheel, no URL, unreachable) returns 0.0 and the
+    caller falls back to the in-process window -- i.e. exactly today's behaviour."""
+    try:
+        client = _throttle_redis_client()
+        if client is None:
+            return 0.0
+        pttl = client.pttl(_mint_cooldown_key(scope))
+        # redis-py: -2 = no key, -1 = key without expiry. Neither is a live window.
+        if pttl is None or pttl < 0:
+            return 0.0
+        return float(pttl) / 1000.0
+    except Exception:  # noqa: BLE001 -- guard must never mask the real RateLimited
+        return 0.0
+
+
+def _arm_shared_mint_cooldown(scope: str) -> None:
+    """Publish the mint cooldown fleet-wide. Best-effort/FAIL-OPEN: if Redis is
+    unreachable the local window still applies, so behaviour degrades to today's
+    per-process guard rather than breaking the mint path."""
+    try:
+        client = _throttle_redis_client()
+        if client is None:
+            return
+        client.set(
+            _mint_cooldown_key(scope),
+            "1",
+            px=max(1, int(_MINT_COOLDOWN_SECONDS * 1000)),
+        )
+    except Exception:  # noqa: BLE001 -- guard must never mask the real RateLimited
+        pass
+
+
 def _log_throttle(kind: str, endpoint: str, status: int) -> None:
     """Emit the greppable WARNING + bump the best-effort Redis counter."""
     logger.warning("ECOURTS_THROTTLE kind=%s endpoint=%s http=%s", kind, endpoint, status)
@@ -319,14 +363,22 @@ class Session:
         """
         with self._lock:
             now = time.monotonic()
-            if now < self._mint_cooldown_until:
+            # Local window AND the fleet-wide one: whichever has longer to run
+            # wins. The shared window is what stops a *different* process (RQ
+            # forks one per job) from re-hitting a bootstrap we already know is
+            # throttled; the local one still applies if Redis is unavailable.
+            local_remaining = self._mint_cooldown_until - now
+            shared_remaining = _shared_mint_cooldown_remaining(self.scope)
+            remaining = max(local_remaining, shared_remaining)
+            if remaining > 0:
                 # A recent mint got 405/429-throttled. Do NOT re-hit the bootstrap
                 # endpoint on every call -- that self-sustaining flood is exactly
                 # what keeps appReleaseWebService.php throttled. Fast-fail instead;
                 # the outer resilience layer (circuit + retry) handles back-off.
+                scope_note = "fleet" if shared_remaining >= local_remaining else "local"
                 raise RateLimited(
                     "JWT mint (appReleaseWebService.php) on cooldown for "
-                    f"{self._mint_cooldown_until - now:.0f}s after a recent "
+                    f"{remaining:.0f}s ({scope_note}) after a recent "
                     "405/429 -- not re-hitting the throttle-sensitive bootstrap."
                 )
             payload = {"appVersion": _APP_VERSION, "uid": self.uid}
@@ -334,8 +386,10 @@ class Session:
                 body = self._send("appReleaseWebService.php", payload, with_bearer=False)
             except RateLimited:
                 # The mint endpoint itself is burst-throttled. Arm the cooldown so
-                # subsequent callers fast-fail above rather than re-flooding it.
+                # subsequent callers fast-fail above rather than re-flooding it --
+                # locally AND fleet-wide, so sibling processes back off too.
                 self._mint_cooldown_until = time.monotonic() + _MINT_COOLDOWN_SECONDS
+                _arm_shared_mint_cooldown(self.scope)
                 raise
             token = body.get("token")
             if not token:
