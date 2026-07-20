@@ -44,13 +44,34 @@ def get_client_for(cnr: str) -> ECourtsClient:
 _CONFIG = ECourtsConfig()
 
 
-def _wrap_with_resilience(fn, *, name: str = "ecourts_global"):
+def _build_per_court_policy(key_fn):
+    """PerCourtPolicy from config, or None when the flag is off.
+
+    Per-court keying requires the taxonomy: without it every failure is
+    TRIP_GLOBAL and there is nothing to route to a court breaker.
+    """
+    if key_fn is None or not getattr(_CONFIG, "ecourts_per_court_circuit", False):
+        return None
+    if not _CONFIG.ecourts_failure_taxonomy:
+        return None
+    from ecourts_client.resilience.per_court import PerCourtPolicy
+    return PerCourtPolicy(
+        key_fn=key_fn,
+        failure_threshold=_CONFIG.ecourts_court_failure_threshold,
+        recovery_timeout=_CONFIG.ecourts_court_recovery_timeout_seconds,
+        failure_window_seconds=_CONFIG.ecourts_court_failure_window_seconds,
+        cascade_open_threshold=_CONFIG.ecourts_cascade_open_court_threshold,
+    )
+
+
+def _wrap_with_resilience(fn, *, name: str = "ecourts_global", key_fn=None):
     return with_semaphore(name=name, max_concurrency=_CONFIG.ecourts_max_concurrency)(
         with_circuit_breaker(
             name=name,
             failure_threshold=_CONFIG.ecourts_circuit_failure_threshold,
             recovery_timeout=_CONFIG.ecourts_circuit_recovery_timeout_seconds,
             use_taxonomy=_CONFIG.ecourts_failure_taxonomy,
+            per_court=_build_per_court_policy(key_fn),
         )(
             with_retry(
                 max_attempts=_CONFIG.ecourts_retry_max_attempts,
@@ -74,8 +95,20 @@ async def _fetch_pdf_async(url: str, cnr_hint: str | None = None) -> bytes:
     return await asyncio.to_thread(DistrictCourtClient().fetch_pdf, url)
 
 
-fetch_case = _wrap_with_resilience(_fetch_case_async)
-fetch_pdf = _wrap_with_resilience(_fetch_pdf_async)
+def _key_from_cnr(cnr, *_a, **_k) -> str:
+    from ecourts_client.resilience.court_key import court_key_for_cnr
+    return court_key_for_cnr(cnr)
+
+
+def _key_from_cnr_hint(_url, cnr_hint=None, *_a, **_k) -> str:
+    # fetch_pdf's first arg is a URL, not a CNR; the court is only knowable
+    # from the optional hint. Without it the call shares the unknown bucket.
+    from ecourts_client.resilience.court_key import court_key_for_cnr
+    return court_key_for_cnr(cnr_hint)
+
+
+fetch_case = _wrap_with_resilience(_fetch_case_async, key_fn=_key_from_cnr)
+fetch_pdf = _wrap_with_resilience(_fetch_pdf_async, key_fn=_key_from_cnr_hint)
 
 
 # --- Forum adapter registry ---------------------------------------------

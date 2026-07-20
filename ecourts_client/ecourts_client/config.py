@@ -33,6 +33,25 @@ class ECourtsConfig(BaseSettings):
     # are counted; client-side and content errors are ignored.
     ecourts_failure_taxonomy: bool = False
 
+    # Per-court circuit breakers (ECOURTS_PER_COURT_CIRCUIT). OFF by default.
+    # Requires the failure taxonomy: without it every error is TRIP_GLOBAL and
+    # there is nothing to route to a court breaker. When ON, each call consults
+    # the global breaker AND a court-keyed one (dc:<state> / hc:<code>), so one
+    # court going down no longer blocks every other court.
+    ecourts_per_court_circuit: bool = False
+    ecourts_court_failure_threshold: int = 5
+    # Longer than the global 60s: a court that is genuinely down stays down for
+    # a while, and probing it spends the shared per-IP request budget.
+    ecourts_court_recovery_timeout_seconds: float = 120.0
+    # Court breakers count failures in a SLIDING WINDOW. Consecutive counting
+    # cannot trip a coarse state-level key, because a partial outage yields an
+    # interleaved success/failure stream that never reaches N in a row.
+    ecourts_court_failure_window_seconds: float = 300.0
+    # When this many court breakers are open at once, force the global breaker
+    # open so a broad outage collapses onto one breaker instead of N probing
+    # half-open ladders against an IP that bans on burst. 0 disables.
+    ecourts_cascade_open_court_threshold: int = 8
+
     # Proactive burst control (opt-in tuning knob; OFF by default). eCourts
     # throttles IP bursts to HTTP 405 + an HTML error page for ~15-30 min
     # (docs/RE_NOTES_v4.md); a bulk add/refresh fires one display_pdf_new.php POST
