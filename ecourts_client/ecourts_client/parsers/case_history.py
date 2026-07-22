@@ -36,6 +36,7 @@ from ecourts_client.models import (
     OrderRef,
     Party,
 )
+from ecourts_client.parsers.disposal import reads_as_disposed
 from ecourts_client.pdf import encode_v4_order
 
 
@@ -70,6 +71,16 @@ def parse_case_history(response: dict[str, Any], cnr: str) -> Case:
     hearings = _parse_history(history.get("historyOfCaseHearing"))
     orders = _parse_orders(history.get("interimOrder")) + _parse_orders(history.get("finalOrder"))
     facts = _extract_routing_facts(history)
+
+    # A disposed case has no future hearing: eCourts v4 echoes the disposal /
+    # last-listing date into ``date_next_list``. Reading it as next_hearing_date
+    # makes the web/WhatsApp UI render a phantom "Next Hearing (OVERDUE)" at the
+    # disposal date. The tribunal parser already nulls the next date on disposal;
+    # district/HC must too.
+    if next_hearing is not None and reads_as_disposed(
+        stage=stage, hearings=hearings, next_hearing_date=next_hearing
+    ):
+        next_hearing = None
 
     return Case(
         cnr=cnr,

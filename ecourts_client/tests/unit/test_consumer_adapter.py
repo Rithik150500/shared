@@ -99,7 +99,8 @@ def test_parse_case_stubs_and_case():
     assert c.stage == "DISPOSED OFF"
     assert c.court == "Bangalore Urban"
     assert c.filing_date == date(2024, 3, 15)
-    assert c.next_hearing_date == date(2024, 8, 12)
+    # DISPOSED OFF: the echoed dateOfHearing is not a future hearing.
+    assert c.next_hearing_date is None
     roles = {(p.name, p.role) for p in c.parties}
     assert ("Sharma", "complainant") in roles
     assert ("ACME Ltd", "respondent") in roles
@@ -115,6 +116,17 @@ def test_parse_case_tolerates_missing_optional_fields():
     assert c.next_hearing_date is None
     assert c.filing_date is None
     assert c.orders == []
+
+
+def test_pending_case_keeps_next_hearing_date():
+    # A PENDING consumer case with a real future listing must keep its date
+    # (no false-positive suppression, no dateOfDisposal present).
+    c = parse_case({
+        "caseNumber": "SC/2/2025", "complainantName": "X",
+        "caseStageName": "PENDING", "dateOfHearing": "2099-09-09",
+    })
+    assert c.stage == "PENDING"
+    assert c.next_hearing_date == date(2099, 9, 9)
 
 
 # ---- identifier + window helpers -------------------------------------------

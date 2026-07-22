@@ -26,6 +26,7 @@ from bs4 import BeautifulSoup
 from ecourts_client.errors import CNRNotFound, CourtSiteDown, ECourtsError, RateLimited
 from ecourts_client.forums import Forum, ForumCapabilities, IdentifierKind, TribunalKind
 from ecourts_client.models import Case, HearingHistoryRow, Party
+from ecourts_client.parsers.disposal import reads_as_disposed
 from ecourts_client.tribunal._html import (
     date_anchored_rows,
     extract_after_dash,
@@ -77,12 +78,21 @@ def parse_detail_html(html: str, *, sc: str) -> Case:
             history.append(HearingHistoryRow(hearing_date=hd, purpose=purpose, judge=before))
 
     title = f"{pet} vs {res}" if pet and res else (pet or res or ref)
+    stage = (d.get("Case Status") or "").strip() or None
+    # "Next Listing Date" is echoed as the disposal date on a disposed DRT/DRAT
+    # matter — null it when the Case Status verb or the final proceeding row says
+    # the case is disposed.
+    next_hearing = parse_dmy(d.get("Next Listing Date"))
+    if next_hearing is not None and reads_as_disposed(
+        stage=stage, hearings=history, next_hearing_date=next_hearing
+    ):
+        next_hearing = None
     return Case(
         cnr=ref.strip(),
         title=title,
         court=court,
-        stage=(d.get("Case Status") or "").strip() or None,
-        next_hearing_date=parse_dmy(d.get("Next Listing Date")),
+        stage=stage,
+        next_hearing_date=next_hearing,
         judge=None,  # DRT names the Presiding Officer as "PO", not a person
         parties=parties,
         history=history,

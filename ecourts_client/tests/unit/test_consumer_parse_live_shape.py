@@ -89,7 +89,8 @@ def test_parse_case_maps_core_fields():
     assert c.title == "A. Complainant vs M/s. Respondent Pvt Ltd"
     assert c.stage == "DISPOSED OFF"
     assert c.filing_date and c.filing_date.isoformat() == "2024-03-13"
-    assert c.next_hearing_date and c.next_hearing_date.isoformat() == "2024-11-29"
+    # DISPOSED OFF: dateOfHearing echoes the disposal date — not a future hearing.
+    assert c.next_hearing_date is None
 
 
 def test_additional_party_captured_from_nic_key():
