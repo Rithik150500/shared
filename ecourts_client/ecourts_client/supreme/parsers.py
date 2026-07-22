@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 
 from ecourts_client.errors import CNRNotFound
 from ecourts_client.models import Case, Party
+from ecourts_client.parsers.disposal import reads_as_disposed
 
 _DATE_RE = re.compile(r"(\d{2})-(\d{2})-(\d{4})")
 _LEAD_NUM = re.compile(r"^\s*\d+\s+")  # "1 ABDUL RAIHAN MIAN" -> "ABDUL RAIHAN MIAN"
@@ -94,13 +95,22 @@ def parse_case_html(html: str, *, diary_no: str, diary_yr: str) -> Case:
     case_no = _clean_case_no(d.get("Case No."))
     title = f"{pet} vs {res}" if pet and res else (pet or res or case_no or f"Diary {diary_no}/{diary_yr}")
     listed = d.get("Present/Last Listed On")
+    stage = (d.get("Status/Stage") or "").strip() or None
+    # "Present/Last Listed On" is the LAST listing; on a disposed SC matter it is
+    # a past date, not a future hearing. The Status/Stage carries the disposal
+    # verb ("DISPOSED (…)" / "DISMISSED …") — null the next date when disposed.
+    next_hearing = _first_date(listed)
+    if next_hearing is not None and reads_as_disposed(
+        stage=stage, next_hearing_date=next_hearing
+    ):
+        next_hearing = None
 
     return Case(
         cnr=f"{diary_no}/{diary_yr}",
         title=title,
         court="Supreme Court of India",
-        stage=(d.get("Status/Stage") or "").strip() or None,
-        next_hearing_date=_first_date(listed),
+        stage=stage,
+        next_hearing_date=next_hearing,
         judge=_bench(listed),
         parties=parties,
         history=[],

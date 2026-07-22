@@ -48,6 +48,18 @@ def test_parse_detail_core():
     assert c.history[0].judge == "PO"
 
 
+def test_disposed_case_nulls_next_listing_date():
+    # A disposed DRT matter echoes the disposal date into "Next Listing Date";
+    # the "Disposed" Case Status must null it (no phantom future hearing).
+    disposed = _DETAIL.replace(
+        "<tr><td>Case Status.</td><td>Pending</td></tr>",
+        "<tr><td>Case Status.</td><td>Disposed</td></tr>",
+    )
+    c = parse_detail_html(disposed, sc="delhi")
+    assert c.stage == "Disposed"
+    assert c.next_hearing_date is None
+
+
 def test_drat_court_label():
     c = parse_detail_html(_DETAIL, sc="delhidrat")
     assert c.court == "Debt Recovery Appellate Tribunal (delhidrat)"

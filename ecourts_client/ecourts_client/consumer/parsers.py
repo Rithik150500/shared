@@ -15,6 +15,7 @@ from typing import Any
 from ecourts_client.consumer.models import CommissionRef
 from ecourts_client.errors import SchemaChanged
 from ecourts_client.models import Case, CaseStub, OrderRef, Party
+from ecourts_client.parsers.disposal import reads_as_disposed
 
 
 def _opt_str(value: Any) -> str | None:
@@ -272,12 +273,25 @@ def parse_case(row: dict[str, Any], *, court: str = "") -> Case:
         if nm:
             parties.append(Party(name=nm, role="respondent"))
 
+    stage = _str(row.get("caseStageName"))
+    # A disposed consumer case echoes the last hearing / disposal date into
+    # ``dateOfHearing``. Null it on disposal — detected from the stage verb
+    # ("DISPOSED OFF") or a populated ``dateOfDisposal`` (covers a "Reserved for
+    # Orders" stage where only the disposal date reveals the case is decided).
+    next_hearing = _parse_date(row.get("dateOfHearing"))
+    if next_hearing is not None and reads_as_disposed(
+        stage=stage,
+        next_hearing_date=next_hearing,
+        decision_date=_parse_date(row.get("dateOfDisposal")),
+    ):
+        next_hearing = None
+
     return Case(
         cnr=case_no,
         title=_title(row),
         court=court,
-        stage=_str(row.get("caseStageName")),
-        next_hearing_date=_parse_date(row.get("dateOfHearing")),
+        stage=stage,
+        next_hearing_date=next_hearing,
         # NOTE: 'judgeName' is not confirmed in the row schema (spike §8 defers
         # to a live populated-row fixture); stays None when absent.
         judge=_opt_str(row.get("judgeName")),
