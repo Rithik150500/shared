@@ -75,7 +75,12 @@ class MergeConflictError(ValueError):
 # / _repoint_munshi_invoices_dropping_dupes), mirroring the pre-existing
 # user_external_identities / user_identities pattern.
 _CLEAN_REPOINT_TABLES: tuple[tuple[str, type, str], ...] = (
-    ("cases", Case, "user_id"),
+    # NOTE: `cases` is deliberately NOT a clean-repoint table. It carries three
+    # partial unique indexes — (user_id, cnr), (user_id, forum, forum_case_ref),
+    # and the tribunal (user_id, forum, tribunal_kind, forum_case_ref) variant —
+    # that a survivor and absorbed (one human's two accounts) can genuinely
+    # overlap on, so a blind UPDATE user_id raises IntegrityError. It is deduped
+    # by _repoint_cases_dropping_dupes (survivor wins, absorbed dupe CASCADE-dropped).
     ("clients", Client, "user_id"),
     ("subscriptions", Subscription, "user_id"),
     ("case_billing_periods", CaseBillingPeriod, "user_id"),
@@ -367,6 +372,58 @@ def link_google_identity(
     return (result.rowcount or 0) > 0
 
 
+def _survivor_owns_colliding_case(session: Session, survivor_id: uuid.UUID, case: Case) -> bool:
+    """True iff moving ``case`` onto ``survivor_id`` would violate any of the
+    three partial unique indexes on ``cases``:
+      - (user_id, cnr)                           [cnr IS NOT NULL]
+      - (user_id, forum, forum_case_ref)         [tribunal_kind IS NULL]
+      - (user_id, forum, tribunal_kind, ref)     [tribunal_kind IS NOT NULL]
+    i.e. the survivor already tracks the same case. Read-only."""
+    if case.cnr is not None:
+        cnr_hit = session.execute(
+            select(func.count())
+            .select_from(Case)
+            .where(Case.user_id == survivor_id, Case.cnr == case.cnr)
+        ).scalar_one()
+        if cnr_hit:
+            return True
+    conds = [
+        Case.user_id == survivor_id,
+        Case.forum == case.forum,
+        Case.forum_case_ref == case.forum_case_ref,
+    ]
+    # tribunal_kind participates in the ref index; match NULL-to-NULL so the
+    # two partial variants are both covered by one predicate.
+    conds.append(
+        Case.tribunal_kind.is_(None)
+        if case.tribunal_kind is None
+        else Case.tribunal_kind == case.tribunal_kind
+    )
+    ref_hit = session.execute(
+        select(func.count()).select_from(Case).where(*conds)
+    ).scalar_one()
+    return bool(ref_hit)
+
+
+def _count_cases_move_drop(
+    session: Session, survivor_id: uuid.UUID, absorbed_id: uuid.UUID
+) -> tuple[int, int]:
+    """(move_count, drop_count) for cases — a row collides iff the survivor
+    already tracks the same case under any of the three unique indexes (see
+    _survivor_owns_colliding_case). Colliding rows are dropped (survivor wins);
+    the rest move."""
+    absorbed_cases = session.execute(
+        select(Case).where(Case.user_id == absorbed_id)
+    ).scalars().all()
+    move, drop = 0, 0
+    for case in absorbed_cases:
+        if _survivor_owns_colliding_case(session, survivor_id, case):
+            drop += 1
+        else:
+            move += 1
+    return move, drop
+
+
 def _count_case_preferences_move_drop(
     session: Session, survivor_id: uuid.UUID, absorbed_id: uuid.UUID
 ) -> tuple[int, int]:
@@ -470,6 +527,14 @@ def _count_child_rows(session: Session, survivor_id: uuid.UUID, absorbed_id: uui
         counts[table_name] = session.execute(
             select(func.count()).select_from(model).where(getattr(model, col) == absorbed_id)
         ).scalar_one()
+
+    # cases: three partial unique indexes the survivor/absorbed can overlap on,
+    # so it is deduped (survivor wins) rather than blind-moved. Report the
+    # clean-move count plus any dropped duplicates, mirroring the tables below.
+    cs_move, cs_drop = _count_cases_move_drop(session, survivor_id, absorbed_id)
+    counts["cases"] = cs_move
+    if cs_drop:
+        counts["cases_dropped_dupes"] = cs_drop
 
     # case_preferences / team_members / munshi_invoices: same move-or-drop
     # shape as user_external_identities / user_identities below — each has a
@@ -632,6 +697,39 @@ def _repoint_clean_tables(session: Session, survivor_id: uuid.UUID, absorbed_id:
     moved["referrals"] = referral_moved
     session.flush()
     return moved
+
+
+def _repoint_cases_dropping_dupes(
+    session: Session, survivor_id: uuid.UUID, absorbed_id: uuid.UUID
+) -> dict:
+    """cases (three partial unique indexes — see _survivor_owns_colliding_case):
+    re-point absorbed cases the survivor doesn't already track; DELETE the
+    absorbed's row when the survivor already tracks that same case (survivor
+    wins). Deleting the absorbed duplicate CASCADE-drops its children
+    (case_orders + their documents, case_billing_periods), matching the
+    "survivor's copy and history win" semantic used for case_preferences.
+
+    Statements execute eagerly, so a case moved earlier in the loop is visible
+    to the collision check for a later case — two absorbed rows that would
+    collide with each other under the survivor keep only the first."""
+    from sqlalchemy import delete
+
+    moved = 0
+    dropped = 0
+    absorbed_cases = session.execute(
+        select(Case).where(Case.user_id == absorbed_id)
+    ).scalars().all()
+    for case in absorbed_cases:
+        if _survivor_owns_colliding_case(session, survivor_id, case):
+            session.execute(delete(Case).where(Case.id == case.id))
+            dropped += 1
+        else:
+            session.execute(
+                update(Case).where(Case.id == case.id).values(user_id=survivor_id)
+            )
+            moved += 1
+    session.flush()
+    return {"moved": {"cases": moved}, "dropped": {"cases": dropped}}
 
 
 def _repoint_case_preferences_dropping_dupes(
@@ -996,6 +1094,7 @@ def merge_users(
         # raise IntegrityError. The survivor's row wins; the absorbed's
         # colliding row is dropped instead of moved.
         for collision_helper in (
+            _repoint_cases_dropping_dupes,
             _repoint_case_preferences_dropping_dupes,
             _repoint_team_members_dropping_dupes,
             _repoint_referrals_dropping_dupes,
