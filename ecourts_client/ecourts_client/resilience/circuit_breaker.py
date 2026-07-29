@@ -378,7 +378,15 @@ class CircuitBreaker:
             if self._state == "half_open" and not self._half_open_allowed:
                 # A probe is out (or was consumed): the next grant is one base
                 # recovery away. Reporting 0.0 here made callers hot-loop.
-                return max(0.0, self._base_recovery_timeout - (self._clock() - self._half_open_time))
+                rearm = max(0.0, self._base_recovery_timeout - (self._clock() - self._half_open_time))
+                # But `rearm` is only the BEST case -- it assumes the outstanding
+                # probe succeeds. If it fails we re-open for the full escalated
+                # ladder step, which is 8x longer once the ladder has climbed to
+                # 480s. This value is rendered to end users (routers/cases.py:
+                # 385-388), and under-stating it invites precisely the premature
+                # retry that keeps the circuit alive (see the comment at :384).
+                # Report the pessimistic bound.
+                return max(rearm, self._current_recovery_timeout)
             if self._state != "open":
                 return 0.0
             return max(0.0, self._current_recovery_timeout - (self._clock() - self._last_failure_time))
