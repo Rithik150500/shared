@@ -229,6 +229,35 @@ def test_time_until_retry_reports_the_regrant_delay_when_half_open_without_token
     assert cb.time_until_retry() > 0.0, "must not advertise retry-immediately"
 
 
+def test_time_until_retry_never_understates_the_escalated_ladder():
+    """This number is rendered verbatim to end users at routers/cases.py:385-388.
+
+    The half-open-without-token branch reported the BASE recovery (60s) even once
+    failed probes had escalated the ladder to 480s -- so a user mid-outage was
+    told "try again in about 1 minute" during an 8-minute wait, inviting exactly
+    the premature retry the comment at cases.py:384 warns against. Observed on
+    prod 2026-07-29: a real user was shown "about 7 minutes" only because they
+    happened to hit the *open* branch; the half-open branch would have lied.
+    """
+    clk = FakeClock()
+    cb = CircuitBreaker(name="tur_ladder", failure_threshold=1,
+                        recovery_timeout=60.0, clock=clk)
+    cb.record_failure()                        # closed -> open, ladder at base
+
+    for _ in range(3):                         # 60 -> 120 -> 240 -> 480
+        clk.advance(cb.time_until_retry() + 1)
+        assert cb.allow_request() is True      # this caller wins the probe...
+        cb.record_failure()                    # ...and it fails, doubling the ladder
+
+    clk.advance(cb.time_until_retry() + 1)     # ladder elapses, token re-arms
+    assert cb.allow_request() is True          # probe consumed
+    assert cb.allow_request() is False         # half_open, no token left
+
+    assert cb.time_until_retry() >= 480.0 * 0.99, (
+        "must not advertise the 60s base while the ladder is actually at 480s"
+    )
+
+
 # ------------------------------------------------ mutation-surfaced gaps
 # Each of these was written because a mutant SURVIVED the suite.
 
