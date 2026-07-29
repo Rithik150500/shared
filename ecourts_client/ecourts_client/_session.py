@@ -35,6 +35,7 @@ from ecourts_client.errors import (
     CourtSiteDown,
     ECourtsError,
     JWTExpired,
+    PDFNotFound,
     RateLimited,
 )
 
@@ -45,6 +46,43 @@ from ecourts_client.errors import (
 # ciphertext) before they reach decrypt_response(), whose bytes.fromhex() would
 # otherwise raise an opaque ValueError.
 _RESPONSE_ENVELOPE_RE = re.compile(r"[0-9a-fA-F]{32}[A-Za-z0-9+/=]")
+
+
+# Some endpoints answer a legitimate NEGATIVE result as a small HTML fragment
+# rather than an AES envelope. ``display_pdf_new.php`` does this when the order
+# row exists in case history but NIC never uploaded the document:
+#
+#   <h2>...<td ...> order is not uploaded for - case no- CW/0024406/2025</td></h2>
+#
+# That is a content fact, not an availability signal. Classifying it as
+# CourtSiteDown made it (a) retried 3x -- _RETRIABLE = (CourtSiteDown,) -- and
+# (b) able to open the per-court breaker, which then blocked *real* downloadable
+# PDFs for sibling orders in the same court. Measured on prod over 7 days: 2574
+# wire calls from only 173 distinct orders (75.6% of the whole ECOURTS_THROTTLE
+# metric), and 100 of 105 per-court circuit opens -- hc:RJ and hc:DL were
+# answering correctly the entire time.
+#
+# Matched on the WORDS, not the markup: the fragment is malformed HTML (<td>
+# outside <tr>, unclosed <table>), so the tag structure is not a stable anchor.
+# Deliberately narrow enough to miss the throttle page, whose text reads
+# "Welcome User Search Page not Found here" -- "not Found", not "not uploaded".
+_PDF_ABSENT_RE = re.compile(r"\bnot\s+upload(?:ed)?\b", re.I)
+
+# endpoint -> (body matcher, exception to raise). Consulted ONLY for a body that
+# already failed the envelope check AND arrived with HTTP 200, so the 405/429/5xx
+# branches above stay unreachable from here even if _send is ever reordered.
+_NEGATIVE_BODY_RULES: dict[str, tuple[re.Pattern, type]] = {
+    "display_pdf_new.php": (_PDF_ABSENT_RE, PDFNotFound),
+}
+
+# Kill switch, default ON. If NIC rewords the message the matcher simply misses
+# and we fall back to CourtSiteDown -- i.e. the previous behaviour -- so the
+# failure mode is "regression to status quo", never "a real outage swallowed".
+# Set to 0 and recreate the container for the old behaviour with no redeploy and
+# no pin bump (config here is read at import; a live env edit is inert).
+_PDF_ABSENT_AS_NOTFOUND = os.environ.get(
+    "ECOURTS_PDF_ABSENT_AS_NOTFOUND", "1"
+).strip().lower() not in ("0", "false", "no")
 
 
 class _RateGate:
@@ -264,6 +302,21 @@ def _arm_shared_mint_cooldown(scope: str) -> None:
 def _log_throttle(kind: str, endpoint: str, status: int) -> None:
     """Emit the greppable WARNING + bump the best-effort Redis counter."""
     logger.warning("ECOURTS_THROTTLE kind=%s endpoint=%s http=%s", kind, endpoint, status)
+    _record_throttle_event(kind, endpoint)
+
+
+def _log_negative_answer(kind: str, endpoint: str, status: int) -> None:
+    """A definitive NEGATIVE answer from eCourts -- the host was healthy and told
+    us the thing does not exist. Deliberately distinct from _log_throttle:
+
+      * INFO, not WARNING, and a different token -- ``grep ECOURTS_THROTTLE``
+        must stay a throttle tally. These events were 75.6% of it.
+      * still counted in the same Redis hour-buckets, so the migration is
+        verifiable in one command: ``kind=pdf_not_uploaded`` should rise to
+        ~2500/week while ``kind=non_envelope`` falls to near zero. If
+        ``non_envelope`` climbs back, the upstream wording drifted.
+    """
+    logger.info("ECOURTS_NEGATIVE kind=%s endpoint=%s http=%s", kind, endpoint, status)
     _record_throttle_event(kind, endpoint)
 
 
@@ -532,6 +585,22 @@ class Session:
         # as a transient CourtSiteDown with a short diagnostic snippet instead.
         if not _RESPONSE_ENVELOPE_RE.match(body):
             snippet = " ".join(body[:160].split())
+            # Before treating a non-envelope body as an outage, check whether this
+            # endpoint is simply telling us the thing does not exist. Guarded on
+            # HTTP 200 as well as the endpoint, so a throttle/maintenance page can
+            # never be downgraded no matter how the status branches above evolve.
+            rule = _NEGATIVE_BODY_RULES.get(endpoint)
+            if (
+                _PDF_ABSENT_AS_NOTFOUND
+                and rule is not None
+                and resp.status_code == 200
+                and rule[0].search(body)
+            ):
+                negative_exc = rule[1]
+                _log_negative_answer("pdf_not_uploaded", endpoint, resp.status_code)
+                raise negative_exc(
+                    f"no document uploaded upstream for {endpoint}: {snippet!r}"
+                )
             _log_throttle("non_envelope", endpoint, resp.status_code)
             raise CourtSiteDown(
                 f"non-envelope response from {endpoint} "
