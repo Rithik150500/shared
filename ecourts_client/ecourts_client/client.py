@@ -61,6 +61,8 @@ def _build_per_court_policy(key_fn):
         recovery_timeout=_CONFIG.ecourts_court_recovery_timeout_seconds,
         failure_window_seconds=_CONFIG.ecourts_court_failure_window_seconds,
         cascade_open_threshold=_CONFIG.ecourts_cascade_open_court_threshold,
+        max_recovery_timeout=_CONFIG.ecourts_court_max_recovery_timeout_seconds,
+        jitter=_CONFIG.ecourts_circuit_recovery_jitter,
     )
 
 
@@ -72,6 +74,8 @@ def _wrap_with_resilience(fn, *, name: str = "ecourts_global", key_fn=None):
             recovery_timeout=_CONFIG.ecourts_circuit_recovery_timeout_seconds,
             use_taxonomy=_CONFIG.ecourts_failure_taxonomy,
             per_court=_build_per_court_policy(key_fn),
+            max_recovery_timeout=_CONFIG.ecourts_circuit_max_recovery_timeout_seconds,
+            jitter=_CONFIG.ecourts_circuit_recovery_jitter,
         )(
             with_retry(
                 max_attempts=_CONFIG.ecourts_retry_max_attempts,

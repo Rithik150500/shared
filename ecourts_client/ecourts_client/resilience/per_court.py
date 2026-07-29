@@ -38,6 +38,16 @@ class PerCourtPolicy:
     recovery_timeout: float = 120.0
     failure_window_seconds: float = 300.0
     cascade_open_threshold: int = 8
+    #: Ceiling on the doubling half-open ladder for a court breaker. Higher than
+    #: the global default because court breakers start at a 120s base. Without
+    #: this the ladder ran to the hardcoded 1800s, so a court that recovered at
+    #: minute 2 was not probed again until minute 30.
+    max_recovery_timeout: float = 1800.0
+    #: Fraction by which a court's recovery window may be randomly shortened.
+    #: 0.0 keeps the ladder deterministic (and every existing test unchanged);
+    #: a positive value decorrelates breakers that trip in the same cascade so
+    #: they stop re-probing in lockstep.
+    jitter: float = 0.0
     #: Injectable monotonic clock for the court breakers, so a staggered
     #: outage can be simulated deterministically in tests.
     clock: Callable[[], float] = field(default=time.monotonic, compare=False)
