@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 import threading
 from collections import deque
@@ -20,6 +21,15 @@ from ecourts_client.resilience.failure_policy import Outcome, classify_failure
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
+
+# Ceiling on the probe-failure counter. ``2 ** _probe_failures`` is evaluated
+# while holding the lock, and the counter only ever grows (it is reset solely by
+# a SUCCESSFUL half-open probe), so a permanently-dead breaker would compute an
+# ever-larger bignum on every failure. By 16 the min() against any sane recovery
+# ceiling has saturated many times over, so nothing above it can change the
+# result -- capping the counter (rather than the exponent expression) keeps the
+# bound directly observable in a test.
+_MAX_PROBE_EXPONENT = 16
 
 
 def _court_breaker(policy, args, kwargs, global_name: str):
@@ -39,6 +49,8 @@ def _court_breaker(policy, args, kwargs, global_name: str):
         recovery_timeout=policy.recovery_timeout,
         failure_window_seconds=policy.failure_window_seconds,
         clock=getattr(policy, "clock", time.monotonic),
+        max_recovery_timeout=getattr(policy, "max_recovery_timeout", 1800.0),
+        jitter=getattr(policy, "jitter", 0.0),
     ), key
 
 
@@ -157,6 +169,8 @@ class CircuitBreaker:
         on_open: Callable[[int, float], Awaitable[None]] | None = None,
         failure_window_seconds: float | None = None,
         clock: Callable[[], float] = time.monotonic,
+        jitter: float = 0.0,
+        rng: Callable[[], float] = random.random,
     ) -> None:
         self.name = name
         self._failure_threshold = failure_threshold
@@ -174,9 +188,32 @@ class CircuitBreaker:
         self._window = failure_window_seconds
         self._clock = clock
         self._failures: deque[float] = deque()
+        # Fraction by which a recovery window may be shortened at random.
+        # 0.0 (the default) keeps the ladder exactly deterministic, which every
+        # test that constructs a CircuitBreaker directly relies on.
+        self._jitter = max(0.0, min(1.0, jitter))
+        self._rng = rng
         # Bumped on every transition INTO open. A call admitted in an earlier
         # epoch must not record its outcome against the current one.
         self._generation = 0
+
+    def _backoff(self, nominal: float) -> float:
+        """Apply DOWNWARD-ONLY jitter to a recovery window.
+
+        Downward-only rather than symmetric for two reasons: the result can never
+        exceed ``_max_recovery_timeout``, so the ceiling stays a hard ceiling; and
+        it can never lengthen a caller's wait beyond the nominal ladder.
+
+        The point is decorrelation, not the size of the change. A deterministic
+        ladder means a caller on a fixed cadence arrives on the re-arm instant
+        every single time and wins the one half-open probe on every rung -- which
+        is exactly how a 60s-interval cron walked the shared breaker from 60s to
+        480s on prod and held it open for interactive users. It also stops N
+        breakers that trip in one cascade from re-probing in lockstep.
+        """
+        if self._jitter <= 0.0:
+            return nominal
+        return nominal * (1.0 - self._jitter * self._rng())
 
     @property
     def state(self) -> str:
@@ -288,15 +325,25 @@ class CircuitBreaker:
                     self._failures.popleft()
                 self._failure_count = len(self._failures)
             if self._state == "half_open":
-                self._probe_failures += 1
-                self._current_recovery_timeout = min(
+                self._probe_failures = min(
+                    self._probe_failures + 1, _MAX_PROBE_EXPONENT
+                )
+                self._current_recovery_timeout = self._backoff(min(
                     self._base_recovery_timeout * (2 ** self._probe_failures),
                     self._max_recovery_timeout,
-                )
+                ))
                 self._state = "open"
                 self._generation += 1
                 fire = True
             elif self._failure_count >= self._failure_threshold:
+                # Jitter the FIRST open too. Without this, every breaker tripped
+                # by one broad outage re-arms at an identical instant and the
+                # herd probes in lockstep. (In the closed state _current is
+                # always the base -- the ladder only climbs in half_open, and
+                # record_success resets it -- so this is the base plus jitter.)
+                self._current_recovery_timeout = self._backoff(
+                    self._base_recovery_timeout
+                )
                 self._state = "open"
                 self._generation += 1
                 fire = True
@@ -375,6 +422,7 @@ class _CircuitRegistry:
 def with_circuit_breaker(
     *, name: str, failure_threshold: int = 5, recovery_timeout: float = 60.0,
     use_taxonomy: bool = False, per_court=None,
+    max_recovery_timeout: float = 1800.0, jitter: float = 0.0,
 ) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
     """Wrap an async function with a named circuit breaker.
 
@@ -388,6 +436,7 @@ def with_circuit_breaker(
         async def wrapper(*args, **kwargs):
             cb = _CircuitRegistry.get(
                 name, failure_threshold=failure_threshold, recovery_timeout=recovery_timeout,
+                max_recovery_timeout=max_recovery_timeout, jitter=jitter,
             )
             court_cb, gen, court_gen = _acquire_gates(
                 cb, per_court, args, kwargs, name
@@ -406,6 +455,7 @@ def with_circuit_breaker(
 def with_circuit_breaker_sync(
     *, name: str, failure_threshold: int = 5, recovery_timeout: float = 60.0,
     use_taxonomy: bool = False, per_court=None,
+    max_recovery_timeout: float = 1800.0, jitter: float = 0.0,
 ):
     """Sync mirror of `with_circuit_breaker`. Uses the SAME named registry
     as the async wrapper, so sync and async callers see one shared breaker
@@ -418,6 +468,7 @@ def with_circuit_breaker_sync(
         def wrapper(*args, **kwargs):
             cb = _CircuitRegistry.get(
                 name, failure_threshold=failure_threshold, recovery_timeout=recovery_timeout,
+                max_recovery_timeout=max_recovery_timeout, jitter=jitter,
             )
             court_cb, gen, court_gen = _acquire_gates(
                 cb, per_court, args, kwargs, name
