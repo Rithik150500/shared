@@ -21,9 +21,13 @@ from __future__ import annotations
 
 from urllib.parse import parse_qsl, urlencode
 
+import logging
+
 import requests
 
 from ecourts_client.errors import PDFInvalid, PDFNotFound
+
+logger = logging.getLogger(__name__)
 
 
 # eCourts v4.0 order PDFs are obtained in TWO steps: POST ``display_pdf_new.php``
@@ -37,7 +41,31 @@ _V4_ORDER_FIELDS = ("filename", "caseno", "cCode", "appFlag", "state_cd", "dist_
 
 
 def encode_v4_order(row: dict) -> str:
-    """Encode a v4 order dict into a ``displaypdf:`` order_url for fetch_order_pdf."""
+    """Encode a v4 order dict into a ``displaypdf:`` order_url for fetch_order_pdf.
+
+    Missing fields are still sent as empty strings -- behaviour is deliberately
+    unchanged -- but they are now reported. ``display_pdf_new.php`` answers HTTP
+    200 with a 14-byte ``'Invalid Input4'`` for some orders (all Delhi HC so
+    far), which is neither the ~228-byte throttle page nor the verbose
+    "order is not uploaded for - case no- X" that means the document does not
+    exist. A terse indexed error reads like parameter validation, and this
+    function is the one place a blank parameter can originate: the only upstream
+    guard checks ``filename`` and ``order_date`` (parsers/case_history.py:214),
+    while High Court and District share one parser, so an HC row shaped
+    differently from the district row this field list came from silently yields
+    a blank.
+
+    Not raising or skipping: we do not yet know which of the seven eCourts
+    actually requires, and guessing would break orders that work today.
+    """
+    missing = [
+        k for k in _V4_ORDER_FIELDS if not str(row.get(k, "") or "").strip()
+    ]
+    if missing:
+        logger.warning(
+            "ECOURTS_ORDER_FIELDS_MISSING fields=%s filename=%r caseno=%r",
+            ",".join(missing), row.get("filename"), row.get("caseno"),
+        )
     return _V4_ORDER_SCHEME + urlencode({k: str(row.get(k, "")) for k in _V4_ORDER_FIELDS})
 
 
