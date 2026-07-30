@@ -162,8 +162,87 @@ def test_window_fallback_when_no_year():
 
 def test_list_state_and_district():
     c = _client()
-    assert [r.name for r in c.list_state_commissions()] == ["KARNATAKA", "ANDAMAN NICOBAR"]
+    # NCDRC is injected client-side (upstream omits it) and leads the cascade.
+    assert [r.name for r in c.list_state_commissions()] == [
+        "NCDRC (National Commission)", "KARNATAKA", "ANDAMAN NICOBAR",
+    ]
     assert c.list_district_commissions(11290000)[0].commission_id == 11290525
+
+
+# ---- NCDRC ------------------------------------------------------------------
+
+def test_ncdrc_is_prepended_and_well_formed():
+    c = _client()
+    ncdrc = c.list_state_commissions()[0]
+    assert ncdrc.commission_id == consumer_client.NCDRC_COMMISSION_ID == 11000000
+    assert ncdrc.active is True and ncdrc.is_bench is False
+
+
+def test_ncdrc_survives_an_empty_upstream_lister():
+    """A lister outage must not take NCDRC down with it — it isn't sourced there."""
+    c = _client(states=[])
+    assert [r.commission_id for r in c.list_state_commissions()] == [11000000]
+
+
+def test_ncdrc_districts_short_circuit_without_a_round_trip():
+    c = _client()
+    assert c.list_district_commissions(11000000) == []
+    assert c.list_district_commissions("11000000") == []
+    # The apex commission has no districts; we must not even ask upstream (that
+    # endpoint answers [] for ANY id, so a call would be pure latency).
+    assert c._session.calls == []
+
+
+def test_non_ncdrc_districts_still_hit_upstream():
+    c = _client()
+    assert c.list_district_commissions(11290000)[0].commission_id == 11290525
+    assert [k for k, *_ in c._session.calls] == ["GET"]
+
+
+# ---- name search ------------------------------------------------------------
+
+def test_search_by_name_sends_role_serchtype_and_wide_window():
+    c = _client()
+    stubs = c.search_by_name(
+        commission_id=11000000, name="ANANT RAM", role="complainant",
+    )
+    assert stubs[0].cnr == "SC/29/A/1006/2024"
+    _, _, body = c._session.calls[-1]
+    assert body["serchType"] == 2                    # [sic] complainant
+    assert body["serchTypeValue"] == "ANANT RAM"     # [sic]
+    assert body["commissionId"] == 11000000
+    # Window must be wide by default: a narrow one silently returns nothing.
+    span = date.fromisoformat(body["toDate"]).year - date.fromisoformat(body["fromDate"]).year
+    assert span >= 10
+
+
+@pytest.mark.parametrize(
+    "role,expected", [("complainant", 2), ("respondent", 3),
+                      ("complainant_advocate", 4), ("respondent_advocate", 5)],
+)
+def test_search_by_name_role_maps_to_serchtype(role, expected):
+    c = _client()
+    c.search_by_name(commission_id=11000000, name="X", role=role)
+    assert c._session.calls[-1][2]["serchType"] == expected
+
+
+def test_search_by_name_rejects_unknown_role_and_blank_name():
+    c = _client()
+    with pytest.raises(ValueError):
+        c.search_by_name(commission_id=11000000, name="X", role="judge")
+    with pytest.raises(ValueError):
+        c.search_by_name(commission_id=11000000, name="   ")
+    assert c._session.calls == []  # rejected before any upstream call
+
+
+def test_search_by_name_honours_an_explicit_window():
+    c = _client()
+    c.search_by_name(
+        commission_id=11000000, name="X",
+        from_date=date(2016, 1, 1), to_date=date(2017, 12, 31),
+    )
+    body = c._session.calls[-1][2]
+    assert body["fromDate"] == "2016-01-01" and body["toDate"] == "2017-12-31"
 
 
 def test_search_sends_verbatim_misspelled_body():
