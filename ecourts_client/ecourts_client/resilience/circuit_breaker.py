@@ -5,7 +5,9 @@ Consolidates Munshi's internal pattern and Nowlez's `backend.scraper_resilience.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
+import os
 import random
 import time
 import threading
@@ -30,6 +32,74 @@ logger = logging.getLogger(__name__)
 # result -- capping the counter (rather than the exponent expression) keeps the
 # bound directly observable in a test.
 _MAX_PROBE_EXPONENT = 16
+
+
+# --- interactive vs background admission -----------------------------------
+# One shared breaker for the 15-minute refresh scheduler AND for interactive
+# search means background failures lock out users who caused none of them. Seen
+# on prod 2026-07-30: the scheduler burned five 405s between 11:06:13 and
+# 11:06:17, and a paying trial user's next Add Case search was refused with
+# "briefly paused ... about 1 minute".
+#
+# The fix is a SPLIT, not a bypass. Background calls record and consult
+# "<name>:bg"; interactive keeps <name> with the same threshold. So if eCourts
+# is genuinely refusing us, the interactive side still trips on its own after
+# `failure_threshold` of ITS OWN failures -- we spend at most that many extra
+# requests in a throttle window instead of blocking every user for the whole
+# window. That bound is what keeps this safe against the per-IP ban.
+#
+# Justified by the same incident: her 11:05:57 search SUCCEEDED while the
+# scheduler was already mid-poll, so interactive calls demonstrably get through
+# while background ones are failing.
+#
+# Default is INTERACTIVE. Anything that does not opt in behaves exactly as
+# before, which is what makes a partial rollout safe -- one consumer can ship
+# this while the other lags, with no semantic change on the lagging side.
+_CALL_CLASS: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "ecourts_call_class", default="interactive"
+)
+
+# Kill switch: 0 restores the single shared breaker, i.e. today's behaviour.
+_SPLIT_BG_CIRCUIT = os.environ.get(
+    "ECOURTS_SPLIT_BG_CIRCUIT", "1"
+).strip().lower() not in ("0", "false", "no")
+
+
+class background_calls:
+    """Mark everything in this scope as BACKGROUND (bulk refresh, polling, crons).
+
+    Use around work no user is waiting on::
+
+        with background_calls():
+            refresh_all_due_cases()
+
+    contextvars propagate across ``await`` and are copied into
+    ``asyncio.to_thread``, which is how the client actually dispatches, so a
+    single wrap at the top of a poll covers the whole call tree. Scoped: the
+    previous value is always restored, including on exception -- otherwise a
+    scheduler would silently reclassify every later request in the same task.
+    """
+
+    __slots__ = ("_token",)
+
+    def __enter__(self):
+        self._token = _CALL_CLASS.set("background")
+        return self
+
+    def __exit__(self, *exc):
+        _CALL_CLASS.reset(self._token)
+        return False
+
+
+def is_background_call() -> bool:
+    return _CALL_CLASS.get() == "background"
+
+
+def _effective_circuit_name(name: str) -> str:
+    """The breaker this call should use. Background work gets its own."""
+    if _SPLIT_BG_CIRCUIT and is_background_call():
+        return f"{name}:bg"
+    return name
 
 
 def _court_breaker(policy, args, kwargs, global_name: str):
@@ -442,12 +512,15 @@ def with_circuit_breaker(
     def decorator(fn: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
         @wraps(fn)
         async def wrapper(*args, **kwargs):
+            # Resolved per CALL, not per decoration: the same wrapped method is
+            # reached by both the refresh scheduler and interactive search.
+            eff_name = _effective_circuit_name(name)
             cb = _CircuitRegistry.get(
-                name, failure_threshold=failure_threshold, recovery_timeout=recovery_timeout,
+                eff_name, failure_threshold=failure_threshold, recovery_timeout=recovery_timeout,
                 max_recovery_timeout=max_recovery_timeout, jitter=jitter,
             )
             court_cb, gen, court_gen = _acquire_gates(
-                cb, per_court, args, kwargs, name
+                cb, per_court, args, kwargs, eff_name
             )
             try:
                 result = await fn(*args, **kwargs)
@@ -474,12 +547,15 @@ def with_circuit_breaker_sync(
     def decorator(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
+            # Resolved per CALL, not per decoration: the same wrapped method is
+            # reached by both the refresh scheduler and interactive search.
+            eff_name = _effective_circuit_name(name)
             cb = _CircuitRegistry.get(
-                name, failure_threshold=failure_threshold, recovery_timeout=recovery_timeout,
+                eff_name, failure_threshold=failure_threshold, recovery_timeout=recovery_timeout,
                 max_recovery_timeout=max_recovery_timeout, jitter=jitter,
             )
             court_cb, gen, court_gen = _acquire_gates(
-                cb, per_court, args, kwargs, name
+                cb, per_court, args, kwargs, eff_name
             )
             try:
                 result = fn(*args, **kwargs)
