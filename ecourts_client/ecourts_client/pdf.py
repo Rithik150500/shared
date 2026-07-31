@@ -69,14 +69,41 @@ def encode_v4_order(row: dict) -> str:
     return _V4_ORDER_SCHEME + urlencode({k: str(row.get(k, "")) for k in _V4_ORDER_FIELDS})
 
 
+def _wire_caseno(caseno: str | None) -> str:
+    """``caseno`` as ``display_pdf_new.php`` will accept it.
+
+    NIC's validator rejects a hyphen: sending
+    ``C.A.(COMM.IPD-TM)/0000049/2026`` answers HTTP 200 with the 14-byte body
+    ``Invalid Input4``, while the same request with the hyphen removed returns
+    a signed ``pdf_url`` for the correct document (verified live 2026-07-31 on
+    DLHC010320362026 -- the recovered PDF is the real 23-07-2026 order).
+
+    This is not cosmetic: every Delhi HC Intellectual-Property-Division case
+    type is hyphenated (``C.A.(COMM.IPD-TM)``, ``W.C.(C)-IPD``, ``RFA(OS)-IPD``,
+    ``CRP-IPD``, ...), so without this NO IPD order PDF is reachable at all.
+
+    Only the hyphen is removed. The zero-padded number is load-bearing --
+    un-padding it reproduces ``Invalid Input4`` -- and ``filename`` is what
+    actually identifies the document, so this cannot select a different one.
+    """
+    return (caseno or "").replace("-", "")
+
+
 def fetch_order_pdf(session, url: str) -> bytes:
     """Fetch an order PDF via the authenticated ``session``.
 
     v4 orders (``displaypdf:`` scheme) POST ``display_pdf_new.php`` for a signed
     ``pdf_url`` then GET it; legacy v3 orders are a direct signed GET.
+
+    ``caseno`` is sanitised here rather than in ``encode_v4_order`` so that the
+    ``displaypdf:`` URLs already persisted in ``case_orders.order_url`` start
+    working without a backfill, and so the stored value stays the true case
+    number.
     """
     if url.startswith(_V4_ORDER_SCHEME):
         params = dict(parse_qsl(url[len(_V4_ORDER_SCHEME):]))
+        if "caseno" in params:
+            params["caseno"] = _wire_caseno(params["caseno"])
         params["bilingual_flag"] = "1"
         session._ensure_jwt()
         resp = session._send("display_pdf_new.php", params, with_bearer=True, method="POST")

@@ -42,6 +42,22 @@ class PDFInvalid(ECourtsError):
     """The PDF bytes downloaded but failed validation (truncated, non-PDF magic)."""
 
 
+class PDFRequestRejected(ECourtsError):
+    """eCourts rejected the PDF request's PARAMETERS (HTTP 200 + a terse
+    validation error such as ``Invalid Input4``).
+
+    Distinct from ``PDFNotFound`` on purpose. ``PDFNotFound`` means "the
+    document does not exist upstream", which is a settled negative answer.
+    This means "we asked wrongly" -- the document may well exist and we are
+    failing to reach it. Collapsing the two would hide a defect of ours behind
+    a benign-looking outcome and we would silently stop fetching real PDFs.
+
+    Deliberately NOT a ``CourtSiteDown``: retrying identical parameters cannot
+    succeed, and counting it against a court's availability opens a breaker in
+    front of orders that download fine (observed on ``hc:DL``, 2026-07-31).
+    """
+
+
 class SchemaChanged(ECourtsError):
     """A parser couldn't find an expected field — likely NIC schema drift."""
 

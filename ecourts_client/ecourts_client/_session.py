@@ -36,6 +36,7 @@ from ecourts_client.errors import (
     ECourtsError,
     JWTExpired,
     PDFNotFound,
+    PDFRequestRejected,
     RateLimited,
 )
 
@@ -68,6 +69,19 @@ _RESPONSE_ENVELOPE_RE = re.compile(r"[0-9a-fA-F]{32}[A-Za-z0-9+/=]")
 # "Welcome User Search Page not Found here" -- "not Found", not "not uploaded".
 _PDF_ABSENT_RE = re.compile(r"\bnot\s+upload(?:ed)?\b", re.I)
 
+# A SECOND, disjoint negative shape on the same endpoint. eCourts answers HTTP
+# 200 with a 14-byte body ``Invalid Input4`` for a subset of orders (every
+# observed instance on Delhi HC). Reproduced live 2026-07-31 on
+# DLHC010320362026 -- an order whose seven v4 fields were ALL populated, so it
+# is not the blank-field case the 2026-07-30 diagnostic was added to catch.
+#
+# It is neither of the two bodies we already know:
+#   * the throttle page is ~228 bytes and reads "Search Page not Found here"
+#   * the missing-document answer is verbose ("order is not uploaded for - ...")
+# A terse indexed error is parameter validation. Anchored at the start so it
+# cannot match a longer page that merely mentions the phrase.
+_PDF_REJECTED_RE = re.compile(r"^\s*invalid\s+input", re.I)
+
 # endpoint -> (body matcher, exception to raise). Consulted ONLY for a body that
 # already failed the envelope check AND arrived with HTTP 200, so the 405/429/5xx
 # branches above stay unreachable from here even if _send is ever reordered.
@@ -82,6 +96,14 @@ _NEGATIVE_BODY_RULES: dict[str, tuple[re.Pattern, type]] = {
 # no pin bump (config here is read at import; a live env edit is inert).
 _PDF_ABSENT_AS_NOTFOUND = os.environ.get(
     "ECOURTS_PDF_ABSENT_AS_NOTFOUND", "1"
+).strip().lower() not in ("0", "false", "no")
+
+# Independent kill switch for the ``Invalid Input4`` branch, so it can be
+# reverted without also reverting the "not uploaded" downgrade above. Off
+# restores the previous behaviour exactly: CourtSiteDown, retried, breaker-
+# tripping. Read at import -- a live env edit needs a container recreate.
+_PDF_REJECT_AS_ERROR = os.environ.get(
+    "ECOURTS_PDF_REJECT_AS_ERROR", "1"
 ).strip().lower() not in ("0", "false", "no")
 
 
@@ -600,6 +622,25 @@ class Session:
                 _log_negative_answer("pdf_not_uploaded", endpoint, resp.status_code)
                 raise negative_exc(
                     f"no document uploaded upstream for {endpoint}: {snippet!r}"
+                )
+            # Our own malformed request, not an outage. Kept OUT of the throttle
+            # metric and off the breaker: retrying identical parameters cannot
+            # help, and charging it to the court hid the defect behind a fake
+            # availability dip. Logged at ERROR because -- unlike the two bodies
+            # above -- this one is actionable by us.
+            if (
+                _PDF_REJECT_AS_ERROR
+                and endpoint in _NEGATIVE_BODY_RULES
+                and resp.status_code == 200
+                and _PDF_REJECTED_RE.search(body)
+            ):
+                logger.error(
+                    "ECOURTS_PDF_REQUEST_REJECTED endpoint=%s http=%s body=%r",
+                    endpoint, resp.status_code, snippet,
+                )
+                raise PDFRequestRejected(
+                    f"{endpoint} rejected the request parameters "
+                    f"(HTTP {resp.status_code}, {len(body)} bytes): {snippet!r}"
                 )
             _log_throttle("non_envelope", endpoint, resp.status_code)
             raise CourtSiteDown(
