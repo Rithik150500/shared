@@ -28,6 +28,7 @@ from ecourts_client.errors import (
     JWTExpired,
     PDFInvalid,
     PDFNotFound,
+    PDFRequestRejected,
     RateLimited,
     SchemaChanged,
 )
@@ -62,6 +63,11 @@ _SPECIFIC: tuple[tuple[type[BaseException], Outcome], ...] = (
     # -- content facts: the host answered, the payload disappointed us.
     (PDFNotFound, Outcome.NEUTRAL),
     (PDFInvalid, Outcome.NEUTRAL),
+    # -- our bug, not theirs: eCourts answered 200 and told us the request was
+    #    malformed. Charging it to the court's availability opened breakers in
+    #    front of orders that download fine (hc:DL, 2026-07-31). Alert, retry
+    #    never, back off never.
+    (PDFRequestRejected, Outcome.NEUTRAL),
     # -- our bug or NIC drift. Opening a breaker on a code defect manufactures
     #    a fake outage; alert on these instead of backing off.
     (SchemaChanged, Outcome.NEUTRAL),

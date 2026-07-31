@@ -26,13 +26,37 @@ def parse_hc_bench_sittings(
 ) -> list[HCBenchSitting]:
     """The bench-sittings endpoint returns `{benches: {benchesStr: 'code1~name1#...'}}`
     OR `{benches: null}` on holidays / non-sitting days.
+
+    Emptiness and failure are NOT the same answer here, and conflating them cost
+    the fleet four dark days (2026-07-28..07-31): every caller reads `[]` as "no
+    benches sitting", so a drifted payload silently presented as a national
+    holiday. Only the two shapes eCourts actually uses to say "nothing today" --
+    a null `benches`, or an empty `benchesStr` -- return `[]`. Anything else
+    raises `SchemaChanged`, which callers already catch as an `ECourtsError`
+    (so one bad HC still can't abort the nightly run) but which is loud and is
+    classified NEUTRAL for the circuit breaker rather than counted as an outage.
     """
-    payload = response.get("benches")
-    if not isinstance(payload, dict):
-        # null / missing -- no benches sitting
+    if "benches" not in response:
+        raise SchemaChanged("benches", f"key absent from response: {sorted(response)[:8]}")
+    payload = response["benches"]
+    if payload is None:
+        # Documented "no benches sitting" answer.
         return []
-    packed = payload.get("benchesStr")
+    if not isinstance(payload, dict):
+        raise SchemaChanged("benches", f"expected dict or null, got {type(payload).__name__}")
+    if "benchesStr" not in payload:
+        raise SchemaChanged("benches.benchesStr", f"key absent; keys={sorted(payload)[:8]}")
+    packed = payload["benchesStr"]
+    if packed is None:
+        # Live shape for future/vacation dates: the wrapper dict is present but
+        # benchesStr is null. A real "nothing today", same as `benches: null`.
+        return []
     if not isinstance(packed, str):
+        raise SchemaChanged(
+            "benches.benchesStr", f"expected str or null, got {type(packed).__name__}",
+        )
+    if not packed.strip():
+        # Empty string is the third legitimate "nothing today".
         return []
     # HC bench webservice separator is '^' not '#' (different from police_stations).
     # Each entry: 'code~display_text' (display_text often contains the code repeated at the end).
@@ -45,6 +69,14 @@ def parse_hc_bench_sittings(
             code=code.strip(), name=name.strip(),
             state_code=state_code, sitting_date=sitting_date,
         ))
+    if not out:
+        # A non-empty payload that yielded nothing means the framing changed
+        # (a different separator, say). Returning [] here would read as "no
+        # benches sitting" and dark every court at once with no signal.
+        raise SchemaChanged(
+            "benches.benchesStr",
+            f"no 'code~name' entries parsed from {len(packed)} chars: {packed[:120]!r}",
+        )
     return out
 
 

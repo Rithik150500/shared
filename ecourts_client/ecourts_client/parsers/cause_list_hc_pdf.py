@@ -66,6 +66,42 @@ _COLUMN_CASE_NUMBER_RE = re.compile(r"^(.*?)(\d+)\s*/+\s*(\d{4})")
 # (type chars are letters, parens, dots, spaces) would choke on.
 _TYPE_TAIL_JUNK_RE = re.compile(r"[^A-Za-z().]+$")
 
+# Delhi HC prints an interlocutory application and the case it sits in as one
+# cause-list entry, separated by a literal <br> tag then "IN":
+#
+#   I.A. 30734/2025 </br>IN CS(COMM) -1309//2025
+#
+# The advocate tracks the MAIN case (CS(COMM) 1309/2025), never the I.A., so
+# taking the first number/year -- which is what the plain column scan does --
+# indexes a case nobody has saved and drops the one they have. On bench 11865
+# for 2026-07-31 this was 18 of 67 rows.
+#
+# The tag arrives mangled in three ways because the position-based reflow splits
+# it at column boundaries: '</br>IN', '< /br>IN', '</br >IN'. Anchoring on the
+# <br> (rather than a bare 'IN') keeps a stray 'IN' inside a party or act name
+# from triggering a rewrite.
+_IN_MAIN_CASE_RE = re.compile(r"<\s*/?\s*br\s*/?\s*>\s*IN\b", re.IGNORECASE)
+
+
+def _main_case_from_column_text(col_text: str) -> str | None:
+    """Return the MAIN case number when the column carries "<app> IN <case>".
+
+    ``None`` when there is no ``<br>IN`` marker or nothing parseable after it,
+    so the caller keeps its ordinary first-match behaviour.
+    """
+    if not col_text:
+        return None
+    split = _IN_MAIN_CASE_RE.split(col_text, maxsplit=1)
+    if len(split) < 2:
+        return None
+    match = _COLUMN_CASE_NUMBER_RE.search(split[1])
+    if match is None:
+        return None
+    ctype = _TYPE_TAIL_JUNK_RE.sub("", match.group(1).strip())
+    if not ctype:
+        return None
+    return f"{ctype}/{match.group(2)}/{match.group(3)}"
+
 
 def _rebuild_case_number_from_column(bundle: dict[str, Any]) -> str:
     """Reconstruct a ``TYPE/NUMBER/YEAR`` case number from the whole case-no column.
@@ -111,6 +147,10 @@ def _rebuild_case_number_from_column(bundle: dict[str, Any]) -> str:
     ]
     col_words.sort(key=lambda w: (int(round(w["top"] / 5) * 5), w["x0"]))
     col_text = " ".join(w["text"] for w in col_words)
+    # "<application> </br>IN <main case>" -- index the main case, not the I.A.
+    main_case = _main_case_from_column_text(col_text)
+    if main_case is not None:
+        return main_case
     match = _COLUMN_CASE_NUMBER_RE.search(col_text)
     if match is None:
         return ""
