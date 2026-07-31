@@ -54,3 +54,30 @@ def test_numeric_establishment_unknown_state_still_raises():
     # guards district CNRs: 'ZZ' is not a real state code.
     with pytest.raises(CNRMalformed):
         validate_cnr_shape("ZZ20060042872025")
+
+
+# --- Calcutta High Court: [STATE][CH], a third HC CNR shape -------------------
+# Calcutta HC CNRs are 'WBCH...' — the establishment code is 'CH', not 'HC', so
+# the original classifier sent them to the DISTRICT client, which then called the
+# district-only listOfCasesWebService.php and failed the whole add. The match must
+# be on the (state, establishment) PAIR: 'CHCH...' is Chandigarh DISTRICT court.
+def test_calcutta_hc_cnr_classifies_highcourt():
+    assert classify_cnr("WBCHCA0586822024") == "highcourt"
+    assert classify_cnr("WBCHCO0016582025") == "highcourt"
+
+
+def test_chandigarh_district_cnr_stays_district():
+    """Guards the naive fix: adding 'CH' to HC_ESTABLISHMENT_CODES breaks this."""
+    assert classify_cnr("CHCH010000012023") == "district"
+
+
+def test_calcutta_hc_cnr_validates():
+    validate_cnr_shape("WBCHCA0586822024")  # must not raise
+
+
+def test_calcutta_hc_maps_to_highcourt_forum():
+    from ecourts_client.forums import Forum
+    from ecourts_client.routing import forum_for_cnr
+
+    assert forum_for_cnr("WBCHCA0586822024") is Forum.ECOURTS_HIGHCOURT
+    assert forum_for_cnr("CHCH010000012023") is Forum.ECOURTS_DISTRICT

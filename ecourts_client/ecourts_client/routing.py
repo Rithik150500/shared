@@ -30,6 +30,20 @@ STATE_CODES: dict[str, str] = {
 
 HC_ESTABLISHMENT_CODES: set[str] = {"HC"}  # 3rd-4th chars when scope is HC
 
+# High Courts whose establishment code is NOT the literal 'HC'. These MUST be
+# matched as a (state, establishment) PAIR, never on the establishment alone:
+# ('WB','CH') is the Calcutta High Court, but ('CH','CH') is the Chandigarh
+# DISTRICT court, so adding 'CH' to HC_ESTABLISHMENT_CODES would misroute every
+# Chandigarh district case to the High Court client.
+#
+# A misroute here is SILENT and presents as a court outage: the district client
+# calls listOfCasesWebService.php (district-only), gets "Record not found", and
+# the whole add/poll dies with "Failed to process case" even though the case
+# fetches perfectly from the HC portal.
+HC_STATE_ESTABLISHMENT_PAIRS: set[tuple[str, str]] = {
+    ("WB", "CH"),  # Calcutta High Court, e.g. WBCHCA.../WBCHCO...
+}
+
 
 def validate_cnr_shape(cnr: str) -> None:
     """Raise CNRMalformed if shape or state code is invalid.
@@ -71,13 +85,19 @@ def validate_cnr_shape(cnr: str) -> None:
 def classify_cnr(cnr: str) -> CnrScope:
     """Return 'district' or 'highcourt'.
 
-    High Court when either the 'HC' establishment code is in chars 2:4
-    ([STATE][HC], e.g. 'KAHC') or 'HC' is in the state slot ([HC][bench], e.g.
-    'HCBM' Bombay / 'HCMA' Madras). Everything else is District Court.
+    High Court when the 'HC' establishment code is in chars 2:4 ([STATE][HC],
+    e.g. 'KAHC'), or 'HC' is in the state slot ([HC][bench], e.g. 'HCBM' Bombay
+    / 'HCMA' Madras), or the (state, establishment) pair is a known High Court
+    that does not use the literal 'HC' code (see HC_STATE_ESTABLISHMENT_PAIRS —
+    currently Calcutta, 'WBCH'). Everything else is District Court.
     """
     validate_cnr_shape(cnr)
-    court_type = cnr[2:4]
-    if court_type in HC_ESTABLISHMENT_CODES or cnr[:2] == "HC":
+    state, court_type = cnr[:2], cnr[2:4]
+    if (
+        court_type in HC_ESTABLISHMENT_CODES
+        or state == "HC"
+        or (state, court_type) in HC_STATE_ESTABLISHMENT_PAIRS
+    ):
         return "highcourt"
     return "district"
 
