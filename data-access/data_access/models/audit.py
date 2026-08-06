@@ -71,4 +71,15 @@ class AuditLog(Base):
             postgresql_where=text("user_id IS NOT NULL"),
         ),
         Index("audit_log_event_type_idx", "event_type", text("created_at DESC")),
+        # actor_id answers "what did this PERSON do", which user_id cannot on a
+        # shared book: there user_id is the book OWNER and actor_id is whoever
+        # actually acted. Partial to match audit_log_user_id_idx -- actor_id is
+        # NULL on every row written before 2026-08-06 and on all system events,
+        # so indexing those buys nothing.
+        Index(
+            "audit_log_actor_id_idx",
+            "actor_id",
+            text("created_at DESC"),
+            postgresql_where=text("actor_id IS NOT NULL"),
+        ),
     )
