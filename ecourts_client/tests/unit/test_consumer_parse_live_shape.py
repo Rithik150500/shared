@@ -126,6 +126,65 @@ def test_html_order_text_extracted_never_stored_as_pdf():
     assert o.order_date.isoformat() == "2024-11-29"
 
 
+def test_html_order_text_keeps_line_structure():
+    # The consumer renders this text into the document the user reads, so block
+    # elements must survive as line breaks — a space-joined judgment is a wall.
+    c = parse_case(_order_row_with_html())
+    text = c.orders[0].order_text
+    assert "\n" in text
+    lines = text.splitlines()
+    assert "DIST CONSUMER COMMISSION, BANGALORE URBAN" in lines
+    assert "partly allowed" in lines
+    assert "" not in lines  # blank-line runs collapsed away
+
+
+def test_long_order_text_is_not_silently_truncated():
+    # Regression: the old 8000-char cap sliced NC/CC/2057/2016 mid-sentence and
+    # dropped the operative directions. A full judgment must survive intact.
+    body = "<p>" + ("The Commission finds as follows. " * 400) + "</p>"
+    operative = "<p>the above consumer complaints stand disposed of</p>"
+    row = _order_row_with_html()
+    row["documentBase64"] = f"<html><body>{body}{operative}</body></html>"
+    o = parse_case(row).orders[0]
+    assert len(o.order_text) > 8000                       # cap no longer bites
+    assert "stand disposed of" in o.order_text            # the tail SURVIVES
+    assert "truncated" not in o.order_text                # and nothing was cut
+
+
+def test_truncation_is_announced_when_it_does_happen():
+    # The remaining cap is a runaway guard. If it ever fires, the document must
+    # not look complete.
+    from ecourts_client.consumer import parsers
+
+    row = _order_row_with_html()
+    row["documentBase64"] = "<html><body><p>" + ("x" * (parsers._MAX_ORDER_TEXT + 50)) + "</p></body></html>"
+    o = parse_case(row).orders[0]
+    assert o.order_text.endswith(parsers._TRUNCATION_MARKER)
+
+
+def test_identical_order_and_judgment_collapse_to_one():
+    # Live on NC/CC/2057/2016: e-Jagriti puts the SAME 16k HTML judgment in both
+    # documentBase64 and judgmentOrderDocumentBase64 with the same date. The user
+    # must see it once, labelled as the judgment.
+    row = _order_row_with_html()
+    row["judgemtmentDate"] = row["orderDate"]
+    row["judgmentOrderDocumentBase64"] = row["documentBase64"]
+    orders = parse_case(row).orders
+    assert len(orders) == 1
+    assert orders[0].order_id.endswith("-judgment")
+
+
+def test_distinct_order_and_judgment_are_both_kept():
+    # Dedup must key on CONTENT, not on "both slots populated" — a genuine daily
+    # order plus a separate judgment is two real documents.
+    row = _order_row_with_html()
+    row["judgemtmentDate"] = "2024-12-20"
+    row["judgmentOrderDocumentBase64"] = _REAL_PDF_B64
+    orders = parse_case(row).orders
+    assert len(orders) == 2
+    assert {o.order_id.endswith("-judgment") for o in orders} == {True, False}
+
+
 def test_judgment_only_row_yields_a_judgment_order():
     c = parse_case(_judgment_only_row())
     assert len(c.orders) == 1

@@ -154,7 +154,21 @@ def _pdf_b64_or_none(value: Any) -> str | None:
     return s
 
 
-_MAX_ORDER_TEXT = 8000
+# A whole judgment, not a snippet. This text is the ONLY copy of an HTML-only
+# order — e-Jagriti serves no PDF for it and no re-fetchable URL — so the
+# consumer renders a document straight from this string. The old 8000 cap
+# silently sliced NC/CC/2057/2016 mid-sentence and threw away the operative
+# directions ("...the above consumer complaints stand disposed of"), which is
+# precisely the part a user opens an order to read. The limit that remains is a
+# runaway guard, not an editorial one, and truncation is now ANNOUNCED — a
+# lossy document must never look complete.
+_MAX_ORDER_TEXT = 200_000
+_TRUNCATION_MARKER = "\n\n[... order text truncated ...]"
+
+# Tags that imply a line break in the rendered page. e-Jagriti's order pages are
+# table-based (one <td> per line), so without these every judgment collapses
+# into a single unreadable paragraph.
+_BLOCK_SEPARATOR = "\n"
 
 
 def _html_order_text(value: Any) -> str | None:
@@ -166,7 +180,11 @@ def _html_order_text(value: Any) -> str | None:
     drop it, pull the visible text so the order still surfaces on the timeline
     (date + text). Uses the stdlib ``html.parser`` (no lxml dependency) and is
     defensive — any parse failure degrades to None, never crashing the fetch.
-    Only treats a RAW ``<…`` string as HTML (a base64 PDF is handled upstream)."""
+    Only treats a RAW ``<…`` string as HTML (a base64 PDF is handled upstream).
+
+    ★ Line structure is PRESERVED (block elements separate with a newline, runs
+    of blank lines collapse). Callers render this to a document the user reads,
+    and a space-joined judgment is a wall of text nobody can follow."""
     if not value:
         return None
     s = str(value).strip()
@@ -175,15 +193,23 @@ def _html_order_text(value: Any) -> str | None:
     try:
         from bs4 import BeautifulSoup
 
-        text = BeautifulSoup(s, "html.parser").get_text(" ", strip=True)
+        text = BeautifulSoup(s, "html.parser").get_text(_BLOCK_SEPARATOR, strip=True)
     except Exception:
         import re
 
-        text = re.sub(r"<[^>]+>", " ", s)
-    text = " ".join(text.split())  # collapse runs of whitespace
+        text = re.sub(r"<[^>]+>", _BLOCK_SEPARATOR, s)
+    # Collapse horizontal runs per line, then squeeze blank-line runs to one.
+    lines = [" ".join(ln.split()) for ln in text.splitlines()]
+    out: list[str] = []
+    for ln in lines:
+        if ln or (out and out[-1]):
+            out.append(ln)
+    text = "\n".join(out).strip()
     if not text:
         return None
-    return text[:_MAX_ORDER_TEXT]
+    if len(text) > _MAX_ORDER_TEXT:
+        return text[:_MAX_ORDER_TEXT] + _TRUNCATION_MARKER
+    return text
 
 
 def _one_order(
@@ -213,6 +239,24 @@ def _one_order(
     )
 
 
+def _same_document(a: OrderRef, b: OrderRef) -> bool:
+    """True when two OrderRefs carry the SAME underlying document.
+
+    e-Jagriti frequently populates ``documentBase64`` and
+    ``judgmentOrderDocumentBase64`` with a BYTE-IDENTICAL payload — live on
+    NC/CC/2057/2016, where both fields are the same 16,446-char HTML judgment and
+    ``orderDate == judgemtmentDate == dateOfDisposal``. Emitting both would show
+    the user the same judgment twice (and store it twice on disk), so identical
+    content on the same date collapses to one order."""
+    if a.order_date != b.order_date:
+        return False
+    if a.inline_pdf_b64 or b.inline_pdf_b64:
+        return a.inline_pdf_b64 == b.inline_pdf_b64
+    if a.order_text or b.order_text:
+        return a.order_text == b.order_text
+    return bool(a.order_url) and a.order_url == b.order_url
+
+
 def _parse_orders(row: dict[str, Any], case_no: str) -> list[OrderRef]:
     """Up to two OrderRefs per row: the daily ORDER and the final JUDGMENT.
 
@@ -222,6 +266,11 @@ def _parse_orders(row: dict[str, Any], case_no: str) -> list[OrderRef]:
     Each PDF arrives INLINE as base64 (validated → ``OrderRef.inline_pdf_b64``)
     or as a document path (``order_url``). The base id is the filing reference so
     the two refs stay distinct.
+
+    ★ When both slots turn out to be the SAME document (see ``_same_document``)
+    the JUDGMENT ref wins and the daily-order duplicate is dropped: it is the
+    accurate label for the artifact, and ``-judgment`` is already the id every
+    stored Consumer order row carries in prod, so dedup can't orphan one.
     """
     ref_id = _str(row.get("filingReferenceNumber")) or case_no
     out: list[OrderRef] = []
@@ -240,6 +289,7 @@ def _parse_orders(row: dict[str, Any], case_no: str) -> list[OrderRef]:
         order_id=f"{ref_id}-judgment",
     )
     if judgment:
+        out = [o for o in out if not _same_document(o, judgment)]
         out.append(judgment)
     return out
 
