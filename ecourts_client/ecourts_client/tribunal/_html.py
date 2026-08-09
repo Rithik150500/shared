@@ -12,11 +12,14 @@ from datetime import date, datetime
 
 from bs4 import BeautifulSoup, Tag
 
-_DMY = re.compile(r"(\d{2})/(\d{2})/(\d{4})")
+# Both separators are live on the SAME page: TDSAT's hearing table renders
+# DD/MM/YYYY while its ORDER DETAILS column renders DD-MM-YYYY. A slash-only
+# pattern silently skipped every order date.
+_DMY = re.compile(r"(\d{2})[-/](\d{2})[-/](\d{4})")
 
 
 def parse_dmy(text: str | None) -> date | None:
-    """First ``DD/MM/YYYY`` in ``text`` → date; None if absent/invalid."""
+    """First ``DD/MM/YYYY`` or ``DD-MM-YYYY`` in ``text`` → date; None if absent/invalid."""
     if not text:
         return None
     m = _DMY.search(text)
