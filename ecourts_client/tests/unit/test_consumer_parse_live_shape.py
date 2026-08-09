@@ -184,6 +184,38 @@ def test_distinct_order_and_judgment_are_both_kept():
     assert len(orders) == 2
     assert {o.order_id.endswith("-judgment") for o in orders} == {True, False}
 
+def test_html_order_text_strips_a_server_error_banner():
+    """A commission's order page can carry a PHP error banner in its body (live
+    on tdsat.gov.in; the same NIC/PHP stack serves e-Jagriti's order views). The
+    banner is page furniture and must not ride through into the order text."""
+    row = _order_row_with_html()
+    row["documentBase64"] = (
+        "<html><body><b>DIST CONSUMER COMMISSION, BANGALORE URBAN</b>"
+        "<p>partly allowed</p>"
+        "<b>Warning</b> :  include(): Failed opening 'orderp.php' for inclusion "
+        "in /home/www/html/order.php on line 22"
+        "</body></html>"
+    )
+    o = parse_case(row).orders[0]
+    assert o.order_text.splitlines() == [
+        "DIST CONSUMER COMMISSION, BANGALORE URBAN",
+        "partly allowed",
+    ]
+    assert "Warning" not in o.order_text
+    assert "on line 22" not in o.order_text
+
+
+def test_html_order_text_keeps_a_court_notice():
+    """False-positive guard: 'Notice:' is ordinary order language, and stripping
+    on the bare word would delete the operative part of the order."""
+    row = _order_row_with_html()
+    row["documentBase64"] = (
+        "<html><body><p>ORDER Notice: issue notice to the opposite party "
+        "returnable on 12.09.2026.</p></body></html>"
+    )
+    o = parse_case(row).orders[0]
+    assert "issue notice to the opposite party returnable on 12.09.2026." in o.order_text
+
 
 def test_judgment_only_row_yields_a_judgment_order():
     c = parse_case(_judgment_only_row())

@@ -12,6 +12,12 @@ import binascii
 from datetime import date, datetime
 from typing import Any
 
+from ecourts_client._order_text import (
+    BLOCK_SEPARATOR,
+    MAX_ORDER_TEXT,
+    TRUNCATION_MARKER,
+    clean_order_text,
+)
 from ecourts_client.consumer.models import CommissionRef
 from ecourts_client.errors import SchemaChanged
 from ecourts_client.models import Case, CaseStub, OrderRef, Party
@@ -154,21 +160,13 @@ def _pdf_b64_or_none(value: Any) -> str | None:
     return s
 
 
-# A whole judgment, not a snippet. This text is the ONLY copy of an HTML-only
-# order — e-Jagriti serves no PDF for it and no re-fetchable URL — so the
-# consumer renders a document straight from this string. The old 8000 cap
-# silently sliced NC/CC/2057/2016 mid-sentence and threw away the operative
-# directions ("...the above consumer complaints stand disposed of"), which is
-# precisely the part a user opens an order to read. The limit that remains is a
-# runaway guard, not an editorial one, and truncation is now ANNOUNCED — a
-# lossy document must never look complete.
-_MAX_ORDER_TEXT = 200_000
-_TRUNCATION_MARKER = "\n\n[... order text truncated ...]"
-
-# Tags that imply a line break in the rendered page. e-Jagriti's order pages are
-# table-based (one <td> per line), so without these every judgment collapses
-# into a single unreadable paragraph.
-_BLOCK_SEPARATOR = "\n"
+# Re-exported so callers (and tests) keep a single source of truth for the cap.
+# The old 8000 cap silently sliced NC/CC/2057/2016 mid-sentence and threw away
+# the operative directions; what remains is a runaway guard, and truncation is
+# ANNOUNCED — a lossy document must never look complete.
+_MAX_ORDER_TEXT = MAX_ORDER_TEXT
+_TRUNCATION_MARKER = TRUNCATION_MARKER
+_BLOCK_SEPARATOR = BLOCK_SEPARATOR
 
 
 def _html_order_text(value: Any) -> str | None:
@@ -184,7 +182,9 @@ def _html_order_text(value: Any) -> str | None:
 
     ★ Line structure is PRESERVED (block elements separate with a newline, runs
     of blank lines collapse). Callers render this to a document the user reads,
-    and a space-joined judgment is a wall of text nobody can follow."""
+    and a space-joined judgment is a wall of text nobody can follow. Whitespace
+    normalisation, the cap, and stripping any server-side error banner the portal
+    rendered into the page are all delegated to ``clean_order_text``."""
     if not value:
         return None
     s = str(value).strip()
@@ -198,18 +198,7 @@ def _html_order_text(value: Any) -> str | None:
         import re
 
         text = re.sub(r"<[^>]+>", _BLOCK_SEPARATOR, s)
-    # Collapse horizontal runs per line, then squeeze blank-line runs to one.
-    lines = [" ".join(ln.split()) for ln in text.splitlines()]
-    out: list[str] = []
-    for ln in lines:
-        if ln or (out and out[-1]):
-            out.append(ln)
-    text = "\n".join(out).strip()
-    if not text:
-        return None
-    if len(text) > _MAX_ORDER_TEXT:
-        return text[:_MAX_ORDER_TEXT] + _TRUNCATION_MARKER
-    return text
+    return clean_order_text(text)
 
 
 def _one_order(

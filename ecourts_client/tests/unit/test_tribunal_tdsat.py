@@ -50,6 +50,68 @@ def test_parse_parties_and_history():
     assert c.history[0].purpose == "For Preliminary Hearing"
 
 
+# The REAL page (captured 2026-08-09, Broadcasting Petition/345/2024) carries a
+# separate "ORDER DETAILS" table BELOW the hearing table, with its own Order Date
+# column — and that column uses DD-MM-YYYY, not DD/MM/YYYY. Structure verbatim;
+# parties synthetic (real litigants are PII).
+_HTML_ORDER_DETAILS = """
+<html><body>
+<table>
+<tr><td>Case Type/Case No/Year</td><td>Broadcasting Petition/345/2024</td></tr>
+<tr><td>Case Status.</td><td>Pending</td></tr>
+</table>
+<div>PETITIONER DETAIL Petitioner Name   -ACME LTD Pet. Advocate Name: ADV P Q</div>
+<div>RESPONDENTS DETAIL Respondent Name   -BETA LLP Respondent Advocate  -ADV R S</div>
+<table>
+<tr><th>Bench No</th><th>Hearing Date</th><th>Purpose</th><th>Status</th><th>Order</th></tr>
+<tr><td>1</td><td>06/05/2026</td><td>For Issues</td><td>P</td><td>Adjourned</td></tr>
+<tr><td>1</td><td>25/05/2026</td><td>For Issues</td><td>P</td><td>Adjourned</td></tr>
+</table>
+<tr><th colspan="8">ORDER DETAILS</th></tr>
+<tr><th>Serial No.</th><th>Case No.</th><th>Party Detail</th><th>Order Date</th></tr>
+<tr>
+  <td colspan="1">1</td>
+  <td colspan="2"><a href="javascript:popsurety_pet_adv_name('NzI4Mzg=');">BROADCASTING PETITION/345/2024</a></td>
+  <td colspan="2">ACME LTD VS BETA LLP</td>
+  <td colspan="2"> 13-07-2026</td>
+</tr>
+<tr>
+  <td colspan="1">2</td>
+  <td colspan="2"><a href="javascript:popsurety_pet_adv_name('NzIxMTA=');">BROADCASTING PETITION/345/2024</a></td>
+  <td colspan="2">ACME LTD VS BETA LLP</td>
+  <td colspan="2"> 25-05-2026</td>
+</tr>
+<tr>
+  <td colspan="1">3</td>
+  <td colspan="2"><a href="javascript:popsurety_pet_adv_name('NzEzNDk=');">BROADCASTING PETITION/345/2024</a></td>
+  <td colspan="2">ACME LTD VS BETA LLP</td>
+  <td colspan="2"> 06-05-2026</td>
+</tr>
+</body></html>
+"""
+
+
+def test_order_dates_come_from_the_order_details_column():
+    """Every order used to collapse onto ONE date — the case's latest hearing.
+
+    Two compounding causes, both visible above: the ORDER DETAILS rows put the
+    date AFTER the link (the old rule took the nearest PRECEDING date, and every
+    link sits below the whole hearing table), and the column is DD-MM-YYYY while
+    the date regex only matched DD/MM/YYYY, so the real dates were invisible.
+    Live on 2026-08-09 all 13 orders of Broadcasting Petition/345/2024 came back
+    as 2026-05-25; 3 of 3 TDSAT cases with multiple orders were affected.
+    """
+    c = parse_status_html(_HTML_ORDER_DETAILS, casetype="1", caseno="345", caseyear="2024")
+    got = {o.order_id: o.order_date.isoformat() for o in c.orders}
+    assert got == {
+        "NzI4Mzg=": "2026-07-13",
+        "NzIxMTA=": "2026-05-25",
+        "NzEzNDk=": "2026-05-06",
+    }
+    # and they are NOT all the latest hearing date
+    assert len({o.order_date for o in c.orders}) == 3
+
+
 def test_empty_page_is_cnr_not_found():
     with pytest.raises(CNRNotFound):
         parse_status_html("<html><body>no case here</body></html>", casetype="2", caseno="9", caseyear="2099")
@@ -76,6 +138,65 @@ def test_inline_order_text(monkeypatch):
     base = parse_status_html(_HTML, casetype="2", caseno="1", caseyear="2023")
     out = client._inline_order_text(base)
     assert "Petition allowed" in out.orders[0].order_text
+
+
+def test_inline_order_text_strips_the_portal_php_fatal_error(monkeypatch):
+    """orderp.php raises in dompdf AFTER emitting the order, so EVERY TDSAT order
+    sheet comes back HTTP 200 with a PHP Fatal error banner glued to the end.
+
+    Banner text below is the real one captured from tdsat.gov.in on 2026-08-09.
+    It reached users: casepilot renders order_text into a PDF and 17 documents
+    shipped with '…thrown in …/Dompdf.php on line 313' printed at the bottom.
+    """
+    client = TDSATClient()
+    client.max_inline_orders = 3
+
+    class _R:
+        status_code = 200
+        text = (
+            "<html><body>ORDER At the request by the Counsel for the Respondents, "
+            "these matters are adjourned to 13.7.2026 for framing of Issues. "
+            "( SHASHI KANT SHARMA) DEPUTY REGISTRAR"
+            "<b>Fatal error</b> :  Uncaught Error: Call to undefined function "
+            "Dompdf\\mb_internal_encoding() in "
+            "/home/www/html/tdsat/vendor/dompdf/dompdf/src/Dompdf.php:313 Stack trace: "
+            "#0 /home/www/html/tdsat/vendor/dompdf/dompdf/src/Dompdf.php(287): "
+            "Dompdf\\Dompdf-&gt;setPhpConfig() #1 "
+            "/home/www/html/tdsat/Delhi/services/orderp.php(17): "
+            "Dompdf\\Dompdf-&gt;__construct() #2 {main} thrown in "
+            "/home/www/html/tdsat/vendor/dompdf/dompdf/src/Dompdf.php on line 313"
+            "</body></html>"
+        )
+
+    monkeypatch.setattr(client._http, "get", lambda *a, **k: _R())
+    base = parse_status_html(_HTML, casetype="2", caseno="1", caseyear="2023")
+    text = client._inline_order_text(base).orders[0].order_text
+
+    assert "adjourned to 13.7.2026 for framing of Issues" in text
+    assert text.endswith("DEPUTY REGISTRAR")
+    for leak in ("Fatal error", "Dompdf", "Stack trace", "thrown in", "on line 313"):
+        assert leak not in text, leak
+
+
+def test_inline_order_text_none_when_the_sheet_is_only_an_error(monkeypatch):
+    """A sheet that failed to render carries no order — better to surface nothing
+    than an empty shell that reads like an order with no content."""
+    client = TDSATClient()
+    client.max_inline_orders = 3
+
+    class _R:
+        status_code = 200
+        text = (
+            "<html><body><b>Fatal error</b> :  Uncaught Error: boom in "
+            "/home/www/html/tdsat/vendor/dompdf/dompdf/src/Dompdf.php:313 "
+            "Stack trace: #0 {main} thrown in "
+            "/home/www/html/tdsat/vendor/dompdf/dompdf/src/Dompdf.php on line 313"
+            "</body></html>"
+        )
+
+    monkeypatch.setattr(client._http, "get", lambda *a, **k: _R())
+    base = parse_status_html(_HTML, casetype="2", caseno="1", caseyear="2023")
+    assert client._inline_order_text(base).orders[0].order_text is None
 
 
 def test_split_identifier():
