@@ -255,7 +255,13 @@ def test_nowlez_full_lifecycle_trial_to_cancel(
     # Add some cases to the user so the cancel-→fallback path matters.
     _add_cases(session, user_id, n=3)
 
-    # Step 3: subscription.activated webhook → status=active, intro=in_intro.
+    # Step 3: subscription.activated webhook → status=active. The intro
+    # promo was retired 2026-08-10 (see subscriptions.py step 2): no offer
+    # was ever attached, so select_tier_and_subscribe wrote 'skipped', a
+    # terminal state, rather than 'pre_first_payment' — the webhook's
+    # pre_first_payment guard therefore does not fire and 'skipped' holds.
+    # The in_intro→past_intro mechanism itself is still exercised directly
+    # by test_webhook_replay_3x_side_effects_happen_exactly_once below.
     raw, sig = _wrap_event(
         "subscription.activated",
         subscription={
@@ -276,9 +282,10 @@ def test_nowlez_full_lifecycle_trial_to_cancel(
         select(Subscription).where(Subscription.id == sub.id)
     ).scalar_one()
     assert sub.status == "active"
-    assert sub.intro_promo_state == "in_intro"
+    assert sub.intro_promo_state == "skipped"
 
-    # Step 4: first subscription.charged → intro_promo terminal.
+    # Step 4: first subscription.charged — intro_promo stays 'skipped'
+    # (already terminal; no promo to consume).
     raw, sig = _wrap_event(
         "subscription.charged",
         subscription={"id": rzp_sub_id, "notes": {"product": "nowlez"}},
@@ -292,10 +299,10 @@ def test_nowlez_full_lifecycle_trial_to_cancel(
     sub = session.execute(
         select(Subscription).where(Subscription.id == sub.id)
     ).scalar_one()
-    assert sub.intro_promo_state == "past_intro"
+    assert sub.intro_promo_state == "skipped"
 
-    # Step 5: second charged event — should NOT re-transition intro
-    # promo (already terminal) but the template send still fires.
+    # Step 5: second charged event — intro_promo stays 'skipped' (unchanged)
+    # but the template send still fires.
     raw, sig = _wrap_event(
         "subscription.charged",
         subscription={"id": rzp_sub_id, "notes": {"product": "nowlez"}},
@@ -309,7 +316,7 @@ def test_nowlez_full_lifecycle_trial_to_cancel(
     sub = session.execute(
         select(Subscription).where(Subscription.id == sub.id)
     ).scalar_one()
-    assert sub.intro_promo_state == "past_intro"  # unchanged
+    assert sub.intro_promo_state == "skipped"  # unchanged
 
     # Step 6: user cancels via the API.
     _run(cancel_subscription(
