@@ -50,7 +50,9 @@ def test_billing_config_constructs_from_env(monkeypatch: pytest.MonkeyPatch) -> 
     assert config.razorpay_offer_id_counsel_half_off == "offer_counsel_half"
 
     # Spec defaults (Section 2.5) take effect when the env doesn't override them.
-    assert config.munshi_price_per_case_paise == 1000
+    # Munshi is bundled into the Nowlez plan (owner decision 2026-08-08) — no
+    # separate per-case charge, see case_billing/config.py.
+    assert config.munshi_price_per_case_paise == 0
     assert config.munshi_case_cap == 200
     assert config.munshi_grace_period_days == 7
     assert config.nowlez_trial_duration_days == 30
