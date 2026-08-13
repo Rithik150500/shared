@@ -1,8 +1,19 @@
 """Intro-promo state machine for Nowlez subscriptions (Task 7.2).
 
-Spec Section 1.4 Q2: cycle-1 ("first paid month after the trial") on
-Chambers and Counsel ships at half price via a lifetime-once Razorpay
-offer. Advocate is *excluded* because it's already at the floor price.
+⚠ THE INTRO PROMO IS RETIRED (owner decision, 2026-08-10). Nothing in this
+module attaches an offer any more: ``nowlez.subscriptions`` hardcodes
+``intro_offer_id = None``, so every new subscription lands in ``skipped``
+rather than ``pre_first_payment``. ``get_intro_offer_id`` and the state
+machine below are kept as working plumbing for a promo that may return —
+they are not describing live behaviour. Re-enabling means changing this,
+``subscriptions.py``, ``pricing.calculate_first_payment_paise`` and the
+tier picker's copy together; a discount the biller applies and the card
+does not promise is as bad as the reverse.
+
+Historical, for context on the shapes below — Spec Section 1.4 Q2: cycle-1
+("first paid month after the trial") on Chambers and Counsel shipped at half
+price via a lifetime-once Razorpay offer. Advocate was *excluded* because it
+was already at the floor price.
 
 State machine on ``subscriptions.intro_promo_state``:
 
