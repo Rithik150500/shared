@@ -5,7 +5,7 @@ the "pick tier" route at the end of the trial:
 
   verify users_nowlez.tier IS NULL → raise TierAlreadySelected if not
   → verify chosen_tier ∈ {'advocate','counsel','chambers'}
-  → check intro-promo eligibility (lifetime-once)
+  → intro-promo offer attachment (RETIRED 2026-08-10 — see step 2 below)
   → find_or_create_referral if a code was supplied
   → call Razorpay subscriptions.create_subscription with plan + offer
   → INSERT subscriptions row (status='created')
@@ -39,12 +39,17 @@ from case_billing.metrics import (
     billing_nowlez_subscriptions_created_total,
     billing_nowlez_subscriptions_past_due_total,
 )
-from case_billing.nowlez.promos import get_intro_offer_id
 from case_billing.nowlez.referrals import find_or_create_referral
-from case_billing.pricing import is_eligible_for_intro_promo
 from case_billing.razorpay_client.subscriptions import (
     create_subscription as rzp_create_subscription,
 )
+
+# NOTE: case_billing.nowlez.promos.get_intro_offer_id and
+# case_billing.pricing.is_eligible_for_intro_promo are deliberately NOT
+# imported here any more — see the step-2 comment in
+# select_tier_and_subscribe for why the intro-promo offer is no longer
+# attached at all. Both functions are still defined and exported; this
+# call site is just not using them.
 
 
 # Tiers we recognise. The set is duplicated in the SQL CHECK constraint
@@ -110,11 +115,18 @@ async def select_tier_and_subscribe(
             f"User {user_id} already has tier {nowlez_row.tier!r}"
         )
 
-    # 2. Intro promo eligibility + offer id.
-    intro_eligible = is_eligible_for_intro_promo(user_id, session)
-    intro_offer_id = (
-        get_intro_offer_id(chosen_tier, config) if intro_eligible else None
-    )
+    # 2. Intro promo: RETIRED on 2026-08-10 (owner decision). Chambers is now
+    # the only sellable tier; case_billing.pricing.calculate_first_payment_paise
+    # always returns list price, and the tier picker UI promises exactly that
+    # — no discount. Attaching a Razorpay offer here would silently bill LESS
+    # than the card promised: that's not a discount, it's a chargeback risk.
+    #
+    # get_intro_offer_id and the razorpay_offer_id_*_half_off config fields
+    # are deliberately left in place (not deleted) in case a promo is ever
+    # reinstated, but this call site must not resume using them without also
+    # changing calculate_first_payment_paise and the tier picker together —
+    # otherwise the card and the invoice disagree again.
+    intro_offer_id: str | None = None
 
     # 3. Referral attachment (no-op for None code).
     referral = None
@@ -153,7 +165,18 @@ async def select_tier_and_subscribe(
         billing_cycle="monthly",
         razorpay_subscription_id=rzp_subscription.id,
         status="trialing",
-        intro_promo_state="pre_first_payment",
+        # No offer attached means no promo was applied — the ledger starts
+        # (and, being terminal, stays) at 'skipped' rather than
+        # 'pre_first_payment'. 'pre_first_payment' would otherwise transition
+        # to the CONSUMING 'in_intro' state on the subscription.activated
+        # webhook (case_billing.nowlez.promos.transition_intro_promo_state)
+        # regardless of whether a discount was actually given — burning this
+        # user's lifetime-once eligibility for nothing. Tied to intro_offer_id
+        # rather than hardcoded so this can't silently drift from step 2 above
+        # if offer attachment is ever reinstated.
+        intro_promo_state=(
+            "pre_first_payment" if intro_offer_id is not None else "skipped"
+        ),
         referral_state="pending_mutual" if referral is not None else "no_referral",
     )
     session.add(sub)

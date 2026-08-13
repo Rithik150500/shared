@@ -7,7 +7,8 @@ a session — and this module fans out to:
 * eligibility check (cross-product, spec Section 2.3)
 * anniversary cycle window (Asia/Kolkata day boundaries)
 * DISTINCT case count across the cycle
-* 200-cap clamp + amount computation (count × ₹10 per case)
+* 200-cap clamp + amount computation (count × MUNSHI_PRICE_PER_CASE_PAISE,
+  which is 0 as of the 2026-08-08 bundling decision — see its comment below)
 * Razorpay customer / invoice / payment-link / UPI-link creation
 * ``munshi_invoices`` row insert with the Razorpay IDs persisted
 * WhatsApp ``munshi_invoice_payment_v1`` template send
@@ -70,11 +71,27 @@ from case_billing.shared.multi_product import (
 )
 
 
-# Per-case price in paise (₹10) — duplicated here from BillingConfig to
-# keep this module callable without instantiating the config object in
-# every cron tick. The BillingConfig default is the source of truth and
-# Munshi's deployment script asserts the two match at startup.
-MUNSHI_PRICE_PER_CASE_PAISE: int = 1000
+# Per-case price in paise. Munshi is bundled into the Nowlez plan (owner
+# decision 2026-08-08) — there is no separate per-case charge, so this is 0.
+#
+# This is a DUPLICATE of BillingConfig.munshi_price_per_case_paise, not a
+# read of it: generate_anniversary_invoice() below takes no `config`
+# parameter, and its only production caller — ecourts-bot's
+# bot_scaffold/crons/munshi_invoice_generation.py — already constructs a
+# BillingConfig (to build the Razorpay client) but never threads it through
+# to this function. Threading a real `config` parameter through here (and
+# updating that cron) is the properly-scoped fix, but it crosses into the
+# ecourts-bot repo and is out of scope for this change.
+#
+# There is NO startup assertion anywhere in shared/casepilot/ecourts-bot
+# that keeps this constant and BillingConfig's default in sync — an
+# earlier version of this comment claimed one existed; it did not, and
+# flipping MUNSHI_BILLING_ENABLED on would have silently re-billed
+# ₹10/case despite the owner's decision. Keep the two equal BY HAND.
+# test_munshi_price_constant_matches_billing_config_default (in
+# tests/integration/test_munshi_invoice_cycle.py) fails loudly if they
+# diverge — that test is the guarantee this comment used to only claim.
+MUNSHI_PRICE_PER_CASE_PAISE: int = 0
 
 # 200-case cap (spec Section 1.2). Same rationale as the price constant.
 MUNSHI_CASE_CAP: int = 200
@@ -135,7 +152,7 @@ async def generate_anniversary_invoice(
        This is the cross-product gate (Task 13): Munshi-eligibility AND
        not on paid Nowlez AND not in active Nowlez trial.
     2. User has no ``users_munshi.billing_anniversary_date`` set → None.
-    3. Zero cases in the cycle window → None (no invoice for "0 × ₹10").
+    3. Zero cases in the cycle window → None (no invoice for zero cases).
     4. A ``munshi_invoices`` row already exists for this ``(user_id,
        cycle_start, cycle_end)`` → None (idempotent; safe to retry).
 

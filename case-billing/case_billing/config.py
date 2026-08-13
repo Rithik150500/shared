@@ -42,7 +42,12 @@ class BillingConfig(BaseSettings):
     razorpay_offer_id_counsel_half_off: str | None = None
 
     # --- Munshi postpaid tunables -------------------------------------------
-    munshi_price_per_case_paise: int = 1000  # ₹10 per case
+    # Munshi is bundled into the Nowlez plan (owner decision 2026-08-08). There
+    # is no separate per-case charge, so the price is 0 and invoice generation
+    # produces nothing to collect. The invoice cron is additionally gated off by
+    # MUNSHI_BILLING_ENABLED; this makes the price itself harmless if that flag
+    # is ever flipped.
+    munshi_price_per_case_paise: int = 0
     munshi_case_cap: int = 200
     munshi_grace_period_days: int = 7
 
