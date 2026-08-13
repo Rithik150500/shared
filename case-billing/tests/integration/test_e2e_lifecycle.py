@@ -362,6 +362,13 @@ def test_munshi_lifecycle_fallback_invoice_payment_invoice(
     anniversary invoice issued → invoice.paid marks status='paid' →
     second cycle generates a fresh invoice."""
     _patch_all(monkeypatch)
+    # The real MUNSHI_PRICE_PER_CASE_PAISE is 0 (Munshi is bundled into the
+    # Nowlez plan, 2026-08-08 — see invoices.py). This test's amount_paise
+    # assertion below is verifying the case-count × price arithmetic and its
+    # propagation through the invoice row, not the real-world price, so it
+    # pins a known non-zero test price rather than asserting a trivial 0 == 0.
+    from case_billing.munshi import invoices as inv_mod
+    monkeypatch.setattr(inv_mod, "MUNSHI_PRICE_PER_CASE_PAISE", 1000)
     sender = AsyncMock()
     client = FakeRazorpayClient()
 
@@ -408,7 +415,7 @@ def test_munshi_lifecycle_fallback_invoice_payment_invoice(
     session.flush()
     assert inv1 is not None
     assert inv1.case_count == 4
-    assert inv1.amount_paise == 4 * 1000  # 4 × ₹10
+    assert inv1.amount_paise == 4 * 1000  # 4 cases × test price (see monkeypatch above)
     assert inv1.status == "sent"
 
     # Step 4: invoice.paid arrives.

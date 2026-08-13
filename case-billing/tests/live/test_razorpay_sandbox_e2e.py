@@ -203,13 +203,18 @@ def _build_invoice_paid_payload(
 def test_munshi_invoice_paid_e2e_against_sandbox(
     session: Session,
     sandbox_creds: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Invoice generation → webhook → paid → enqueue → idempotency.
 
     Steps (mirrors task 2.1 spec):
 
     1. Set up a fresh Munshi user with three active case billing
-       periods. Three cases × ₹10 = ₹30 = 3000 paise.
+       periods. The real MUNSHI_PRICE_PER_CASE_PAISE is 0 (Munshi is
+       bundled into the Nowlez plan, 2026-08-08); this test monkeypatches
+       a non-zero test price so the amount/webhook/receipt assertions
+       below still exercise real numbers instead of 0 == 0 == 0. Three
+       cases × ₹10 test price = ₹30 = 3000 paise.
     2. Call ``generate_anniversary_invoice`` against the *real* sandbox
        Razorpay HTTP client. This issues a customer, an invoice, a
        payment link, and a UPI intent link against the sandbox.
@@ -252,6 +257,10 @@ def test_munshi_invoice_paid_e2e_against_sandbox(
     user_id = _make_munshi_user(session, anniversary=anniversary)
     _open_case_periods(session, user_id, n=3, period_start=period_start)
 
+    # Pin a known non-zero test price — see the docstring note above.
+    from case_billing.munshi import invoices as inv_mod
+    monkeypatch.setattr(inv_mod, "MUNSHI_PRICE_PER_CASE_PAISE", 1000)
+
     # 2. Real sandbox client. Constructor takes (key_id, key_secret) —
     # see RazorpayHTTPClient.__init__. The 30s timeout is the
     # package-wide default; sandbox calls are typically sub-second.
@@ -283,7 +292,7 @@ def test_munshi_invoice_paid_e2e_against_sandbox(
         )
         assert invoice_row.status == "sent"
         assert invoice_row.case_count == 3
-        assert invoice_row.amount_paise == 3 * 1000  # 3 cases × ₹10
+        assert invoice_row.amount_paise == 3 * 1000  # 3 cases × test price (see monkeypatch above)
         assert invoice_row.razorpay_invoice_id is not None
         razorpay_invoice_id = invoice_row.razorpay_invoice_id
 

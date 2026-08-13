@@ -25,7 +25,41 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from case_billing.munshi.invoices import generate_anniversary_invoice
+from case_billing.munshi.invoices import (
+    MUNSHI_PRICE_PER_CASE_PAISE,
+    generate_anniversary_invoice,
+)
+
+
+# --- config/constant drift guard --------------------------------------------
+
+
+def test_munshi_price_constant_matches_billing_config_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MUNSHI_PRICE_PER_CASE_PAISE (invoices.py) must equal
+    BillingConfig.munshi_price_per_case_paise (config.py) — see the long
+    comment on the constant for why they're two values instead of one.
+    There is no startup assertion enforcing this anywhere in
+    shared/casepilot/ecourts-bot; this test is that guarantee. If it
+    fails, one of the two was changed without the other.
+    """
+    monkeypatch.chdir(__import__("tempfile").mkdtemp())
+    for key, value in {
+        "RAZORPAY_KEY_ID": "rzp_test_key",
+        "RAZORPAY_KEY_SECRET": "rzp_test_secret",
+        "RAZORPAY_WEBHOOK_SECRET": "rzp_webhook_secret",
+        "RAZORPAY_PLAN_ID_ADVOCATE_MONTHLY": "plan_advocate_m",
+        "RAZORPAY_PLAN_ID_COUNSEL_MONTHLY": "plan_counsel_m",
+        "RAZORPAY_PLAN_ID_CHAMBERS_MONTHLY": "plan_chambers_m",
+        "RAZORPAY_PLAN_ID_CHAMBERS_QUARTERLY": "plan_chambers_q",
+        "RAZORPAY_PLAN_ID_CHAMBERS_YEARLY": "plan_chambers_y",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    from case_billing.config import BillingConfig
+
+    assert MUNSHI_PRICE_PER_CASE_PAISE == BillingConfig().munshi_price_per_case_paise
 
 
 @pytest.fixture()
@@ -152,18 +186,76 @@ async def _fake_create_upi_link(client: FakeRazorpayClient, **kwargs: Any) -> di
 
 
 def _patch_razorpay(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch the Razorpay helpers the invoice generator imports."""
+    """Patch the Razorpay helpers the invoice generator imports, and pin a
+    known non-zero test price.
+
+    The real MUNSHI_PRICE_PER_CASE_PAISE is 0 (Munshi is bundled into the
+    Nowlez plan, 2026-08-08 — see the constant's comment in invoices.py).
+    Tests below that assert on `amount_paise` are verifying the count ×
+    price arithmetic and its propagation into `amount_rupees` / Razorpay
+    line items / template variables, NOT the real-world price — with the
+    real price they'd assert `0 == 0` regardless of whether the
+    multiplication or the 200-case clamp actually worked, which defeats
+    the point of those tests. 1000 is chosen only because it matches the
+    now-retired real value, so the pre-existing expected numbers below
+    (e.g. amount_rupees == 50) don't also need to change.
+    """
     from case_billing.munshi import invoices as inv_mod
 
     monkeypatch.setattr(inv_mod, "rzp_create_customer", _fake_create_customer)
     monkeypatch.setattr(inv_mod, "rzp_create_invoice", _fake_create_invoice)
     monkeypatch.setattr(inv_mod, "rzp_create_payment_link", _fake_create_payment_link)
     monkeypatch.setattr(inv_mod, "rzp_create_upi_link", _fake_create_upi_link)
+    monkeypatch.setattr(inv_mod, "MUNSHI_PRICE_PER_CASE_PAISE", 1000)
 
 
 def _make_template_sender() -> AsyncMock:
     """Return an AsyncMock that satisfies the `send_template_fn` contract."""
     return AsyncMock(return_value="wamid_test")
+
+
+def test_real_price_produces_zero_amount_invoice(
+    session: Session, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proves the 2026-08-08 Munshi-bundling decision is real, not just a
+    comment on a constant nobody reads.
+
+    Deliberately does NOT call _patch_razorpay, which pins a non-zero TEST
+    price for the arithmetic tests below. This test patches only the
+    Razorpay helper functions and leaves MUNSHI_PRICE_PER_CASE_PAISE at its
+    real, current value — the same value the production cron would use if
+    MUNSHI_BILLING_ENABLED were ever flipped on. If someone reverts the
+    price back to a nonzero value without updating this test's assertion,
+    this fails loudly rather than the invoice silently billing again.
+    """
+    from case_billing.munshi import invoices as inv_mod
+
+    monkeypatch.setattr(inv_mod, "rzp_create_customer", _fake_create_customer)
+    monkeypatch.setattr(inv_mod, "rzp_create_invoice", _fake_create_invoice)
+    monkeypatch.setattr(inv_mod, "rzp_create_payment_link", _fake_create_payment_link)
+    monkeypatch.setattr(inv_mod, "rzp_create_upi_link", _fake_create_upi_link)
+    # No price patch here — this is the real MUNSHI_PRICE_PER_CASE_PAISE.
+
+    user_id = _make_munshi_user(session, anniversary=date(2026, 3, 15))
+    _open_case_periods(
+        session, user_id, n=5,
+        period_start=datetime(2026, 3, 1, tzinfo=timezone.utc),
+    )
+
+    invoice = _run(
+        generate_anniversary_invoice(
+            user_id=user_id,
+            session=session,
+            razorpay_client=FakeRazorpayClient(),
+            send_template_fn=_make_template_sender(),
+            today=date(2026, 4, 15),
+        )
+    )
+    session.flush()
+
+    assert invoice is not None
+    assert invoice.case_count == 5
+    assert invoice.amount_paise == 0
 
 
 # ---------- happy path -----------------------------------------------------
@@ -199,7 +291,7 @@ def test_happy_path_creates_invoice_and_sends_template(
 
     assert invoice is not None
     assert invoice.case_count == 5
-    assert invoice.amount_paise == 5 * 1000  # 5 cases × ₹10
+    assert invoice.amount_paise == 5 * 1000  # 5 cases × test price (see _patch_razorpay)
     assert invoice.status == "sent"
     assert invoice.razorpay_invoice_id == client.next_invoice_id
 
@@ -243,7 +335,7 @@ def test_200_case_cap_clamps_invoice_amount(
     assert invoice is not None
     # Raw count preserved, but billed amount uses min(count, 200).
     assert invoice.case_count == 250
-    assert invoice.amount_paise == 200 * 1000
+    assert invoice.amount_paise == 200 * 1000  # clamped count × test price (see _patch_razorpay)
 
 
 def test_zero_cases_skips_invoice(
