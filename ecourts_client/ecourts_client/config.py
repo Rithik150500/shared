@@ -23,6 +23,12 @@ class ECourtsConfig(BaseSettings):
     ecourts_retry_max_attempts: int = 3
     ecourts_retry_base_delay_seconds: float = 1.0
 
+    # Read-through cache TTL for the quasi-static picker/list endpoints (states,
+    # districts, complexes, case-types, police stations, HC benches). 24h by
+    # default -- these lists change on a year+ scale. Only active when a consumer
+    # wires a Redis backend via ecourts_client.cache.set_backend().
+    ecourts_cache_ttl_seconds: int = 86400
+
     # Proactive burst control (opt-in tuning knob; OFF by default). eCourts
     # throttles IP bursts to HTTP 405 + an HTML error page for ~15-30 min
     # (docs/RE_NOTES_v4.md); a bulk add/refresh fires one display_pdf_new.php POST

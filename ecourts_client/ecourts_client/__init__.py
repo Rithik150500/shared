@@ -57,6 +57,7 @@ from ecourts_client.models import (
     StateRef,
 )
 
+from ecourts_client.cache import clear_backend, get_backend, set_backend  # noqa: E402
 from ecourts_client.config import ECourtsConfig  # noqa: E402
 from ecourts_client.resilience.metrics import setup_sentry_tag  # noqa: E402
 
@@ -91,7 +92,7 @@ __all__ = [
     "HearingHistoryRow", "HighCourtClient", "IdentifierKind",
     "IdentifierMalformed", "JWTExpired", "ObjectionDetails",
     "OrderRef", "PDFInvalid", "PDFNotFound", "Party", "PoliceStationRef",
-    "RateLimited", "SchemaChanged", "StateRef", "fetch_case",
-    "fetch_case_for_forum", "fetch_pdf", "get_adapter", "get_client_for",
-    "has_automated_adapter", "register_adapter",
+    "RateLimited", "SchemaChanged", "StateRef", "clear_backend", "fetch_case",
+    "fetch_case_for_forum", "fetch_pdf", "get_adapter", "get_backend",
+    "get_client_for", "has_automated_adapter", "register_adapter", "set_backend",
 ]

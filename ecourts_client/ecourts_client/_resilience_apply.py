@@ -21,11 +21,29 @@ from __future__ import annotations
 
 from functools import wraps
 
+from ecourts_client.cache.decorator import with_cache_sync
+from ecourts_client.cache.registry import CACHE_REGISTRY
 from ecourts_client.config import ECourtsConfig
 from ecourts_client.resilience import (
     with_circuit_breaker_sync,
     with_retry_sync,
     with_semaphore_sync,
+)
+from ecourts_client.state_fallback import with_static_state_fallback
+
+# (class, method) -> (item_cls, key_args) for the read-through cache. The cache
+# is layered OUTSIDE the resilience stack (see apply_sync_resilience) so a hit
+# is served even while the shared circuit breaker is open during a throttle.
+_CACHE_SPECS = {
+    (class_name, method_name): (item_cls, key_args)
+    for class_name, method_name, item_cls, key_args in CACHE_REGISTRY
+}
+
+# ``list_states`` is the first step of every guided search and its list is
+# quasi-immutable, so it gets a baked-in static fallback as the ABSOLUTE
+# outermost layer -- the state step can never be throttled to a dead end.
+_STATE_FALLBACK_METHODS = frozenset(
+    {("DistrictCourtClient", "list_states"), ("HighCourtClient", "list_states")}
 )
 
 
@@ -121,4 +139,18 @@ def apply_sync_resilience(*, config: ECourtsConfig | None = None) -> None:
         if getattr(current, _RESILIENCE_MARKER, False):
             continue  # already wrapped -- idempotency
         wrapped = _build_wrapped(current, config=config)
+        # Cache layer, OUTSIDE the resilience stack so hits bypass the circuit
+        # breaker (survive an IP-wide throttle). Applied to the resilience
+        # wrapper, which carries __wrapped__=raw so the cache still reads the
+        # real parameter signature for key extraction.
+        cache_spec = _CACHE_SPECS.get((class_name, method_name))
+        if cache_spec is not None:
+            item_cls, key_args = cache_spec
+            wrapped = with_cache_sync(
+                item_cls=item_cls, key_args=key_args,
+                ttl_seconds=config.ecourts_cache_ttl_seconds,
+            )(wrapped)
+        # Static state fallback, the ABSOLUTE outermost layer for list_states.
+        if (class_name, method_name) in _STATE_FALLBACK_METHODS:
+            wrapped = with_static_state_fallback(wrapped)
         setattr(cls, method_name, wrapped)
